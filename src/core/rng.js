@@ -1,4 +1,4 @@
-// THE RIVAL — seeded RNG + shared move constants. Pure (runs under Node).
+// SHOW ME MY RIVAL — seeded RNG + shared move constants. Pure (runs under Node).
 (function (R) {
   'use strict';
 

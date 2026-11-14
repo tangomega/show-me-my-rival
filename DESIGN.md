@@ -1,4 +1,4 @@
-# THE RIVAL — Design Spec (v1)
+# SHOW ME MY RIVAL — Design Spec (v1)
 
 Developed by tangoSHELL · 2026. Phone-first, single-file HTML5. This file says *what* the game is; `INTERFACES.md` says how modules talk. Names below (`sealed`, `ctx`, `payoff`, anim/SFX names) follow that contract; anything the contract lacks is tagged **[+IF]** and collected in §18.
 
@@ -17,6 +17,7 @@ Developed by tangoSHELL · 2026. Phone-first, single-file HTML5. This file says 
    - `transform` is at most 10 frames. `rival2` reuses the Rival's poses with part swaps (shattered head, tendril cloak, 3 px hover) and a code-drawn afterimage.
    - The title scene is one large mask sprite plus a candle; the "smile widens" gag is optional.
 8. **Skip** is implemented as: a tap during resolution sets `timeScale` to 3 until the next input window.
+10. **The game's title is "Show Me My Rival"** (renamed from the working title "THE RIVAL"). Use "SHOW ME MY RIVAL" for the logo, the HTML `<title>`, the header comment and the README. In-fiction, the opponent is still called "the Rival". The internal `RIVAL` namespace, folder name and save key do not change.
 9. The credits roll contains only in-fiction lines, the player's lifetime stats and "Developed by tangoSHELL · 2026". No other names, roles or studios.
 
 ## 1. Pillars
@@ -463,7 +464,7 @@ Honest and lying stances are pixel-identical. Phase 2 alternates two tell poses 
 
 **Cathedral arena** (180×210, back to front): L0 vault gradient (2→3 dither bands), static. L1 far wall with broken rose window (40×40 at arena x70,y8) and a moonbeam shaft (27/28 dither) with 12 drifting dust motes. L2 four pillars (x 8, 46, 122, 160; w 12), two broken arches, two hanging chains swaying 1 px on a 2 s cycle. L3 rubble, toppled pews, candles at arena-relative (14,120) (40,128) (88,116) (96,118) (140,128) (166,120): 3×5 flame, 3 frames at random 120–180 ms, 9×9 checker-dither glow (21); `gutter` 0..1 shrinks flames to a 2-frame low state and dims glow. L4 flagstone floor, floor line at arena y=138, duel-3 puddle row mirrors fighter feet at 50% dither. L5 (`fg`, drawn over fighters) bottom vignette, one pew silhouette at the left edge (1), ash fall: 20 particles, 8–14 px/s, colours 7/8. Variants per §5.
 **Bonfire:** night cloister, fire burning inside a cracked, half-buried cathedral bell at (90,150): 6-frame fire loop at 100 ms, 16 rising embers, 40×24 glow. The Ashen sits left (2 frames at 600 ms, breathing); the Rival sits opposite on a toppled pillar, legs crossed, warming its hands, mask tilted at the player. Cards rise from the fire.
-**Title:** close-up of the porcelain mask lying in ash beside one candle; logo "THE RIVAL" in bone (10) with a blood (18) underline; every ~4 s a glint crosses an eye slit, and after 8 s idle the painted smile widens by 1 px. "TAP TO BEGIN" blinks at 600 ms; credit line in 7 at the bottom.
+**Title:** close-up of the porcelain mask lying in ash beside one candle; logo: small "SHOW ME MY" in ash (8) above a large "RIVAL" in bone (10) with a blood (18) underline; every ~4 s a glint crosses an eye slit, and after 8 s idle the painted smile widens by 1 px. "TAP TO BEGIN" blinks at 600 ms; credit line in 7 at the bottom.
 
 ### 13.5 UI
 

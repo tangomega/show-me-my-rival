@@ -1,4 +1,4 @@
-# THE RIVAL — progress
+# SHOW ME MY RIVAL — progress
 
 Developed by tangoSHELL · 2026
 
@@ -27,6 +27,8 @@ A new session can continue from this file plus `DESIGN.md` (what the game is) an
 - Review `DESIGN.md`, reconcile it with `INTERFACES.md`, commit Phase 1.
 
 ## Decisions log
+
+- The game is titled **Show Me My Rival** (renamed by the owner from the working title "THE RIVAL"). The opponent is still "the Rival" in-fiction; the `RIVAL` code namespace and save key are unchanged.
 
 - Source is split into `src/` plain scripts on one `globalThis.RIVAL` namespace; `tools/build.js` inlines them into `index.html`.
 - Logic modules (`core/rng.js`, `ai/`, `game/`) are DOM-free so the sim runs the real game code.

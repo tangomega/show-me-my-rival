@@ -1,4 +1,4 @@
-# THE RIVAL — module contract
+# SHOW ME MY RIVAL — module contract
 
 This is the binding contract between modules. `DESIGN.md` says *what* the game is; this file says *how modules talk*. If you need something that is not here, implement it inside your own file and report it; do not change another module's signature.
 
@@ -24,7 +24,7 @@ This is the binding contract between modules. `DESIGN.md` says *what* the game i
 
 ```
 core/rng.js  core/save.js
-art/palette.js  art/font.js  art/sprites.js  art/backgrounds.js  art/ui.js  art/fx.js
+art/palette.js  art/pix.js  art/font.js  art/sprites.js  art/icons.js  art/backgrounds.js  art/ui.js  art/fx.js
 audio/audio.js
 text/strings.js  text/taunts.js  text/dossier.js
 ai/brain.js
@@ -219,6 +219,29 @@ R.FX.create(max=256) -> fx
 ```
 Animation names (both fighters): `idle, tell_S, tell_G, tell_F, strike, guard, feint, hit, stagger, clash, death, taunt, taunt2, victory`; Rival only: `transform`; `'rival2'` has the same set for phase 2.
 
+### Art conventions the scenes rely on
+
+- **All fighter sprites are authored facing RIGHT.** The scene passes `opts.flip = true` for the Rival (it stands on the right, facing left). `x,y` is the feet-centre anchor; flipping mirrors around that x.
+- `R.Art.frameAt(anim, ms)` clamps to the last frame when `ms >= anim.total` (the scene does its own modulo for loops).
+- Tell anims (`tell_S/G/F`) are 5 frames: 3 wind-up frames then 2 hold frames; the scene loops the last two (380 ms each) for as long as the player thinks.
+- `R.Art.fighter(..., opts)`: `opts.white` draws the whole silhouette in palette 23 (hit flash); `opts.mask` is a mask id (`porcelain|mourner|jester|kintsugi|blank`), Rival only; unknown anim/mask falls back silently (never throws).
+- `R.Art.sprite(g, name, x, y)` draws at top-left x,y and **silently draws nothing for an unknown name**. Names used by scenes:
+  - move icons `icon_S, icon_G, icon_F` (10×10), `icon_S_big, icon_G_big, icon_F_big` (20×20), `mini_S, mini_G, mini_F` (6×6)
+  - statuses (8×8) `st_guardBroken, st_bleed, st_fortify, st_focus, st_sealed`
+  - active-boon icons (12×12) `act_glimpse, act_honesty, act_coin`
+  - archetype tag icons (12×12) `tag_RIP, tag_TEN, tag_BLD, tag_TRK, tag_GMB, tag_INF, tag_CHA, tag_EXE, tag_relic`
+  - rarity pips `rar_common, rar_uncommon, rar_rare` (up to 11×3)
+  - menu art `title_mask` (large, about 64×64), `logo` (two-line wordmark: small "SHOW ME MY" above a large "RIVAL", about 120×34), `bonfire_player`, `bonfire_rival` (seated figures, about 32×32), `lock` (8×8), `mask_porcelain, mask_mourner, mask_jester, mask_kintsugi, mask_blank` (12×14 previews)
+- `R.Art.bg(g, name, t, opts)` paints the whole 180×E.H buffer. For `'cathedral'`, `opts.floorY` is the y of the floor line (fighters' feet); the image is anchored there and extends up to y=0 and down at least 40 px. `opts.variant` = duel number 1..7, `opts.gutter` 0..1 dims the candles, `opts.phase2` switches to witchfire, `opts.arena` = `'cathedral'|'blood_moon'|'pale_dawn'`. For `'bonfire'` and `'title'`, `opts.floorY` is likewise the ground line.
+- `R.Art.sigil(g, x, y, state, move, side)`: x,y top-left of a 16×16 cell; `state:'open'` with `move` shows that move's icon, `'crack'` is animated by the artist from an internal clock or drawn as one cracked frame.
+- `R.UI.bar(..., palIndex, opts?)`: `opts.ticks` = max HP (draw a notch per HP), `opts.flip` drains toward the left edge instead of the right.
+- `R.UI.button(..., st)`: `st.icon` is a move letter (draws `icon_*_big` above the label when the button is tall enough) or a sprite name; `st.broken` overlays the cracked "not legal this turn" mark; `st.glow` pulses the frame; `st.accent` is a palette index for the move colour stripe.
+- `R.UI.bubble(g, x, y, w, lines, tailX, tailDir, opts?)`: height follows `lines.length` (1–3 lines of 9 px + padding); `opts.phase2` uses the inverted void/witchfire style.
+
+## Scenes
+
+Scene files register with `R.Scenes = R.Scenes || {}; R.Scenes.<name> = def;` and never call `E.scene` themselves; `main.js` registers every entry at boot. Scene defs may also implement `key(k)` (desktop testing), `pause()` and `resume()`.
+
 ## R.Audio — `src/audio/audio.js`
 
 ```
@@ -245,12 +268,23 @@ R.Text.ui -> { key: string }                     // all menu/UI strings
 ## R.Game — `src/main.js` (flow controller, owned by the lead)
 
 ```
-R.Game.brain ; R.Game.meta ; R.Game.run ; R.Game.rng
-R.Game.newRun(relicId|null)      // creates run, saves, goes to 'duel'
-R.Game.resume()                  // continues a saved run at its stage
+R.Game.brain ; R.Game.meta ; R.Game.run (null when no run is in progress)
+R.Game.rng                       // gameplay rng (Rival decisions, coin). Never use it for cosmetics.
+R.Game.crng                      // cosmetic rng: taunt picks, particles, menu flourishes
+R.Game.days                      // whole days since the previous visit (0 on the first)
 R.Game.hasRun() -> bool
-R.Game.duelOver(winner)          // called by the duel scene; routes to bonfire / phase 2 / victory / death
-R.Game.draft(boonId)             // called by the bonfire scene; goes to next duel
+R.Game.startFlow()               // title's main button: resume() if hasRun(), else 'relic' scene if any relic is unlocked, else newRun(null)
+R.Game.newRun(relicId|null)      // creates the run, brain.beginRun, saves, goes to 'duel'
+R.Game.resume()                  // continues a saved run at its stage ('duel' or 'bonfire')
+R.Game.duelOver(winner)          // called by the duel scene; routes to 'bonfire' / 'victory' / 'death'
+R.Game.draft(boonId)             // called by the bonfire scene; applies the pick, saves, goes to 'duel'
 R.Game.save()                    // serializes brain + meta + run into R.Save and commits
+R.Game.vars(extra?) -> object    // template variables for R.Text.taunt: runs, deaths, wins, days, streak, duel,
+                                 // bestDuel, hp, rivalHp, turns, score, lastWinMove, lastWinHp (+ extra merged in)
+R.Game.last                      // result of the run that just ended, for 'death' / 'victory' / 'credits':
+  { won:bool, duel:1..7, phase:1|2, rivalHp:int, turns:int, score:0..100, finishingMove:move|null, hp:int,
+    unlocks:[{ id, type, ref, name, how }], firstWin:bool, insights:stat[], boons:[id], rivalBoons:[id] }
+R.Game.resetAll()                // settings "erase everything": wipes save, brain, meta; goes to 'title'
 ```
 Scene names: `title, relic, duel, bonfire, dossier, death, victory, credits, settings, unlocks`.
+Routing: `death` and `victory` are entered with `R.Game.run === null` and read `R.Game.last`. `victory` goes to `credits` when `R.Game.last.firstWin` (and always sets `meta.seenCredits = true` there), otherwise to `title`. `dossier`, `settings` and `unlocks` take `args.from` (a scene name) and return there with `E.go(args.from)`; the bonfire keeps its own step in `R.Game.run.offer` / scene state so returning to it is safe.
