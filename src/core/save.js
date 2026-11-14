@@ -33,6 +33,11 @@
     }
     d.brain = isObj(raw.brain) ? raw.brain : null;
     d.meta = isObj(raw.meta) ? raw.meta : null;
+    // A meta from an older shape (no .memory / .counters / .unlocked) must not reach the scenes, which read
+    // meta.memory directly. R.Run owns the schema and fills in whatever is missing (it is loaded by init() time).
+    if (d.meta && R.Run && typeof R.Run.repairMeta === 'function') {
+      try { d.meta = R.Run.repairMeta(d.meta); } catch (e) { d.meta = null; }
+    }
     d.run = isObj(raw.run) ? raw.run : null;
     d.v = 1;
     return d;

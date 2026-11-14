@@ -165,6 +165,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     }
     d.brain = isObj(raw.brain) ? raw.brain : null;
     d.meta = isObj(raw.meta) ? raw.meta : null;
+    // A meta from an older shape (no .memory / .counters / .unlocked) must not reach the scenes, which read
+    // meta.memory directly. R.Run owns the schema and fills in whatever is missing (it is loaded by init() time).
+    if (d.meta && R.Run && typeof R.Run.repairMeta === 'function') {
+      try { d.meta = R.Run.repairMeta(d.meta); } catch (e) { d.meta = null; }
+    }
     d.run = isObj(raw.run) ? raw.run : null;
     d.v = 1;
     return d;
@@ -457,6 +462,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     '=': '//###//###',
     '#': '/.#.#./#####/.#.#./#####/.#.#.',
     '*': '/#.#/.#./#.#',
+    '~': '///.#.../#.#.#/...#.',
     // extras beyond the spec list
     '_': '//////####',
     '&': '.#../#.#./#.#./.#../#.#.#/#..#./.##.#',
@@ -2917,11 +2923,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     '..................dccccbbbbbbbbaaaaaaaaaaaaacaaaaacabb..........',
     '.................dccccbbbbbbbbaaaaaaaaaaaaaaacaaccaaab..........',
     '.................dcccbbbbbbbbbaaaaaaaaaaaaaaaadcaaaaaab.........',
-    '................dccccbbbbbbbbaaaaaaaaaaaaaaaaacaaaaaaab.........',
-    '................dcccbbbbbbbbbaaaaaaaaaaaaaaaacaaaaaaaaam........',
-    '...............dccccbbbbbbbbaaaaaaaaaaaaaaaacaaaaaaaaaam........',
-    '...............dcccbbbbbbbbaaaaaaaaaaaaaaaaacaaaaaaaaaam........',
-    '...............dcccbbbbbbbaaaaaaaaaaaaaaaaacaaaaaaaaaaaam.......',
+    '................dccccbbbbbbbbaaaaaaaaaaaaaaaaacaaaanaab.........',
+    '................dcccbbbbbbbbbaaaaaaaaaaaaaaaacaaaaaanaam........',
+    '...............dccccbbbbbbbbaaaaaaaaaaaaaaaacaaaaaaanaam........',
+    '...............dcccbbbbbbbbaaaaaaaaaaaaaaaaacaaaaaaanaam........',
+    '...............dcccbbbbbbbaaaaaaaaaaaaaaaaacaaaaaaanaaaam.......',
     '...............dccbbbbbbaaaaaaaaaaaaaaaaaaaccaaaaaaaaaaam.......',
     '..............dcccbbbbaaaaaaaaaaaaaaaaaaaacaacaaaaaaaaaam.......',
     '..............dcccbbcccccaaaaaaaaaaaaaaaaaaaadaaaaaaaaaam.......',
@@ -3329,134 +3335,1068 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- art/backgrounds.js ----
-// PLACEHOLDER — replaced by the pixel artist
-// Flat backdrops made of fillRects. Art is anchored to opts.floorY (default: R.Engine.lay.floorY).
+// SHOW ME MY RIVAL — backgrounds (DESIGN 13.4): the cathedral arena, the bonfire cloister, the title ash.
+//
+// How it is built:
+//   tiles    = hand-drawn palette-indexed pixel rows (window tracery, statue, rubble, pew, candles, flames, bell, fire)
+//   surfaces = walls / floor / pillars / vault assembled into an indexed buffer from deterministic (seeded) masonry
+//              and 2x2 ordered dither; every pixel is a palette index on the grid
+//   light    = candle pools are a palette remap of the stone under them (cold stone -> warm), cut out as sprites
+//   bake     = one static canvas per (scene, variant class, arena, phase 2), built lazily; per frame we draw that
+//              canvas plus a handful of small sprites (flames, glows, pools, chains) and 1-px motes
+// Art is anchored to opts.floorY (the floor / ground line). Nothing is allocated per frame.
+//
+// Pixel rows: '.' = transparent, '1'-'9' = palette 1-9, 'a'-'v' = palette 10-31 (see icons.js for the legend)
 (function (R) {
   'use strict';
 
-  var P = R.Pal.hex;
-  var CANDLES = [14, 120, 40, 128, 88, 116, 96, 118, 140, 128, 166, 120];   // arena-relative x, y pairs
-  var PILLARS = [8, 46, 122, 160];
+  var Pix = R.Pix, P = R.Pal.hex, W = 180;
 
-  function f(g, x, y, w, h, col) { g.fillStyle = P[col]; g.fillRect(x, y, w, h); }
+  // ---- deterministic helpers -----------------------------------------------------------------
+  function h32(x, y, s) {
+    var n = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(s | 0, 1442695041)) | 0;
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return (n ^ (n >>> 16)) >>> 0;
+  }
+  function rnd(x, y, s) { return h32(x, y, s) / 4294967296; }
+  var B4 = [0, 2, 3, 1];
+  function dth(x, y, lv) { return B4[((y & 1) << 1) | (x & 1)] < lv; }        // true for lv of every 4 pixels (2x2 ordered)
+  function remapAll(img, map) { for (var i = 0; i < img.d.length; i++) { var c = img.d[i]; if (c && map[c] !== undefined) img.d[i] = map[c]; } return img; }
+  function bake(img) { return typeof document === 'undefined' ? null : Pix.toCanvas(img); }
   function dims() {
     var E = R.Engine;
-    return E && E.lay ? E : { W: 180, H: 320, lay: { arenaY: 34, arenaH: 170, floorY: 172 } };
+    return E && E.H ? E : DEF;
   }
-  // 3x5 flame with a cheap per-candle flicker; gutter 0..1 shrinks it.
-  function flame(g, x, y, t, i, gutter, col) {
-    var fr = ((t * 7 + i * 2.3) | 0) % 3, h = gutter > 0.5 ? 2 : 5 - (fr === 2 ? 1 : 0);
-    if (gutter <= 0.5) { g.fillStyle = P[col]; g.globalAlpha = 0.25; g.fillRect(x - 3, y - 7, 9, 9); g.globalAlpha = 1; }
-    f(g, x, y - h, 3, h, col); f(g, x + 1, y - h + 1, 1, Math.max(1, h - 2), col === 31 ? 23 : 22);
-    if (fr === 1 && gutter <= 0.5) f(g, x + 1, y - h - 1, 1, 1, col);
-    f(g, x, y, 3, 4, 11); f(g, x - 1, y + 4, 5, 1, 24);
+  var DEF = { W: 180, H: 320, time: 0, real: 0 };
+
+  // ============================================================================================
+  // Hand-drawn tiles
+  // ============================================================================================
+  var WINDOW = [
+    '...............4444444444...............',
+    '............4444444444444444............',
+    '..........44442222222222224444..........',
+    '........444422qqqqq22qqrrr224444........',
+    '.......44422q2qqqqq22qqrrrrr22444.......',
+    '......4442qqq22qqqq22qqrrrrrrr2444......',
+    '.....4422qqqqq2qqqq22qqrrrrsssr2244.....',
+    '....4422qqqqqq2qqq2222rrrrsssssr2244....',
+    '...4442q2qqqqqq2222222rrrssssss2r2444...',
+    '...442qqq2qqq22qqqq22qrrrssssssssr244...',
+    '..442qqqqq2q22qqqqq22qrrrssssssssrr244..',
+    '..442qqqqqq2qqqqqqq22qrrrssssssssrr244..',
+    '.442qqqqqq2q2qqqqqq22rrrrrssssssrrrr244.',
+    '.44222qqq22qq2qqqqq22rrrrrrssssrrrrr244.',
+    '.42qq222q2qqqq2qq222222rrrrrrrrrrrrrr24.',
+    '442qqqqq2qqqqqq22qq22qq22rrrrrrrrrrrr244',
+    '442qqqqq2qqqqqq22qr22rq22rrrrrrrrrrrr244',
+    '442qqqqq2qqqqq2qq2r22r2qq2qrrrrrrrrrr244',
+    '442qqqq22qqqqq2qrr2222rrq2qrrrrrrqqqq244',
+    '4422222222222222222222222222222222222244',
+    '4422222222222222222222222222222222222244',
+    '442qqqq22qqqqq2qrr2222rrq2qqqqq22qqqq244',
+    '442qqqqq2qqqqq2qq2r22r2qq2qqqqq2qqqqq244',
+    '442qqqqq2qqqqqq22qr22rq22qqqqqq2qqqqq244',
+    '442qqqqq2qqqqqq22qq22qq22qqqqqq2qqqqq244',
+    '.42qq222q2qqqq2rr222222qq2qqqq2r222qq24.',
+    '.44222qqq22qq2rrrrr22qqqqq2qq22rrr22244.',
+    '.442qqqqqq2q2rrrrrr22qqqqqq2q2rrrrrr244.',
+    '..442qqqqqq2rrrrrrr22qqqqqqq2rrrrrr244..',
+    '..442qqqqq2q22rrrrr22qqqqq22r2rrrrr244..',
+    '...442qqq2qqq22rrrr22qqqq22rrr2rrr244...',
+    '...4442q2qqqqqq2222222222rrrrrr2r2444...',
+    '....4422qqqqqq2qqq2222qqq2rrrrrr2244....',
+    '.....4422qqqqq2qqqq22qqqq2rrrrr2244.....',
+    '......4442qqq22qqqq22qqqq22rrr2444......',
+    '.......44422q2qqqqq22qqqqq2r22444.......',
+    '........444422qqqqq22qqqqq224444........',
+    '..........44442222222222224444..........',
+    '............4444444444444444............',
+    '...............4444444444...............'
+  ];
+  var BLOCK_A = [
+    '.66666665.',
+    '6555555543',
+    '6555555543',
+    '6555455543',
+    '6555555443',
+    '.554444433',
+    '..3333333.'
+  ];
+  var BLOCK_B = [
+    '.666665',
+    '6555554',
+    '6555543',
+    '.554443',
+    '..3333.'
+  ];
+  var BLOCK_C = [
+    '.665.',
+    '65543',
+    '.443.'
+  ];
+  var PEW = [                                    // a broken pew: one carved end still standing, the bench fallen from it
+    '..d....................',
+    '.ded...................',
+    '.eed...................',
+    '.eeed..................',
+    '.efeedd................',
+    '.efeeeeddd.............',
+    '.efe.feeeeddd..........',
+    '.efe.f.feeeeeddd.......',
+    '.efe.f.f..feeeeeddd....',
+    '.efe.f.f..f..feeeeedd..',
+    '.efe.f.f..f..f.feeeeedd',
+    'eefe.f.f..f..f..f.feeee',
+    'efff.f.f..f..f..f...fff'
+  ];
+  // candle flames, 5x7, bottom row sits on the wick
+  var FLAMES = [
+    ['..l..', '..l..', '.lml.', '.lnl.', '.lnl.', '.kmk.', '..k..'],
+    ['.....', '..l..', '.lml.', '.lnl.', '.lnl.', '.kmk.', '..k..'],
+    ['...l.', '..l..', '.lml.', '.lnl.', '.lmk.', '.kmk.', '..k..'],
+    ['.....', '.....', '.....', '..l..', '.lml.', '.kmk.', '..k..'],         // guttering
+    ['.....', '.....', '.....', '.....', '..l..', '..m..', '..k..']          // nearly out
+  ];
+  var GLOW = [                                   // checker-dither halo, centred on the flame (9x9)
+    '....o....',
+    '...o.o...',
+    '..o.l.o..',
+    '.o.l.l.o.',
+    'o.l...l.o',
+    '.o.l.l.o.',
+    '..o.l.o..',
+    '...o.o...',
+    '....o....'
+  ];
+  var GLOW_LOW = [
+    '.........',
+    '.........',
+    '....o....',
+    '...o.o...',
+    '..o...o..',
+    '...o.o...',
+    '....o....',
+    '.........',
+    '.........'
+  ];
+  var CENSER = [                                 // an unlit iron lamp on the end of a chain
+    '...6...',
+    '..5.6..',
+    '.5...6.',
+    '.55o66.',
+    '5544556',
+    '5444456',
+    '.54445.',
+    '..545..',
+    '...4...'
+  ];
+  var STATUE_SPANS = [                            // [left, right] per row, 26 wide: a headless saint on a plinth
+    [12, 13], [11, 14], [11, 14], [10, 15], [6, 19], [5, 20], [4, 21], [4, 21], [3, 21], [3, 22], [3, 22], [3, 22], [3, 21], [3, 19], [3, 18],
+    [4, 18], [4, 18], [4, 18], [4, 18], [4, 18], [4, 18], [4, 18], [4, 18], [4, 18], [4, 18],
+    [4, 19], [4, 19], [4, 19], [4, 19], [4, 19], [4, 19], [4, 19], [4, 19], [4, 19], [4, 19],
+    [3, 20], [3, 20], [3, 20], [3, 20], [3, 20], [3, 20], [3, 20], [3, 20],
+    [2, 21], [2, 21], [2, 21], [2, 21], [2, 21], [2, 22], [1, 23],
+    [0, 25], [0, 25], [1, 24], [2, 23], [2, 23], [2, 23], [2, 23], [2, 23], [2, 23], [1, 24], [0, 25], [0, 25]
+  ];
+  var FG_PEW_W = [                                // width per row of the near pew-end silhouette (left edge), 46 rows
+    0, 5, 7, 8, 8, 7, 6, 8, 10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    17, 18, 18, 17, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 13, 13, 13, 13
+  ];
+  var FG_RUBBLE_W = [0, 0, 3, 5, 6, 9, 10, 12, 13, 15, 15, 16];     // near rubble, right edge (rows up from the bottom)
+
+  // ---- bonfire tiles --------------------------------------------------------------------------
+  var BELL = [                                   // the cathedral bell, sunk to its waist, its side broken open (34 x 24)
+    '...............eeee...............',
+    '..............ee..ee..............',
+    '..............e....f..............',
+    '.............feeeeeef.............',
+    '...........ffeeeeeeeeff...........',
+    '.........ffeeeeeeeeeeeeff.........',
+    '........feeeeeeeoeeeeeeeef........',
+    '.......feeeeeeeoo1oeeeeeeef.......',
+    '.......feeeeeeoo11ooeeeeeef.......',
+    '......feeeeeeoop111ooeeeeeef......',
+    '......feeeeeoop1111pooeeeeef......',
+    '......feeeeeoop11111pooeeeef......',
+    '.....feeeeeoop1111111poeeeeef.....',
+    '.....feeeeoopl1111111pooeeeef.....',
+    '.....feeeeoopl11111111pooeeef.....',
+    '....feeeeoopl1g1111g111pooeeef....',
+    '....feeeeoopl1gg111gg11lpoeeef....',
+    '...feeeeeopl1ggg11gggg11lpoeeef...',
+    '...feeeeoopl1gggggggggg1lpooeef...',
+    '..feeeeeoplggggkggggkggglpooeeef..',
+    '..feeeeooplgggkkkggkkkkgglpooeef..',
+    '.feeeeeooplggkkkkkkkkkkkgklpoeeef.',
+    '.feeeeooplkgkkkkkkkkkkkkkgklpoeef.',
+    'feeeeeooplkkkkkkkkkkkkkkkkklpooeef'
+  ];
+  var FIRE = [
+    [
+      '........k.......',
+      '........k.......',
+      '.......kk.......',
+      '.......klk......',
+      '......kklk......',
+      '......kllk..k...',
+      '...k..kllkk.k...',
+      '...k.kklllk.....',
+      '..kk.klllmlk....',
+      '..kkkkllmmlk.k..',
+      '..klkklmmmllkk..',
+      '.kklllmmmmmlkk..',
+      '.kllmmmnnmmllk..',
+      '.klmmmnnnnmmlkk.',
+      'kklmmnnnnnnmllk.',
+      'kllmmnnnnnnmmlk.'
+    ],
+    [
+      '................',
+      '......k.........',
+      '......kk....k...',
+      '.......kk...k...',
+      '.......klk......',
+      '..k...kkllk.....',
+      '..k...klllk.....',
+      '..kk.kkllmlk.k..',
+      '...kkkllmmlk.kk.',
+      '..kkkllmmmlkkk..',
+      '..kllllmmmmllk..',
+      '.kkllmmmnmmmlk..',
+      '.kllmmnnnnmmlkk.',
+      'kklmmmnnnnnmmlk.',
+      'kllmmnnnnnnmmlk.',
+      'kllmmnnnnnnmllk.'
+    ],
+    [
+      '................',
+      '................',
+      '..........k.....',
+      '.........kk.....',
+      '....k...kkk.....',
+      '....k...klk..k..',
+      '....kk.kkllk.k..',
+      '...kkk.kllmk....',
+      '...klkkklmmlk...',
+      '..kkllkllmmlkk..',
+      '..kllllmmmmllk..',
+      '.kklmmmmnmmmlk..',
+      '.klmmmnnnnmmllk.',
+      'kklmmnnnnnnmmlk.',
+      'kllmmnnnnnnmmlk.',
+      'kklmmnnnnnnmllk.'
+    ]
+  ];
+  var FALLEN = [                                 // a toppled column: the Rival's seat (44 x 11)
+    '..666666666666666666666666666666666666666...',
+    '.65555555555555555555555555555555555555556..',
+    '6554444444444444444444444444444444444444555.',
+    '6545555555555555555555555555555555555555445.',
+    '6545555555555555555555555555555555555555545.',
+    '6544444444444444444444444444444444444444545.',
+    '6545555555555555555555555555555555555555545.',
+    '6544444444444444444444444444444444444444445.',
+    '.544333333333333333333333333333333333333344.',
+    '..43333333333333333333333333333333333333334.',
+    '...3333333333333333333333333333333333333....'
+  ];
+
+  // ============================================================================================
+  // Cathedral
+  // ============================================================================================
+  var TOP = 288, BOT = 72;                       // rows baked above / below the floor line
+  var BAY = [[12, 63], [116, 167]];              // the two dark bays that frame the fighters
+  var SPRING = -94, ARCH_R = 32.5;               // arch springing line (rows above the floor) and radius
+  var WIN_X = 70, WIN_Y = -131;
+  // candles: [x, flame-bottom row relative to the floor, wax height]
+  var CANDLES = [[100, -6, 5], [17, -13, 5], [161, -13, 5], [105, -4, 3], [25, -4, 3], [152, -9, 3]];
+  var ALTAR = [[58, -4, 3], [64, -6, 5], [70, -4, 3], [76, -5, 4], [82, -4, 3], [88, -6, 5], [93, -4, 3], [98, -5, 4], [104, -4, 3],
+               [110, -6, 5], [116, -4, 3], [122, -5, 4], [17, -13, 5], [161, -13, 5]];
+  var LIT_COUNT = [0, 6, 6, 5, 4, 3, 4, 14];     // by duel number
+  var WARM = {                                   // stone under candlelight: [dim, near the flame]
+    1: [1, 15], 2: [15, 14], 3: [15, 14], 4: [14, 13], 5: [14, 13], 6: [13, 12], 7: [13, 12], 8: [12, 11],
+    13: [12, 12], 14: [13, 12], 15: [14, 13], 26: [14, 14]
+  };
+  var WITCH = {                                  // ...and under witchfire
+    1: [1, 26], 2: [26, 26], 3: [26, 27], 4: [26, 27], 5: [27, 27], 6: [27, 28], 13: [27, 27], 14: [26, 27], 15: [26, 26], 16: [26, 26]
+  };
+  var MOON = { 2: 26, 3: 26, 4: 26, 5: 27, 6: 27, 7: 28, 13: 7, 14: 5, 15: 4 };       // stone / floor in the moonbeam
+  var BLOOD = { 26: 16, 27: 17, 28: 19 };
+  var BLOOD_FLOOR = { 13: 17, 14: 16, 15: 16 };                               // where a blood moon pools on the flagstones
+  var DAWN = { 2: 4, 3: 5, 4: 6, 5: 7, 6: 8, 26: 7, 27: 8, 28: 9, 15: 14, 14: 13 };
+  var SINK = { 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 13: 14, 14: 15, 15: 1 };             // phase 2: the walls sink toward void
+
+  function beamL(fy) { return 77 - (fy + 92) * 0.348; }                   // the moonbeam: from under the window, down and to the left
+  function beamR(fy) { return 103 - (fy + 92) * 0.25; }
+  var HOLE = [-121, -123, -126, -125, -128, -131, -130, -133, -132, -135, -133, -134, -130, -131, -128, -126, -127, -123, -121, -119];   // ragged top of the gap over the right arch (x = 139..)
+
+  // Which side of the pointed arch is (x, fy) on?  0 = outside, 1 = the arch band, 2 = inside the bay.
+  function archAt(b, x, fy) {
+    var x0 = BAY[b][0], x1 = BAY[b][1], cx = (x0 + x1) / 2, hw = (x1 - x0 + 1) / 2, ox, r;
+    if (x < x0 - 6 || x > x1 + 6) return 0;
+    if (fy > SPRING) return (x >= x0 && x <= x1) ? 2 : 0;
+    ox = x + 0.5 < cx ? cx + (ARCH_R - hw) : cx - (ARCH_R - hw);            // centre of this half's arc
+    r = Math.sqrt((x + 0.5 - ox) * (x + 0.5 - ox) + (fy - SPRING) * (fy - SPRING));
+    if (r < ARCH_R) return 2;
+    return r < ARCH_R + 5 ? 1 : 0;
+  }
+  function archAngle(b, x, fy) {
+    var x0 = BAY[b][0], x1 = BAY[b][1], cx = (x0 + x1) / 2, hw = (x1 - x0 + 1) / 2;
+    var ox = x + 0.5 < cx ? cx + (ARCH_R - hw) : cx - (ARCH_R - hw);
+    return Math.atan2(SPRING - fy, Math.abs(x + 0.5 - ox));                 // 0 at the springer, ~1.2 at the crown
+  }
+  // The breaks: the left arch has lost a few stones low on its left haunch, the right arch its whole crown.
+  function broken(b, x, fy) {
+    var a = archAngle(b, x, fy), cx = (BAY[b][0] + BAY[b][1]) / 2;
+    if (b === 0) return x < cx && a > 0.34 && a < 0.62;
+    return x > cx - 6 && a > 0.80;
   }
 
-  // name: 'cathedral' | 'bonfire' | 'title'. t = seconds. Paints the whole buffer.
-  // opts: { floorY, variant:1..7, gutter:0..1, phase2:bool, arena:'cathedral'|'blood_moon'|'pale_dawn' }
-  function bg(g, name, t, opts) {
-    var E = dims(), W = E.W, H = E.H, L = E.lay, i, oy, fl, col, n, gut = opts && opts.gutter ? opts.gutter : 0, p2 = !!(opts && opts.phase2);
-    var floorY = opts && opts.floorY > 0 ? opts.floorY : 0, arena = opts && opts.arena, moon = arena === 'blood_moon' ? 17 : arena === 'pale_dawn' ? 12 : 27;
-    f(g, 0, 0, W, H, 1);
-    if (name === 'bonfire') {
-      fl = floorY || L.floorY;
-      f(g, 0, 0, W, fl - 60, 2); f(g, 0, fl - 60, W, 60, 3); f(g, 0, fl, W, H - fl, 15);
-      for (i = 0; i < 5; i++) f(g, 6 + i * 40, fl - 70, 10, 70, 4);                 // cloister columns
-      f(g, 70, fl - 16, 40, 16, 5); f(g, 74, fl - 22, 32, 6, 5); f(g, 76, fl - 12, 28, 12, 1);   // the bell
-      g.fillStyle = P[21]; g.globalAlpha = 0.18; g.fillRect(70, fl - 34, 40, 24); g.globalAlpha = 1;
-      i = ((t * 10) | 0) % 6;
-      f(g, 82, fl - 8 - (i % 3), 16, 8 + (i % 3), 20); f(g, 85, fl - 12 - (i % 2) * 2, 10, 10, 21); f(g, 88, fl - 9 - (i % 3), 4, 7, 22);
-      return;
+  function buildCathedral(vc, arena, p2) {
+    var H = TOP + BOT, img = Pix.make(W, H), x, y, fy, c, i, b, a, k, n, t;
+    var altar = vc === 7;
+
+    // --- L0/L1: vault and far wall, coursed masonry at very low contrast
+    for (y = 0; y < H; y++) {
+      fy = y - TOP;
+      for (x = 0; x < W; x++) {
+        if (fy >= -150) c = 3;
+        else if (fy >= -153) c = fy === -151 ? 5 : fy === -152 ? 4 : 2;        // a string course, then the clerestory in shadow
+        else if (fy >= -206) c = 2;
+        else if (fy >= -210) c = dth(x, y, 2) ? 2 : 1;
+        else c = 1;
+        img.d[y * W + x] = c;
+      }
     }
-    if (name === 'title') {
-      fl = floorY || Math.round(H * 0.62);
-      f(g, 0, 0, W, fl, 2); f(g, 0, fl, W, H - fl, 3); f(g, 0, fl, W, 1, 5);
-      for (i = 0; i < 24; i++) f(g, (i * 53) % W, fl + 3 + ((i * 17) % Math.max(1, H - fl - 6)), 3 + (i % 3), 1, i & 1 ? 5 : 7);   // ash
-      flame(g, 132, fl - 2, t, 0, 0, 21);
-      return;
+    for (y = TOP - 150; y < TOP; y++) {                                      // joints: most are worn away
+      fy = y - TOP; k = Math.floor((fy + 160) / 8);
+      for (x = 0; x < W; x++) {
+        n = Math.floor((x + (k & 1) * 8) / 16);
+        if ((fy + 160) % 8 === 0 && rnd(n, k, 1) < 0.42) img.d[y * W + x] = 2;
+        else if ((x + (k & 1) * 8) % 16 === 0 && rnd(n, k, 2) < 0.30) img.d[y * W + x] = 2;
+      }
     }
-    // cathedral
-    oy = (floorY || L.floorY) - 138;                       // arena-relative y -> screen y
-    col = p2 ? 31 : 21;
-    f(g, 0, 0, W, oy + 20, 2); f(g, 0, oy + 20, W, 118, 3);
-    f(g, 70, oy + 8, 40, 40, arena === 'blood_moon' ? 16 : 26); f(g, 74, oy + 12, 32, 32, moon); f(g, 89, oy + 8, 2, 40, 3); f(g, 70, oy + 27, 40, 2, 3);   // rose window
-    g.fillStyle = P[arena === 'blood_moon' ? 18 : arena === 'pale_dawn' ? 22 : 28]; g.globalAlpha = 0.10; g.fillRect(78, oy + 48, 30, 90); g.globalAlpha = 1;                            // moonbeam
-    for (i = 0; i < 4; i++) { f(g, PILLARS[i], 0, 12, oy + 138, 5); f(g, PILLARS[i], 0, 3, oy + 138, 6); f(g, PILLARS[i] - 2, oy + 132, 16, 6, 4); }
-    f(g, 0, oy + 138, W, H - oy - 138, 13);                // flagstones
-    f(g, 0, oy + 138, W, 1, 12);
-    for (i = 0; i < 6; i++) f(g, i * 34 - 6, oy + 146 + (i % 2) * 9, 22, 1, 14);
-    f(g, 0, oy + 162, W, H, 15);
-    n = opts && opts.variant > 2 ? Math.max(3, 8 - opts.variant) : 6;   // later duels burn fewer candles
-    for (i = 0; i < n; i++) flame(g, CANDLES[i * 2], oy + CANDLES[i * 2 + 1], t, i, gut, col);
+    // vault ribs: thin stepped lines rising from the piers and meeting overhead
+    function rib(xa, fya, xb, fyb) {
+      var steps = Math.abs(fyb - fya), s, rx, ry, cur;
+      for (s = 0; s <= steps; s++) {
+        rx = Math.round(xa + (xb - xa) * (s / steps) * (s / steps)); ry = TOP + fya + Math.round((fyb - fya) * s / steps);
+        cur = Pix.get(img, rx, ry);
+        if (cur) { Pix.set(img, rx, ry, cur >= 3 ? 4 : cur === 2 ? 3 : 2); Pix.set(img, rx + 1, ry, cur >= 3 ? 4 : cur === 2 ? 3 : 2); }
+      }
+    }
+    rib(67, -150, 89, -250); rib(111, -150, 90, -250); rib(67, -150, 30, -240); rib(111, -150, 150, -240);
+    rib(5, -150, 30, -240); rib(173, -150, 150, -240);
+
+    // --- the two bays: darker recesses under pointed arches (calm and dark behind each fighter)
+    for (b = 0; b < 2; b++) {
+      for (y = TOP - 140; y < TOP; y++) {
+        fy = y - TOP;
+        for (x = BAY[b][0] - 6; x <= BAY[b][1] + 6; x++) {
+          a = archAt(b, x, fy);
+          if (a === 2) {
+            c = 2;
+            k = Math.floor((fy + 160) / 8); n = Math.floor((x + (k & 1) * 8) / 16);
+            if ((fy + 160) % 8 === 0 && rnd(n, k, 5) < 0.16) c = 1;          // a few joints, barely there
+            img.d[y * W + x] = c;
+          } else if (a === 1) {
+            if (broken(b, x, fy)) { img.d[y * W + x] = 2; continue; }
+            c = 4;
+            if (archAt(b, x, fy + 1) === 2 || archAt(b, x + (x < (BAY[b][0] + BAY[b][1]) / 2 ? 1 : -1), fy) === 2) c = 5;      // lit lip
+            t = Math.floor(archAngle(b, x, fy) * 5.2);
+            if (t !== Math.floor(archAngle(b, x + 1, fy) * 5.2) || t !== Math.floor(archAngle(b, x, fy + 1) * 5.2)) c = 3;   // voussoir joints
+            img.d[y * W + x] = c;
+          }
+        }
+      }
+    }
+    // the fallen crown leaves a ragged hole in the wall above the right arch
+    for (i = 0; i < HOLE.length; i++) {
+      x = 139 + i;
+      for (fy = HOLE[i]; fy < -100; fy++) {
+        if (archAt(1, x, fy) === 2) break;
+        img.d[(TOP + fy) * W + x] = fy === HOLE[i] ? 1 : 2;                   // a void lip under the broken edge
+      }
+    }
+
+    // --- rose window and its light
+    Pix.blit(img, Pix.parse(WINDOW), WIN_X, TOP + WIN_Y);
+
+    // --- L2: wall piers flanking the window (far, low contrast)
+    for (i = 0; i < 2; i++) {
+      var px0 = i ? 108 : 64, inner = i ? px0 : px0 + 7, outer = i ? px0 + 7 : px0;
+      for (y = TOP - 150; y < TOP; y++) {
+        fy = y - TOP;
+        for (x = px0; x < px0 + 8; x++) img.d[y * W + x] = x === inner ? (fy < -60 ? 26 : 5) : x === outer ? 3 : 4;
+        if ((fy + 150) % 30 === 29) for (x = px0 + 1; x < px0 + 7; x++) img.d[y * W + x] = 3;
+      }
+      Pix.fill(img, px0 - 1, TOP + SPRING - 2, 10, 2, 5); Pix.fill(img, px0 - 1, TOP + SPRING, 10, 3, 4); Pix.fill(img, px0, TOP + SPRING + 3, 8, 1, 3);
+      Pix.fill(img, px0 - 1, TOP - 5, 10, 5, 4); Pix.fill(img, px0 - 1, TOP - 6, 10, 1, 5);
+    }
+    // the shaft of moonlight hangs in the air in front of the wall: checker in the core, 25% at the edges and low down
+    for (y = TOP - 91; y < TOP; y++) {
+      fy = y - TOP;
+      for (x = 36; x < 110; x++) {
+        a = Math.min(x - beamL(fy), beamR(fy) - x);
+        if (a < 0) continue;
+        c = img.d[y * W + x];
+        if (MOON[c] === undefined || c > 6) continue;
+        if (dth(x, y, a < 3 || fy > -40 ? 1 : 2) && !(a < 3 && fy > -40)) img.d[y * W + x] = MOON[c];
+      }
+    }
+
+    // --- the altar (duel 7): a broken saint between the piers, rim-lit by the moon
+    if (altar) {
+      for (i = 0; i < STATUE_SPANS.length; i++) {
+        y = TOP - STATUE_SPANS.length + i;
+        for (x = STATUE_SPANS[i][0]; x <= STATUE_SPANS[i][1]; x++) {
+          c = x >= STATUE_SPANS[i][1] ? 5 : x <= STATUE_SPANS[i][0] + 1 ? 1 : 2;
+          if (i >= 50) c = x >= STATUE_SPANS[i][1] - 1 ? 5 : (i === 50 || i === 59) ? 5 : 4;         // plinth
+          else if (i > 14 && (x === 9 || x === 14) && i < 49) c = 1;                                  // robe folds
+          else if (i > 5 && i < 49 && x === 12 && i > 20) c = 4;                                      // the sword it leans on
+          img.d[y * W + 77 + x] = c;
+        }
+      }
+      Pix.fill(img, 77 + 10, TOP - STATUE_SPANS.length + 20, 5, 1, 4);       // crossguard
+    }
+
+    // --- floor: flagstones, darker with depth; the first row is the floor line
+    for (y = TOP; y < H; y++) {
+      fy = y - TOP;
+      k = fy < 1 ? -1 : Math.floor((fy - 1) / 7);                            // course
+      for (x = 0; x < W; x++) {
+        if (fy === 0) c = rnd(x >> 2, 0, 11) < 0.3 ? 14 : 13;
+        else {
+          t = (fy - 1) % 7; n = Math.floor((x + k * 11 + (k & 1) * 9) / 22);
+          a = (x + k * 11 + (k & 1) * 9) % 22;
+          if (k === 0) c = t === 6 ? 15 : a === 0 ? 15 : t === 0 ? (rnd(n, k, 12) < 0.55 ? 13 : 14) : 14;
+          else if (k === 1) c = t === 6 ? 1 : a === 0 ? 1 : t === 0 ? 14 : 15;
+          else if (k === 2) c = t === 6 || a === 0 ? 1 : t === 0 ? 15 : 2;
+          else if (k === 3) c = t === 0 ? 2 : 1;
+          else c = 1;
+          if (k === 0 && rnd(n, k, 13) < 0.25 && t > 0 && t < 6 && a > 0) c = 15;                    // a darker slab
+        }
+        img.d[y * W + x] = c;
+      }
+    }
+    // moonlight pooled on the floor where the shaft lands
+    for (y = TOP; y < TOP + 16; y++) {
+      fy = y - TOP;
+      for (x = 30; x < 110; x++) {
+        a = Math.min(x - (beamL(0) - fy * 0.9), (beamR(0) - fy * 0.5) - x);
+        if (a < 0) continue;
+        c = img.d[y * W + x];
+        t = arena === 1 || vc === 6 ? BLOOD_FLOOR[c] : MOON[c];
+        if (t === undefined) continue;
+        if ((a >= 2 && fy < 9) || dth(x, y, fy < 13 ? 2 : 1)) img.d[y * W + x] = t;
+      }
+    }
+
+    // --- L3: rubble, the toppled pew, cold candle stubs
+    var blockA = Pix.parse(BLOCK_A), blockB = Pix.parse(BLOCK_B), blockC = Pix.parse(BLOCK_C);
+    Pix.blit(img, blockA, 13, TOP - 7); Pix.blit(img, blockC, 23, TOP - 3);
+    Pix.blit(img, blockA, 156, TOP - 7, true); Pix.blit(img, blockB, 149, TOP - 5); Pix.blit(img, blockC, 144, TOP - 3, true);
+    Pix.blit(img, blockC, 160, TOP - 10);
+    if (!altar) Pix.blit(img, Pix.parse(PEW), 73, TOP - 16);
+
+    // --- near pillars at the screen edges (most contrast in the scene, still stone-dark)
+    for (i = 0; i < 2; i++) {
+      for (y = 0; y < TOP; y++) {
+        fy = y - TOP;
+        for (k = 0; k < 12; k++) {
+          x = i ? W - 1 - k : k;                                            // k = 0 at the screen edge, 11 toward the nave
+          c = k >= 10 ? 6 : k < 3 ? 4 : (k === 5 || k === 8) ? 4 : 5;
+          if (fy < -100) c = k >= 10 ? 5 : k < 4 ? 3 : 4;                    // above the capital it recedes
+          if (fy < -165) c = k >= 10 ? 4 : 3;
+          if (fy < -215) c = k >= 10 ? 3 : 2;
+          if (fy >= -100 && (fy + 100) % 26 === 25) c = k >= 10 ? 5 : 4;     // drum joints
+          img.d[y * W + x] = c;
+        }
+      }
+      // capital and base
+      for (k = 0; k < 15; k++) {
+        x = i ? W - 1 - k : k;
+        for (fy = -102; fy < -90; fy++) {
+          c = fy === -102 ? 6 : fy === -101 ? 7 : fy < -98 ? 6 : fy < -93 ? (k < (fy > -96 ? 13 : 14) ? 5 : 0) : (k < 13 ? 4 : 0);   // abacus, echinus, necking
+          if (c) img.d[(TOP + fy) * W + x] = c;
+        }
+        for (fy = -9; fy < 0; fy++) {
+          c = fy === -9 ? (k < 13 ? 6 : 0) : fy < -6 ? (k < 13 ? 5 : 0) : fy === -6 ? (k < 15 ? 6 : 0) : (k < 15 ? (k > 12 ? 6 : 5) : 0);
+          if (fy === -1 && c) c = 4;
+          if (c) img.d[(TOP + fy) * W + x] = c;
+        }
+      }
+    }
+
+    // --- static chains (the swaying ends are sprites)
+    for (i = 0; i < 2; i++) {
+      x = i ? 111 : 67;
+      for (y = 0; y < TOP - 104; y++) chainPx(img, x, y, y);
+    }
+
+    // --- tone: arena, blood moon, phase 2
+    tone(img, vc, arena, p2);
+    return img;
   }
 
-  // Foreground layer drawn over the fighters.
-  function fg(g, name, t, opts) {
-    var E = dims(), W = E.W, L = E.lay, i, y, x, bottom, top, span;
-    if (name !== 'cathedral') return;
-    bottom = (opts && opts.floorY > 0 ? opts.floorY : L.floorY) + 32; top = L.arenaY; span = Math.max(40, bottom - top);
-    f(g, 0, bottom - 34, 9, 34, 1); f(g, 9, bottom - 22, 7, 22, 1);          // pew silhouette, left edge
+  // One pixel row of chain at (x, y): links alternate face-on (3 wide) and edge-on (1 wide).
+  function chainPx(img, x, y, i) {
+    var t = i % 6;
+    if (t === 0 || t === 3) { Pix.set(img, x, y, 5); }
+    else if (t < 3) { Pix.set(img, x - 1, y, 4); Pix.set(img, x + 1, y, 5); }
+    else Pix.set(img, x, y, 4);
+  }
+  function tone(img, vc, arena, p2) {
+    if (arena === 2) remapAll(img, DAWN);
+    if (arena === 1 || vc === 6) remapAll(img, BLOOD);
+    if (vc >= 3 && vc <= 5 && arena !== 2) {                                 // the later duels are colder: the pale blocks go out
+      for (var i = 0; i < img.d.length; i++) if (img.d[i] === 6 && ((i % W) > 14 && (i % W) < W - 15)) img.d[i] = 5;
+    }
+    if (p2) remapAll(img, SINK);
+    return img;
+  }
+
+  // Candle bodies (wax + brass foot) go on after toning so they keep their colour.
+  function drawCandles(img, list, nLit) {
+    var i, c, x, y, h;
+    for (i = 0; i < list.length; i++) {
+      c = list[i]; x = c[0]; y = TOP + c[1] + 1; h = c[2];
+      Pix.fill(img, x - 1, y, 3, h, 11); Pix.fill(img, x + 1, y, 1, h, 12);
+      Pix.set(img, x - 1, y, 10); Pix.set(img, x, y, 10);
+      if (h > 3) Pix.set(img, x - 1, y + 2, 10);
+      Pix.set(img, x, y - 1, 1);                                             // wick
+      if (i >= nLit) { Pix.fill(img, x - 1, y, 3, h, 12); Pix.fill(img, x - 1, y, 2, 1, 11); Pix.set(img, x + 1, y, 13); }   // cold stub
+      Pix.fill(img, x - 2, y + h - 1, 5, 1, 24); Pix.set(img, x - 2, y + h - 1, 25);
+    }
+  }
+
+  var POOL_RX = 14, POOL_RY = 11;
+  // Light: remap the stone around each lit candle. Returns a new image; scale shrinks the pools.
+  function lightPass(base, list, nLit, table, scale) {
+    var out = Pix.clone(base), i, c, x, y, x0, x1, y0, y1, cx, cy, v, best, d, col, row, st, rx = POOL_RX * scale, ry = POOL_RY * scale;
+    for (i = 0; i < nLit; i++) {
+      c = list[i]; cx = c[0]; cy = TOP + c[1] - 2;
+      x0 = Math.max(0, Math.floor(cx - rx)); x1 = Math.min(W - 1, Math.ceil(cx + rx));
+      y0 = Math.max(0, Math.floor(cy - ry)); y1 = Math.min(base.h - 1, Math.ceil(cy + ry * 1.3));
+      for (y = y0; y <= y1; y++) for (x = x0; x <= x1; x++) {
+        best = 0;
+        for (var j = 0; j < nLit; j++) {
+          var q = list[j], dx = (x - q[0]) / rx, dy = (y - (TOP + q[1] - 2)) / (y > TOP + q[1] - 2 ? ry * 1.3 : ry);
+          d = dx * dx + dy * dy;
+          if (d < 1) { v = (1 - Math.sqrt(d)) * 3.2; if (v > best) best = v; }
+        }
+        if (best <= 0) continue;
+        col = base.d[y * W + x]; row = table[col];
+        if (!row) continue;
+        // falloff: 25% dither, checker, flat dim, then a small brighter core
+        st = best < 0.45 ? 0 : best < 0.95 ? (dth(x, y, 1) ? 1 : 0) : best < 1.45 ? (dth(x, y, 2) ? 1 : 0) : best < 2.3 ? 1
+           : best < 2.6 ? (dth(x, y, 2) ? 2 : 1) : 2;
+        if (st > 0) out.d[y * W + x] = row[st - 1];
+      }
+    }
+    return out;
+  }
+  // The pixels of `lit` that differ from `base` inside a box around one candle, as a sprite.
+  function cutPool(base, lit, c, scale) {
+    var rx = Math.ceil(POOL_RX * scale), ry = Math.ceil(POOL_RY * scale), x0 = Math.max(0, c[0] - rx), y0 = Math.max(0, TOP + c[1] - 2 - ry);
+    var w = Math.min(W, c[0] + rx + 1) - x0, h = Math.min(base.h, TOP + c[1] - 2 + Math.ceil(ry * 1.3) + 1) - y0, s = Pix.make(w, h), x, y, any = false;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+      var a = lit.d[(y0 + y) * W + x0 + x];
+      if (a !== base.d[(y0 + y) * W + x0 + x]) { s.d[y * w + x] = a; any = true; }
+    }
+    return { cv: any ? bake(s) : null, img: s, x: x0, y: y0 - TOP };
+  }
+
+  var flameCv = null;                                    // [normal x5, witch x5]
+  var glowCv = null;                                     // [normal, low, witch, witch low]
+  function flames() {
+    var i, im;
+    if (flameCv) return;
+    flameCv = []; glowCv = [];
+    for (i = 0; i < 5; i++) flameCv.push(bake(Pix.parse(FLAMES[i])));
+    for (i = 0; i < 5; i++) flameCv.push(bake(Pix.remapped(Pix.parse(FLAMES[i]), { 21: 31, 22: 23, 20: 27 })));
+    im = Pix.parse(GLOW); glowCv.push(bake(im)); glowCv.push(bake(Pix.parse(GLOW_LOW)));
+    glowCv.push(bake(Pix.remapped(im, { 21: 31, 24: 27 }))); glowCv.push(bake(Pix.remapped(Pix.parse(GLOW_LOW), { 21: 31, 24: 27 })));
+  }
+
+  // ---- cathedral cache: one entry per (variant class, arena, phase 2) ---------------------------
+  var cath = [];
+  function variantClass(v) { v = v | 0; return v < 3 ? 1 : v > 7 ? 7 : v; }     // duels 1 and 2 share a bake
+  function cathedral(v, arena, p2) {
+    var a = arena === 'blood_moon' ? 1 : arena === 'pale_dawn' ? 2 : 0, key = (v * 3 + a) * 2 + (p2 ? 1 : 0), e = cath[key];
+    if (e) return e;
+    var list = v === 7 ? ALTAR : CANDLES, nLit = Math.min(list.length, LIT_COUNT[v]), table = p2 ? WITCH : WARM;
+    var base = buildCathedral(v, a, p2), lit1, lit2, lit3, i, ch;
+    drawCandles(base, list, nLit);
+    lit1 = lightPass(base, list, nLit, table, 1); lit2 = lightPass(base, list, nLit, table, 0.86); lit3 = lightPass(base, list, nLit, table, 0.5);
+    e = { img: base, cv: bake(base), list: list, n: nLit, pools: [], lit: lit1, chain: null, chainImg: null, mote: [0, 0] };
+    for (i = 0; i < nLit; i++) e.pools.push([cutPool(base, lit1, list[i], 1), cutPool(base, lit2, list[i], 0.86), cutPool(base, lit3, list[i], 0.5)]);
+    ch = Pix.make(9, 40);                                                   // swaying chain end + censer
+    for (i = 0; i < 31; i++) chainPx(ch, 4, i, TOP - 104 + i);
+    Pix.blit(ch, Pix.parse(CENSER), 1, 31);
+    tone(ch, v, a, p2);
+    e.chainImg = ch; e.chain = bake(ch);
+    e.mote[0] = a === 1 || v === 6 ? 17 : a === 2 ? 8 : 27; e.mote[1] = a === 1 || v === 6 ? 19 : a === 2 ? 9 : 28;
+    cath[key] = e;
+    return e;
+  }
+
+  function drawCathedral(g, t, opts, E) {
+    var v = variantClass(opts && opts.variant), p2 = !!(opts && opts.phase2), e = cathedral(v, opts && opts.arena, p2);
+    var floorY = Math.round(opts && opts.floorY > 0 ? opts.floorY : (E.lay ? E.lay.floorY : 172)), y0 = floorY - TOP;
+    var gut = opts && opts.gutter > 0 ? (opts.gutter > 1 ? 1 : opts.gutter) : 0, H = E.H, i, c, s, fr, st, sway, k, fy, mx, pool, off = p2 ? 5 : 0;
+    flames();
+    if (e.cv) g.drawImage(e.cv, 0, y0);
     g.fillStyle = P[1];
-    for (y = 0; y < 6; y++) for (x = (y & 1); x < W; x += 2 + (5 - y)) g.fillRect(x, bottom - 1 - y, 1, 1);   // bottom vignette
-    for (i = 0; i < 20; i++) {                                                 // stateless ash fall, 8-14 px/s
+    if (y0 > 0) g.fillRect(0, 0, W, y0);
+    if (y0 + TOP + BOT < H) g.fillRect(0, y0 + TOP + BOT, W, H - (y0 + TOP + BOT));
+    // chain ends sway one pixel on a two-second cycle, out of step with each other
+    if (e.chain) {
+      sway = Math.floor(t * 0.5 * 4) % 4; sway = sway === 1 ? 1 : sway === 3 ? -1 : 0;
+      g.drawImage(e.chain, 67 - 4 + sway, floorY - 104);
+      g.drawImage(e.chain, 111 - 4 - sway, floorY - 104);
+    }
+    // dust in the moonbeam
+    for (i = 0; i < 12; i++) {
+      fy = -88 + ((i * 29 + t * (2 + (i % 3))) % 84);
+      k = ((i * 0.618) % 1);
+      mx = beamL(fy) + 2 + (beamR(fy) - beamL(fy) - 4) * k + Math.sin(t * 0.4 + i * 1.7) * 1.5;
+      g.fillStyle = P[e.mote[i & 1]];
+      g.fillRect(mx | 0, (floorY + fy) | 0, 1, 1);
+    }
+    // candles: pools of lit stone first, then halo + flame. `gutter` dims them one after another.
+    for (k = 0; k < 2; k++) for (i = 0; i < e.n; i++) {
+      c = e.list[i];
+      s = gut <= 0 ? 0 : gut * 1.6 - 0.6 * (e.n > 1 ? i / (e.n - 1) : 0);
+      st = s < 0.25 ? 0 : s < 0.6 ? 1 : s < 0.95 ? 2 : 3;                    // 0 burning, 1 guttering, 2 nearly out, 3 out
+      if (st === 3) continue;
+      fr = h32(i, Math.floor(t / (0.12 + (h32(i, 7, 3) % 7) * 0.01)), 5) % 3;     // 120-180 ms per flicker frame
+      if (k === 0) {
+        pool = e.pools[i][st === 0 ? (fr === 1 ? 1 : 0) : 2];
+        if (st < 2 && pool.cv) g.drawImage(pool.cv, pool.x, floorY + pool.y);
+        continue;
+      }
+      if (st < 2 && glowCv[0]) g.drawImage(glowCv[(st ? 1 : 0) + (p2 ? 2 : 0)], c[0] - 4, floorY + c[1] - 7);
+      if (flameCv[0]) g.drawImage(flameCv[off + (st === 0 ? fr : st === 1 ? 3 : 4)], c[0] - 2, floorY + c[1] - 6);
+    }
+  }
+
+  // ---- cathedral foreground: near silhouettes + bottom vignette, drawn over the fighters -----------
+  var FG_TOP = 14, FG_H = 46;
+  var fgCv = null, fgImg = null;
+  function buildFg() {
+    var img = Pix.make(W, FG_H), x, y, w, n = FG_RUBBLE_W.length;
+    for (y = 0; y < FG_H; y++) {
+      w = FG_PEW_W[y] || 0;
+      for (x = 0; x < w; x++) img.d[y * W + x] = 1;
+      if (w > 3 && y > 6 && y < 40) img.d[y * W + w - 1] = y === 25 || y === 26 ? 15 : 2;          // the faintest edge light
+    }
+    for (y = 0; y < n; y++) {
+      w = FG_RUBBLE_W[y];
+      for (x = 0; x < w; x++) img.d[(FG_H - n + y) * W + W - 1 - x] = 1;
+      if (w > 4) img.d[(FG_H - n + y) * W + W - w] = 2;
+    }
+    for (y = FG_TOP + 26; y < FG_H; y++) for (x = 0; x < W; x++) {             // vignette: two dither steps into the band below
+      if (dth(x, y, y < FG_TOP + 29 ? 1 : 2)) img.d[y * W + x] = 1;
+    }
+    return img;
+  }
+  function drawFg(g, t, opts, E) {
+    var floorY = Math.round(opts && opts.floorY > 0 ? opts.floorY : (E.lay ? E.lay.floorY : 172)), i, x, y, top, span;
+    if (!fgImg) { fgImg = buildFg(); fgCv = bake(fgImg); }
+    if (fgCv) g.drawImage(fgCv, 0, floorY - FG_TOP);
+    top = floorY - 140; span = 168;
+    for (i = 0; i < 20; i++) {                                              // stateless ash fall, 8-14 px/s
       y = top + ((i * 53 + t * (8 + (i % 7))) % span);
       x = (i * 37 + Math.sin(t * 0.6 + i) * 5 + 180) % W;
       g.fillStyle = P[i & 1 ? 7 : 8]; g.fillRect(x | 0, y | 0, 1, 1);
     }
   }
 
+  // ============================================================================================
+  // Bonfire: a night cloister, a fire in a sunken bell
+  // ============================================================================================
+  var BTOP = 210, BBOT = 48;
+  var COLS = [10, 63, 116, 169];                 // arcade column centres
+  var BELL_X = 73;
+  var bon = null;
+  var FIRELIT = {
+    3: [15, 14, 14], 4: [14, 14, 13], 5: [14, 13, 13], 6: [13, 13, 12], 7: [13, 12, 12],
+    14: [14, 13, 13], 15: [15, 14, 13]
+  };
+  function buildBonfire() {
+    var H = BTOP + BBOT, img = Pix.make(W, H), x, y, fy, c, i, k, n, a, d, t;
+    for (y = 0; y < H; y++) {
+      fy = y - BTOP;
+      for (x = 0; x < W; x++) {
+        // sky
+        c = fy < -150 ? 1 : fy < -138 ? (dth(x, y, fy < -146 ? 1 : fy < -142 ? 2 : 3) ? 2 : 1) : 2;
+        if (fy < -72 && rnd(x, y, 21) < 0.006) c = rnd(x, y, 22) < 0.3 ? 7 : 5;                    // stars
+        // the cloister wall: a parapet line, then stone down to the ground
+        if (fy >= -72) {
+          c = fy === -72 ? 4 : fy < -68 ? 3 : 3;
+          k = Math.floor((fy + 72) / 7); n = Math.floor((x + (k & 1) * 9) / 18);
+          if ((fy + 72) % 7 === 6 && rnd(n, k, 23) < 0.4) c = 2;
+          else if ((x + (k & 1) * 9) % 18 === 0 && rnd(n, k, 24) < 0.3) c = 2;
+        }
+        img.d[y * W + x] = c;
+      }
+    }
+    // three round-headed openings onto the dark walk behind, one behind each figure and one behind the fire
+    for (i = 0; i < 3; i++) {
+      var ax0 = COLS[i] + 4, ax1 = COLS[i + 1] - 4, acx = (ax0 + ax1) / 2, ar = (ax1 - ax0 + 1) / 2, spring = -34;
+      for (y = BTOP - 66; y < BTOP; y++) {
+        fy = y - BTOP;
+        for (x = ax0 - 3; x <= ax1 + 3; x++) {
+          d = fy > spring ? Math.abs(x + 0.5 - acx) : Math.sqrt((x + 0.5 - acx) * (x + 0.5 - acx) + (fy - spring) * (fy - spring));
+          if (d < ar) img.d[y * W + x] = fy > -9 ? 2 : 1;
+          else if (d < ar + 3 && fy <= spring) {
+            t = Math.floor(Math.atan2(spring - fy, x + 0.5 - acx) * 5);
+            img.d[y * W + x] = d < ar + 1 ? 5 : (t !== Math.floor(Math.atan2(spring - fy, x + 1.5 - acx) * 5) ? 3 : 4);
+          }
+        }
+      }
+    }
+    // columns
+    for (i = 0; i < 4; i++) {
+      x = COLS[i];
+      for (y = BTOP - 34; y < BTOP; y++) {
+        Pix.fill(img, x - 3, y, 7, 1, 4); Pix.set(img, x - 3, y, 3); Pix.set(img, x + 3, y, 3);
+        Pix.set(img, x + (x < 90 ? 2 : -2), y, 5);
+      }
+      Pix.fill(img, x - 5, BTOP - 37, 11, 2, 5); Pix.fill(img, x - 4, BTOP - 35, 9, 1, 4);
+      Pix.fill(img, x - 5, BTOP - 3, 11, 3, 4); Pix.fill(img, x - 5, BTOP - 4, 11, 1, 5);
+    }
+    // ground: trodden ash, darker toward the bottom edge
+    for (y = BTOP; y < H; y++) {
+      fy = y - BTOP;
+      for (x = 0; x < W; x++) {
+        c = fy === 0 ? (rnd(x >> 1, 0, 26) < 0.35 ? 14 : 15) : fy < 5 ? 15 : fy < 7 ? (dth(x, y, 2) ? 15 : 1) : 1;
+        if (fy > 0 && fy < 5 && rnd(x >> 1, y, 27) < 0.05) c = 14;
+        img.d[y * W + x] = c;
+      }
+    }
+    // the fallen column the Rival sits on, the bell, an ash mound around it
+    Pix.blit(img, Pix.parse(FALLEN), 116, BTOP - 11);
+    // firelight: three flat bands of warm remap around the bell mouth
+    var out = Pix.clone(img), v, row, st;
+    for (y = BTOP - 60; y < BTOP + 22; y++) for (x = 20; x < 160; x++) {
+      a = (x - 90) / 62; d = (y - (BTOP - 12)) / (y > BTOP - 12 ? 26 : 44);
+      v = 1 - Math.sqrt(a * a + d * d);
+      if (v <= 0) continue;
+      v *= 3.3; row = FIRELIT[img.d[y * W + x]];
+      if (!row) continue;
+      st = v < 0.5 ? 0 : v < 0.7 ? (dth(x, y, 2) ? 1 : 0) : v < 1.4 ? 1 : v < 1.6 ? (dth(x, y, 2) ? 2 : 1) : v < 2.3 ? 2 : v < 2.5 ? (dth(x, y, 2) ? 3 : 2) : 3;
+      if (st) out.d[y * W + x] = row[st - 1];
+    }
+    Pix.blit(out, Pix.parse(BELL), BELL_X, BTOP - 23);
+    for (x = 66; x < 114; x++) {                                             // ash banked against the bell
+      n = Math.round(2.2 - Math.abs(x - 90) / 14 + rnd(x >> 1, 3, 28) * 1.5);
+      for (k = 0; k < n; k++) out.d[(BTOP - 1 - k) * W + x] = k === n - 1 ? (Math.abs(x - 90) < 16 ? 13 : 14) : (Math.abs(x - 90) < 14 ? 14 : 15);
+    }
+    return out;
+  }
+  function bonfire() {
+    var i, f, img, gl, x, y, d, bell = Pix.parse(BELL);
+    if (bon) return bon;
+    img = buildBonfire();
+    bon = { img: img, cv: bake(img), fire: [], fireImg: [], glow: [], glowImg: [] };
+    for (i = 0; i < 6; i++) {
+      f = Pix.parse(FIRE[i % 3]);
+      if (i >= 3) f = Pix.flipX(f);
+      bon.fireImg.push(f); bon.fire.push(bake(f));
+    }
+    for (i = 0; i < 2; i++) {                                               // glow: the lit rim of the breach flares and settles
+      gl = Pix.make(40, 30);
+      for (y = 0; y < bell.h; y++) for (x = 0; x < bell.w; x++) {
+        d = bell.d[y * bell.w + x];
+        if (d === 25 && i === 0) gl.d[(y + 6) * 40 + x + 3] = 21;
+        else if (d === 21) gl.d[(y + 6) * 40 + x + 3] = i === 0 ? 22 : 21;
+      }
+      bon.glowImg.push(gl); bon.glow.push(bake(gl));
+    }
+    return bon;
+  }
+  function drawBonfire(g, t, opts, E) {
+    var b = bonfire(), floorY = Math.round(opts && opts.floorY > 0 ? opts.floorY : (E.lay ? E.lay.floorY : 172)), y0 = floorY - BTOP, H = E.H;
+    var fr = Math.floor(t * 10) % 6;
+    if (b.cv) g.drawImage(b.cv, 0, y0);
+    g.fillStyle = P[1];
+    if (y0 > 0) g.fillRect(0, 0, W, y0);
+    if (floorY + BBOT < H) g.fillRect(0, floorY + BBOT, W, H - floorY - BBOT);
+    if (b.glow[0]) g.drawImage(b.glow[fr % 3 === 0 ? 1 : 0], BELL_X - 3, floorY - 29);
+    if (b.fire[0]) g.drawImage(b.fire[fr], 82, floorY - 17);
+  }
+
+  // ============================================================================================
+  // Title: near-black ash, one candle
+  // ============================================================================================
+  var TTOP = 250, TBOT = 190, CANDLE_X = 133;
+  var ttl = null;
+  function buildTitle() {
+    var H = TTOP + TBOT, img = Pix.make(W, H), x, y, fy, c, top, v, row, st, a, d;
+    for (y = 0; y < H; y++) {
+      fy = y - TTOP;
+      for (x = 0; x < W; x++) {
+        top = Math.round(Math.sin(x / 17) * 1.4 + Math.sin(x / 5.3 + 1) * 0.7 + (x > 50 && x < 128 ? -1.5 : 0));   // dune line
+        if (fy < top) {
+          c = fy >= Math.round(-6 + Math.sin(x / 23 + 2) * 2 + Math.sin(x / 9) * 0.8) ? 2 : 1;      // far drifts, one step off black
+        } else {
+          d = fy - top;
+          c = d === 0 ? (rnd(x >> 1, 1, 31) < 0.4 ? 4 : 3) : d < 9 ? 3 : d < 11 ? (dth(x, y, 2) ? 3 : 2) : d < 30 ? 2 : d < 32 ? (dth(x, y, 2) ? 2 : 1) : 1;
+          if (d > 1 && d < 9 && rnd(x, y, 33) < 0.03) c = rnd(x, y, 34) < 0.3 ? 5 : 4;              // flecks
+        }
+        img.d[y * W + x] = c;
+      }
+    }
+    // the mask's shadow, thrown away from the candle
+    for (y = TTOP - 1; y < TTOP + 5; y++) for (x = 52; x < 80; x++) {
+      a = (x - 67) / 12; d = (y - TTOP - 1) / 3;
+      if (a * a + d * d < 1 && (a * a + d * d < 0.5 || dth(x, y, 2))) img.d[y * W + x] = 1;
+    }
+    // candlelight on the ash
+    var WARM_T = { 1: [1, 1, 15], 2: [2, 15, 15], 3: [15, 14, 14], 4: [14, 14, 13], 5: [13, 13, 12] }, out = Pix.clone(img);
+    for (y = TTOP - 30; y < TTOP + 16; y++) for (x = CANDLE_X - 40; x < W; x++) {
+      a = (x - CANDLE_X) / 38; d = (y - (TTOP - 6)) / (y > TTOP - 6 ? 18 : 24);
+      v = (1 - Math.sqrt(a * a + d * d)) * 3.2;
+      if (v <= 0) continue;
+      row = WARM_T[img.d[y * W + x]]; if (!row) continue;
+      st = v < 0.5 ? 0 : v < 0.7 ? (dth(x, y, 2) ? 1 : 0) : v < 1.4 ? 1 : v < 1.6 ? (dth(x, y, 2) ? 2 : 1) : v < 2.3 ? 2 : v < 2.5 ? (dth(x, y, 2) ? 3 : 2) : 3;
+      if (st) out.d[y * W + x] = row[st - 1];
+    }
+    // the candle: a fat stub leaning in the ash, wax run down one side
+    Pix.fill(out, CANDLE_X - 2, TTOP - 4, 5, 6, 11); Pix.fill(out, CANDLE_X + 1, TTOP - 4, 2, 6, 12);
+    Pix.fill(out, CANDLE_X - 2, TTOP - 4, 3, 1, 10); Pix.set(out, CANDLE_X - 2, TTOP - 3, 10); Pix.set(out, CANDLE_X - 2, TTOP - 2, 10);
+    Pix.set(out, CANDLE_X - 3, TTOP - 1, 11); Pix.set(out, CANDLE_X - 3, TTOP, 11); Pix.set(out, CANDLE_X - 3, TTOP + 1, 12);
+    Pix.set(out, CANDLE_X, TTOP - 5, 1);
+    Pix.fill(out, CANDLE_X - 4, TTOP + 2, 9, 1, 13); Pix.fill(out, CANDLE_X - 3, TTOP + 3, 7, 1, 14);
+    return out;
+  }
+  function drawTitle(g, t, opts, E) {
+    var floorY = Math.round(opts && opts.floorY > 0 ? opts.floorY : Math.round(E.H * 0.56)), y0 = floorY - TTOP, H = E.H, fr, i, x, y;
+    if (!ttl) { ttl = { img: buildTitle(), cv: null }; ttl.cv = bake(ttl.img); }
+    flames();
+    if (ttl.cv) g.drawImage(ttl.cv, 0, y0);
+    g.fillStyle = P[1];
+    if (y0 > 0) g.fillRect(0, 0, W, y0);
+    if (floorY + TBOT < H) g.fillRect(0, floorY + TBOT, W, H - floorY - TBOT);
+    for (i = 0; i < 9; i++) {                                               // motes hanging in the warm air
+      y = floorY - 6 - ((i * 23 + t * (3 + (i % 4))) % 70);
+      x = CANDLE_X - 46 + ((i * 41) % 84) + Math.sin(t * 0.5 + i * 2.1) * 3;
+      g.fillStyle = P[i % 3 === 0 ? 13 : 5]; g.fillRect(x | 0, y | 0, 1, 1);
+    }
+    fr = h32(1, Math.floor(t / 0.14), 5) % 3;
+    if (glowCv[0]) g.drawImage(glowCv[0], CANDLE_X - 5, floorY - 13);
+    if (flameCv[0]) g.drawImage(flameCv[fr], CANDLE_X - 2, floorY - 11);
+  }
+
+  // ============================================================================================
+  // Public API
+  // ============================================================================================
+  // name: 'cathedral' | 'bonfire' | 'title'. t = seconds. Paints the whole buffer.
+  // opts: { floorY, variant:1..7, gutter:0..1, phase2:bool, arena:'cathedral'|'blood_moon'|'pale_dawn' }
+  function bg(g, name, t, opts) {
+    var E = dims();
+    t = t > 0 ? t : 0;
+    if (name === 'bonfire') drawBonfire(g, t, opts, E);
+    else if (name === 'title') drawTitle(g, t, opts, E);
+    else drawCathedral(g, t, opts, E);
+  }
+  // Foreground layer drawn over the fighters (cathedral only).
+  function fg(g, name, t, opts) {
+    if (name !== 'cathedral') return;
+    drawFg(g, t > 0 ? t : 0, opts, dims());
+  }
+
   R.Art = R.Art || {};
   R.Art.bg = bg;
   R.Art.fg = fg;
+  R.Art.inits = R.Art.inits || [];
+  R.Art.inits.push(function () { flames(); cathedral(1, 'cathedral', false); bonfire(); if (!ttl) { ttl = { img: buildTitle(), cv: null }; ttl.cv = bake(ttl.img); } if (!fgImg) { fgImg = buildFg(); fgCv = bake(fgImg); } });
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- art/ui.js ----
-// SHOW ME MY RIVAL - UI primitives (DESIGN 13.5). Each function is self-contained: fillRects in palette colours only.
+// SHOW ME MY RIVAL — UI kit (DESIGN 13.5): buttons, panels, speech bubble, HP bar.
+// One family: a void outline, a bevelled band (lit top/left, shadowed bottom/right), a flat face for text.
+// Frames are 9-slices assembled from hand-drawn corner tiles into palette-indexed images, baked into canvases
+// once per (size, style, state) and then drawn with a single drawImage. Text never sits on texture.
 (function (R) {
   'use strict';
 
-  var P = R.Pal.hex;
+  var Pix = R.Pix, P = R.Pal.hex;
   var ICON2 = { S: 'icon_S_big', G: 'icon_G_big', F: 'icon_F_big' };
+  var ICON2_OFF = { S: 'icon_S_big_off', G: 'icon_G_big_off', F: 'icon_F_big_off' };
   var ICON1 = { S: 'icon_S', G: 'icon_G', F: 'icon_F' };
+  var ICON1_OFF = { S: 'icon_S_off', G: 'icon_G_off', F: 'icon_F_off' };
   var MINI = { S: 'mini_S', G: 'mini_G', F: 'mini_F' };
-  var HI = { 18: 19, 31: 23, 27: 28, 29: 30, 21: 22, 25: 22 };
+  var HI = { 17: 18, 18: 19, 19: 20, 31: 23, 27: 28, 26: 27, 29: 30, 30: 10, 21: 22, 20: 21, 25: 22, 24: 25, 28: 10, 7: 8, 5: 6 };
+  var LO = { 18: 17, 19: 18, 31: 27, 27: 26, 28: 27, 29: 1, 30: 29, 21: 20, 22: 21, 25: 24, 7: 5, 10: 11, 23: 22 };
   var CENTER = { align: 'center' };
 
   function now() { return R.Engine ? R.Engine.real || 0 : 0; }
 
-  // Rectangle with 1-px corners cut.
-  function rr(g, x, y, w, h, c) {
-    g.fillStyle = P[c];
-    g.fillRect(x + 1, y, w - 2, h);
-    g.fillRect(x, y + 1, w, h - 2);
+  // ---- 9-slice tiles (rows; '#' = the face colour) ---------------------------------------------
+  // Brass button frame: void, 2 px brass (lit top/left = p, shadow bottom/right = o), void.
+  var T_BUTTON = {
+    c: 5, t: [1, 25, 25, 1], l: [1, 25, 25, 1], b: [1, 24, 24, 1], r: [1, 24, 24, 1],
+    tl: ['.1111', '1mppp', '1pppp', '1pp11', '1pp1#'],
+    tr: ['1111.', 'pppo1', 'ppoo1', '11oo1', '#1oo1'],
+    bl: ['1pp1#', '1pp11', '1pooo', '1oooo', '.1111'],
+    br: ['#1oo1', '11oo1', 'oooo1', 'oooo1', '1111.']
+  };
+  // Card: the same brass, one pixel thinner.
+  var T_CARD = {
+    c: 4, t: [1, 25, 1], l: [1, 25, 1], b: [1, 24, 1], r: [1, 24, 1],
+    tl: ['.111', '1mpp', '1p11', '1p1#'],
+    tr: ['111.', 'ppo1', '11o1', '#1o1'],
+    bl: ['1p1#', '1p11', '1poo', '.111'],
+    br: ['#1o1', '11o1', 'ooo1', '111.']
+  };
+  // Stone slab: lit edge 6, shadow edge 3.
+  var T_STONE = {
+    c: 3, t: [1, 6], l: [1, 6], b: [1, 3], r: [1, 3],
+    tl: ['.11', '176', '16#'],
+    tr: ['11.', '651', '#31'],
+    bl: ['16#', '153', '.11'],
+    br: ['#31', '331', '11.']
+  };
+  // Dark plate: a cold-stone line with brass studs in the corners.
+  var T_DARK = {
+    c: 3, t: [1, 5], l: [1, 5], b: [1, 4], r: [1, 4],
+    tl: ['.11', '1p5', '15#'],
+    tr: ['11.', '5p1', '#41'],
+    bl: ['15#', '1o4', '.11'],
+    br: ['#41', '4o1', '11.']
+  };
+  var TAIL_UP = ['....11.', '...1#1.', '..1##1.', '.1###1.', '1####1.', '.####..'];
+  var REMAP_GLOW = { 25: 22, 24: 25, 22: 23 };
+  var REMAP_PRESSED = { 25: 24, 22: 24 };
+  var REMAP_OFF = { 25: 5, 24: 4, 22: 6 };
+
+  function tile(rows, face, remap) {
+    var ch = Pix.CHARS[face], out = [], i, img;
+    for (i = 0; i < rows.length; i++) out.push(rows[i].split('#').join(ch));
+    img = Pix.parse(out);
+    return remap ? Pix.remapped(img, remap) : img;
   }
-  // Rectangle with 2-px stepped corners.
-  function rr2(g, x, y, w, h, c) {
-    g.fillStyle = P[c];
-    g.fillRect(x + 2, y, w - 4, h);
-    g.fillRect(x + 1, y + 1, w - 2, h - 2);
-    g.fillRect(x, y + 2, w, h - 4);
+  function col(c, remap) { return remap && remap[c] !== undefined ? remap[c] : c; }
+
+  // Assemble a w x h frame from a tile set. face / hi / lo = face colour, its top row, its bottom row (0 = none).
+  function slice(w, h, T, face, hi, lo, remap) {
+    var img = Pix.make(w, h), n = T.t.length, c = T.c, i;
+    Pix.fill(img, n, n, w - 2 * n, h - 2 * n, face);
+    if (hi) Pix.fill(img, n, n, w - 2 * n, 1, hi);
+    if (lo) Pix.fill(img, n, h - n - 1, w - 2 * n, 1, lo);
+    for (i = 0; i < n; i++) {
+      Pix.fill(img, c, i, w - 2 * c, 1, col(T.t[i], remap));
+      Pix.fill(img, c, h - 1 - i, w - 2 * c, 1, col(T.b[i], remap));
+      Pix.fill(img, i, c, 1, h - 2 * c, col(T.l[i], remap));
+      Pix.fill(img, w - 1 - i, c, 1, h - 2 * c, col(T.r[i], remap));
+    }
+    Pix.fill(img, 0, 0, c, c, 0); Pix.fill(img, w - c, 0, c, c, 0); Pix.fill(img, 0, h - c, c, c, 0); Pix.fill(img, w - c, h - c, c, c, 0);
+    Pix.blit(img, tile(T.tl, hi || face, remap), 0, 0);
+    Pix.blit(img, tile(T.tr, hi || face, remap), w - c, 0);
+    Pix.blit(img, tile(T.bl, lo || face, remap), 0, h - c);
+    Pix.blit(img, tile(T.br, lo || face, remap), w - c, h - c);
+    return img;
   }
+
+  function line(img, x0, y0, x1, y1, c) {
+    var dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, e = dx - dy, e2;
+    for (;;) {
+      Pix.set(img, x0, y0, c);
+      if (x0 === x1 && y0 === y1) break;
+      e2 = 2 * e;
+      if (e2 > -dy) { e -= dy; x0 += sx; }
+      if (e2 < dx) { e += dx; y0 += sy; }
+    }
+  }
+  // The "not legal this turn" crack: a jagged void line across the face with a chipped light edge.
+  var CRACK = [0, 0, 0.16, 0.34, 0.33, 0.24, 0.50, 0.58, 0.63, 0.47, 0.82, 0.86, 1, 1];
+  var BRANCH = [0.50, 0.58, 0.40, 0.80, 0.46, 1.0];
+  function crack(img, x, y, w, h) {
+    var lay = Pix.make(img.w, img.h), i, px, py, c;
+    for (i = 0; i + 3 < CRACK.length; i += 2) {
+      line(lay, x + Math.round(CRACK[i] * w), y + Math.round(CRACK[i + 1] * h), x + Math.round(CRACK[i + 2] * w), y + Math.round(CRACK[i + 3] * h), 1);
+    }
+    for (i = 0; i + 3 < BRANCH.length; i += 2) {
+      line(lay, x + Math.round(BRANCH[i] * w), y + Math.round(BRANCH[i + 1] * h), x + Math.round(BRANCH[i + 2] * w), y + Math.round(BRANCH[i + 3] * h), 1);
+    }
+    for (py = 0; py < lay.h; py++) for (px = 0; px < lay.w; px++) {
+      if (!lay.d[py * lay.w + px]) continue;
+      c = Pix.get(img, px, py - 1);
+      if (!Pix.get(lay, px, py - 1) && (c === 3 || c === 4)) Pix.set(img, px, py - 1, 5);      // chipped upper lip
+      Pix.set(img, px, py, 1);
+    }
+  }
+
+  // state: 0 normal, 1 glow (lit phase), 2 pressed, 3 disabled, 4 disabled + broken
+  function buttonImg(w, h, state, accent) {
+    var img, remap = state === 1 ? REMAP_GLOW : state === 2 ? REMAP_PRESSED : state >= 3 ? REMAP_OFF : null;
+    if (state === 2) { img = slice(w, h, T_BUTTON, 3, 2, 0, remap); Pix.fill(img, 4, 5, w - 8, 1, 2); }
+    else if (state >= 3) img = slice(w, h, T_BUTTON, 3, 0, 2, remap);
+    else img = slice(w, h, T_BUTTON, 4, 5, 3, remap);
+    if (accent && h >= 20 && w >= 24) {                     // move-colour stripe set into the bottom of the face
+      var sy = h - (h < 30 ? 6 : 8) + (state === 2 && h >= 30 ? 1 : 0), face = state === 0 || state === 1 ? 4 : 3;
+      var hi = state >= 3 ? 5 : state === 2 ? accent : (HI[accent] || accent);
+      var lo = state >= 3 ? 4 : state === 2 ? (LO[accent] || accent) : accent;
+      Pix.fill(img, 6, sy, w - 12, 2, 1);                   // void bed, corners knocked off
+      Pix.set(img, 6, sy, face); Pix.set(img, w - 7, sy, face);
+      Pix.fill(img, 7, sy, w - 14, 1, hi);
+      Pix.fill(img, 7, sy + 1, w - 14, 1, lo);
+    }
+    if (state === 4) crack(img, 7, 7, w - 15, h - 17);
+    return img;
+  }
+
+  function panelImg(w, h, style) {
+    if (style === 1) return slice(w, h, T_DARK, 2, 3, 1, null);
+    if (style === 2) return slice(w, h, T_CARD, 3, 4, 2, null);
+    return slice(w, h, T_STONE, 4, 5, 0, null);
+  }
+
+  function bubbleImg(w, h, p2) {
+    var img = Pix.make(w, h), border = p2 ? 31 : 1, fill = p2 ? 1 : 10, shade = p2 ? 2 : 12;
+    Pix.fill(img, 3, 0, w - 6, h, border); Pix.fill(img, 0, 3, w, h - 6, border);
+    Pix.fill(img, 1, 1, w - 2, h - 2, border);
+    Pix.set(img, 1, 1, 0); Pix.set(img, w - 2, 1, 0); Pix.set(img, 1, h - 2, 0); Pix.set(img, w - 2, h - 2, 0);
+    Pix.fill(img, 0, 0, 1, 3, 0); Pix.fill(img, 0, 0, 3, 1, 0); Pix.fill(img, w - 1, 0, 1, 3, 0); Pix.fill(img, w - 3, 0, 3, 1, 0);
+    Pix.fill(img, 0, h - 3, 1, 3, 0); Pix.fill(img, 0, h - 1, 3, 1, 0); Pix.fill(img, w - 1, h - 3, 1, 3, 0); Pix.fill(img, w - 3, h - 1, 3, 1, 0);
+    Pix.fill(img, 3, 1, w - 6, h - 2, fill); Pix.fill(img, 1, 3, w - 2, h - 6, fill); Pix.fill(img, 2, 2, w - 4, h - 4, fill);
+    Pix.fill(img, 3, h - 2, w - 6, 1, shade); Pix.set(img, 2, h - 3, shade); Pix.set(img, w - 3, h - 3, shade);
+    if (!p2) { Pix.fill(img, w - 2, 4, 1, h - 7, 11); }                       // right edge falls off the light
+    return img;
+  }
+  function tailImg(dir, p2) {
+    var border = p2 ? 'v' : '1', fill = p2 ? '1' : 'a', out, x, y;
+    var img = Pix.parse(TAIL_UP.map(function (r) { return r.split('1').join('B').split('#').join(fill).split('B').join(border); }));
+    if (dir === 'up') return img;
+    out = Pix.make(img.w, img.h);
+    for (y = 0; y < img.h; y++) for (x = 0; x < img.w; x++) out.d[(img.h - 1 - y) * img.w + x] = img.d[y * img.w + x];
+    for (x = 0; x < out.w; x++) if (out.d[x] === (p2 ? 1 : 10)) out.d[x] = p2 ? 2 : 12;           // carries the shade row
+    return out;
+  }
+
+  // ---- canvas cache (integer keys; nothing is allocated once a frame is warm) ---------------------
+  var cache = new Map();
+  function bake(img) { return typeof document === 'undefined' ? null : Pix.toCanvas(img); }
+  function put(key, img) {
+    var cv = bake(img);
+    if (cache.size > 160) cache.clear();
+    if (cv) cache.set(key, cv);
+    return cv;
+  }
+  // key layout: kind(0..3) | w(10 bits) | h(10 bits) | a(6 bits) | b(3 bits)
+  function keyOf(kind, w, h, a, b) { return (((kind * 1024 + w) * 1024 + h) * 64 + a) * 8 + b; }
 
   // style: 'stone' (default) | 'dark' | 'card'
   function panel(g, x, y, w, h, style) {
     x |= 0; y |= 0; w |= 0; h |= 0;
-    if (style === 'dark') {
-      rr(g, x, y, w, h, 1);
-      g.fillStyle = P[5]; g.fillRect(x + 1, y + 1, w - 2, h - 2);
-      g.fillStyle = P[2]; g.fillRect(x + 2, y + 2, w - 4, h - 4);
-    } else if (style === 'card') {
-      rr(g, x, y, w, h, 1);
-      g.fillStyle = P[25]; g.fillRect(x + 1, y + 1, w - 2, h - 2);
-      g.fillStyle = P[24]; g.fillRect(x + 1, y + h - 2, w - 2, 1); g.fillRect(x + w - 2, y + 1, 1, h - 2);
-      g.fillStyle = P[3]; g.fillRect(x + 2, y + 2, w - 4, h - 4);
-      g.fillStyle = P[4]; g.fillRect(x + 2, y + 2, w - 4, 1);
-    } else {
-      rr(g, x, y, w, h, 1);
-      g.fillStyle = P[4]; g.fillRect(x + 1, y + 1, w - 2, h - 2);
-      g.fillStyle = P[6]; g.fillRect(x + 1, y + 1, w - 2, 1); g.fillRect(x + 1, y + 1, 1, h - 2);
-      g.fillStyle = P[3]; g.fillRect(x + 1, y + h - 2, w - 2, 1); g.fillRect(x + w - 2, y + 1, 1, h - 2);
-    }
+    if (w < 8 || h < 8) return;
+    var s = style === 'dark' ? 1 : style === 'card' ? 2 : 0, key = keyOf(1, w, h, 0, s), cv = cache.get(key);
+    if (!cv) cv = put(key, panelImg(w, h, s));
+    if (cv) g.drawImage(cv, x, y);
   }
 
   // st: { pressed, disabled, icon, glow, accent:palIndex, broken }
@@ -3465,59 +4405,43 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   //   accent = palette index of the move-colour stripe;  broken = cracked "not legal this turn" overlay
   function button(g, x, y, w, h, label, st) {
     x |= 0; y |= 0; w |= 0; h |= 0;
-    var pressed = !!(st && st.pressed), disabled = !!(st && st.disabled);
+    if (w < 12 || h < 12) return;
+    var pressed = !!(st && st.pressed), disabled = !!(st && st.disabled), broken = !!(st && st.broken);
     var icon = st && st.icon ? st.icon : null, isMove = icon === 'S' || icon === 'G' || icon === 'F';
-    var frame = 25, face = 4, text = 10, off = 0, cy, tw, lx, i, j, cx;
-    if (disabled) { frame = 5; face = 3; text = 6; }
-    else if (pressed) { frame = 24; face = 3; off = 2; }
-    else if (st && st.glow && ((now() * 2) | 0) % 2 === 0) frame = 22;
+    var accent = st && st.accent > 0 && st.accent < 32 ? st.accent | 0 : 0;
+    var state = disabled || broken ? (broken ? 4 : 3) : pressed ? 2 : (st && st.glow && ((now() * 2) | 0) % 2 === 0) ? 1 : 0;
+    var text = state >= 3 ? 6 : state === 2 ? 11 : 10, off = state === 2 ? 2 : 0;
+    var key = keyOf(0, w, h, accent, state), cv = cache.get(key), cy, cx, tw, lx, A = R.Art;
+    if (!cv) cv = put(key, buttonImg(w, h, state, accent));
+    if (cv) g.drawImage(cv, x, y);
 
-    rr(g, x, y, w, h, 1);                                   // outline
-    rr(g, x + 1, y + 1, w - 2, h - 2, frame);               // brass frame
-    if (!disabled && !pressed) {                            // frame shadow (bottom + right)
-      g.fillStyle = P[24];
-      g.fillRect(x + 2, y + h - 2, w - 4, 1); g.fillRect(x + w - 2, y + 2, 1, h - 4);
-    }
-    g.fillStyle = P[1]; g.fillRect(x + 3, y + 3, w - 6, h - 6);   // inner line
-    g.fillStyle = P[face]; g.fillRect(x + 4, y + 4, w - 8, h - 8);
-    if (!disabled && !pressed) { g.fillStyle = P[5]; g.fillRect(x + 4, y + 4, w - 8, 1); }
-    else if (pressed) { g.fillStyle = P[2]; g.fillRect(x + 4, y + 4, w - 8, 2); }
-    if (st && st.accent && h >= 20) {                       // move-colour stripe along the bottom of the face
-      g.fillStyle = P[disabled ? 5 : st.accent]; g.fillRect(x + 6, y + h - 7, w - 12, 2);
-    }
-
-    if (isMove && h >= 36 && R.Art) {
+    if (isMove && h >= 36 && A) {
       cy = y + ((h - 34) >> 1) + off;                       // 20 icon + 4 gap + 7 text, sitting above the stripe
       cx = x + ((w - 20) >> 1);
-      R.Art.sprite(g, ICON2[icon], cx, cy);
-      if (disabled) {                                       // grey the icon out with a checker of the face colour
-        g.fillStyle = P[face];
-        for (j = 0; j < 20; j++) for (i = j & 1; i < 20; i += 2) g.fillRect(cx + i, cy + j, 1, 1);
-      }
+      A.sprite(g, state >= 3 ? ICON2_OFF[icon] : ICON2[icon], cx, cy);
       if (label) R.Font.draw(g, label, x + (w >> 1), cy + 24, text, CENTER);
-      if (!disabled && R.BEATS && MINI[R.BEATS[icon]]) {    // "beats" hint in the corner
-        g.fillStyle = P[2]; g.fillRect(x + w - 13, y + 5 + off, 8, 8);
-        R.Art.sprite(g, MINI[R.BEATS[icon]], x + w - 12, y + 6 + off);
+      if (state < 3 && R.BEATS && MINI[R.BEATS[icon]]) {    // "beats" hint: a small inset in the corner
+        g.fillStyle = P[1]; g.fillRect(x + w - 14, y + 5 + off, 10, 9);
+        g.fillStyle = P[state === 2 ? 2 : 3]; g.fillRect(x + w - 13, y + 5 + off, 8, 8);
+        A.sprite(g, MINI[R.BEATS[icon]], x + w - 12, y + 6 + off);
       }
-    } else if (isMove && R.Art) {
+    } else if (isMove && A) {
       tw = label ? R.Font.width(label) + 3 : 0;
       lx = x + ((w - 10 - tw) >> 1);
       cy = y + ((h - 10) >> 1) + off;
-      R.Art.sprite(g, ICON1[icon], lx, cy);
+      A.sprite(g, state >= 3 ? ICON1_OFF[icon] : ICON1[icon], lx, cy);
       if (label) R.Font.draw(g, label, lx + 13, cy + 2, text);
-    } else if (icon && R.Art) {
+    } else if (icon && A) {
       cy = y + ((h - (label ? 22 : 12)) >> 1) + off;
-      R.Art.sprite(g, icon, x + ((w - 12) >> 1), cy);
+      A.sprite(g, icon, x + ((w - 12) >> 1), cy);
       if (label) R.Font.draw(g, label, x + (w >> 1), cy + 15, text, CENTER);
     } else if (label) {
       R.Font.draw(g, label, x + (w >> 1), y + ((h - 7) >> 1) + off, text, CENTER);
     }
-    if (st && st.broken) {                                  // jagged crack across the face
-      cx = x + (w >> 1) - 5; cy = y + 6;
-      for (i = 0, j = 0; cy + j < y + h - 8; i++, j += 4) {
-        g.fillStyle = P[1]; g.fillRect(cx + (i & 1 ? 4 : 0) + (i % 3), cy + j, 2, 5);
-        g.fillStyle = P[19]; g.fillRect(cx + (i & 1 ? 4 : 0) + (i % 3) + 2, cy + j, 1, 4);
-      }
+    if (broken && A && w >= 30 && h >= 30) {                // cracked-shield mark, top-left inset
+      g.fillStyle = P[1]; g.fillRect(x + 4, y + 5, 11, 10);
+      g.fillStyle = P[2]; g.fillRect(x + 5, y + 5, 10, 9);
+      A.sprite(g, 'st_guardBroken', x + 6, y + 5);
     }
   }
 
@@ -3525,26 +4449,22 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
   // Speech bubble; (x, y) = top-left of the body, tail tip 5 px outside it at tailX. Returns the body height.
   // tailDir 'up' | 'down' | null (no tail). opts: { phase2:bool } = inverted void/witchfire style.
+  var tails = [null, null, null, null];
   function bubble(g, x, y, w, lines, tailX, tailDir, opts) {
     x |= 0; y |= 0; w |= 0;
-    var p2 = !!(opts && (opts.phase2 || opts === 'p2')), fill = p2 ? 1 : 10, border = p2 ? 31 : 1, shade = p2 ? 2 : 12, ink = p2 ? 31 : 1;
-    var h = bubbleH(lines.length), i, tx, ty, k, half;
+    var p2 = !!(opts && (opts.phase2 || opts === 'p2')), ink = p2 ? 31 : 1;
+    var h = bubbleH(lines.length), i, tx, ti, key, cv, tc;
+    if (w < 14) return h;
     if (p2 && ((now() * 5) | 0) % 2) x += 1;                // border jitter every 200 ms
-    rr2(g, x, y, w, h, border);
-    g.fillStyle = P[fill];
-    g.fillRect(x + 2, y + 1, w - 4, h - 2);
-    g.fillRect(x + 1, y + 2, w - 2, h - 4);
-    g.fillStyle = P[shade]; g.fillRect(x + 2, y + h - 2, w - 4, 1);
+    key = keyOf(2, w, h, 0, p2 ? 1 : 0); cv = cache.get(key);
+    if (!cv) cv = put(key, bubbleImg(w, h, p2));
+    if (cv) g.drawImage(cv, x, y);
     if (tailDir === 'up' || tailDir === 'down') {
-      tx = Math.max(x + 6, Math.min(x + w - 7, tailX | 0));
-      for (k = 0; k < 5; k++) {                             // 6x5 tail, tip is 2 px wide
-        half = (k + 1) >> 1;
-        ty = tailDir === 'up' ? y - 5 + k : y + h + 4 - k;
-        g.fillStyle = P[border]; g.fillRect(tx - half, ty, 2 + half * 2, 1);
-        if (k > 0) { g.fillStyle = P[fill]; g.fillRect(tx - half + 1, ty, half * 2, 1); }
-      }
-      g.fillStyle = P[fill]; g.fillRect(tx - 1, tailDir === 'up' ? y : y + h - 1, 4, 1);          // open the border
-      if (tailDir === 'down') { g.fillStyle = P[shade]; g.fillRect(tx - 1, y + h - 2, 4, 1); }
+      tx = Math.max(x + 8, Math.min(x + w - 8, tailX | 0));
+      ti = (tailDir === 'up' ? 0 : 1) + (p2 ? 2 : 0);
+      tc = tails[ti];
+      if (!tc) tc = tails[ti] = bake(tailImg(tailDir, p2));
+      if (tc) g.drawImage(tc, tx - 4, tailDir === 'up' ? y - 5 : y + h - 1);
     }
     for (i = 0; i < lines.length; i++) R.Font.draw(g, lines[i], x + 4, y + 3 + i * 9, ink);
     return h;
@@ -3555,21 +4475,39 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function bar(g, x, y, w, h, frac, lagFrac, palIndex, opts) {
     x |= 0; y |= 0; w |= 0; h |= 0;
     var iw = w - 2, ih = h - 2, pal = palIndex || 18, rtl = !!(opts && (opts.flip || opts.rtl)), n = opts && opts.ticks ? opts.ticks | 0 : 0;
-    var f = frac > 1 ? 1 : frac > 0 ? frac : 0, l = lagFrac > 1 ? 1 : lagFrac > 0 ? lagFrac : 0, fw, lw, i, tx;
+    var f = frac > 1 ? 1 : frac > 0 ? frac : 0, l = lagFrac > 1 ? 1 : lagFrac > 0 ? lagFrac : 0, fw, lw, i, tx, fx, lx;
+    if (iw < 1 || ih < 1) return;
     fw = Math.round(iw * f); if (f > 0 && fw < 1) fw = 1;
     lw = Math.round(iw * l);
-    g.fillStyle = P[1]; g.fillRect(x, y, w, h);
+    // frame: void, with the corners knocked off and a lit lower lip
+    g.fillStyle = P[1]; g.fillRect(x + 1, y, w - 2, h); g.fillRect(x, y + 1, w, h - 2);
     g.fillStyle = P[3]; g.fillRect(x + 1, y + 1, iw, ih);
-    if (lw > fw) { g.fillStyle = P[10]; g.fillRect(rtl ? x + 1 + iw - lw : x + 1 + fw, y + 1, lw - fw, ih); }
-    if (fw > 0) {
-      g.fillStyle = P[pal]; g.fillRect(rtl ? x + 1 + iw - fw : x + 1, y + 1, fw, ih);
-      g.fillStyle = P[HI[pal] || pal]; g.fillRect(rtl ? x + 1 + iw - fw : x + 1, y + 1, fw, 1);
+    g.fillStyle = P[2]; g.fillRect(x + 1, y + 1, iw, 1);                        // recess shadow
+    if (lw > fw) {                                                              // lag chunk (bone)
+      lx = rtl ? x + 1 + iw - lw : x + 1 + fw;
+      g.fillStyle = P[10]; g.fillRect(lx, y + 1, lw - fw, ih);
+      if (ih >= 3) { g.fillStyle = P[11]; g.fillRect(lx, y + ih, lw - fw, 1); }
     }
-    if (n > 1 && iw / n >= 2) {
-      g.fillStyle = P[1];
+    if (fw > 0) {
+      fx = rtl ? x + 1 + iw - fw : x + 1;
+      g.fillStyle = P[pal]; g.fillRect(fx, y + 1, fw, ih);
+      g.fillStyle = P[HI[pal] || pal]; g.fillRect(fx, y + 1, fw, 1);            // lighter top row
+      if (ih >= 4) { g.fillStyle = P[LO[pal] || pal]; g.fillRect(fx, y + ih, fw, 1); }
+    }
+    if (n > 1 && iw / n >= 2) {                                                 // one notch per HP
       for (i = 1; i < n; i++) {
         tx = Math.round(iw * i / n);
-        g.fillRect(rtl ? x + 1 + iw - tx : x + tx, y + h - 1 - (ih >> 1), 1, ih >> 1);
+        tx = rtl ? x + 1 + iw - tx : x + tx;
+        g.fillStyle = P[1]; g.fillRect(tx, y + h - 1 - (ih >> 1), 1, ih >> 1);
+        g.fillStyle = P[2]; g.fillRect(tx, y + 1, 1, ih - (ih >> 1));
+      }
+      if (fw > 0) {                                                             // inside the fill the notch top stays blood-dark
+        g.fillStyle = P[LO[pal] || pal];
+        for (i = 1; i < n; i++) {
+          tx = Math.round(iw * i / n);
+          tx = rtl ? x + 1 + iw - tx : x + tx;
+          if (tx >= fx && tx < fx + fw) g.fillRect(tx, y + 1, 1, ih - (ih >> 1));
+        }
       }
     }
   }
@@ -8736,7 +9674,13 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       def = scenes[name] || (R.Scenes && R.Scenes[name]);          // scene files register on R.Scenes
       if (!def) { warn('RIVAL: unknown scene "' + name + '"'); def = {}; }
       cur = def; E.sceneName = name;
-      if (cur.enter) cur.enter(nxArgs);
+      if (cur.enter) {
+        try { cur.enter(nxArgs); }
+        catch (e2) {                                               // a scene that cannot start (bad save...) must not
+          warn(e2);                                                // strand the player on a dead screen: back to the title
+          if (name !== 'title') { nxName = 'title'; nxArgs = null; nxFade = 0.25; hasNext = true; }
+        }
+      }
     }
     trDur = nxFade;
   }
@@ -8835,6 +9779,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     gestured = true;
     try { if (R.Audio && R.Audio.init) R.Audio.init(); } catch (e) { warn(e); }
   }
+  // A touch pointerdown / touchstart is not a user activation (iOS Safari, Chrome): an AudioContext created there
+  // stays suspended. Releases and key presses are activations, so every one retries (a no-op once audio runs).
+  function gestureEnd() { try { if (gestured && R.Audio && R.Audio.init) R.Audio.init(); } catch (e) { warn(e); } }
   function blocked() { return trPhase === 1 || hasNext || E.rotated; }
   function ix(clientX) { return Math.floor((clientX - cssL) / cssPer); }
   function iy(clientY) { return Math.floor((clientY - cssT) / cssPer); }
@@ -8870,20 +9817,27 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     if (window.PointerEvent) {
       window.addEventListener('pointerdown', function (e) {
         if (e.pointerType === 'mouse' && e.button !== 0) return;
+        // A new primary pointer while another one is still tracked: that one's up/cancel never arrived (touch
+        // ids are never reused, so the same-id check in pDown cannot catch it). Without this, input stays dead.
+        if (e.isPrimary && ptrId !== null && ptrId !== e.pointerId) releasePointer();
         pDown(e.pointerId, e.clientX, e.clientY);
       }, opt);
       window.addEventListener('pointermove', function (e) { pMove(e.pointerId, e.clientX, e.clientY); }, opt);
-      window.addEventListener('pointerup', function (e) { pUp(e.pointerId, e.clientX, e.clientY, false); }, opt);
+      window.addEventListener('pointerup', function (e) { gestureEnd(); pUp(e.pointerId, e.clientX, e.clientY, false); }, opt);
       window.addEventListener('pointercancel', function (e) { pUp(e.pointerId, e.clientX, e.clientY, true); }, opt);
     } else {
       // Fallback for browsers without Pointer Events: touches (first finger) and the mouse.
-      window.addEventListener('touchstart', function (e) { var t = e.changedTouches[0]; if (t) pDown('t' + t.identifier, t.clientX, t.clientY); }, opt);
+      window.addEventListener('touchstart', function (e) {
+        var t = e.changedTouches[0];
+        if (ptrId !== null && e.touches && e.touches.length === e.changedTouches.length) releasePointer();   // no other finger is down: the tracked one was lost
+        if (t) pDown('t' + t.identifier, t.clientX, t.clientY);
+      }, opt);
       window.addEventListener('touchmove', function (e) { for (i = 0; i < e.changedTouches.length; i++) pMove('t' + e.changedTouches[i].identifier, e.changedTouches[i].clientX, e.changedTouches[i].clientY); }, opt);
-      window.addEventListener('touchend', function (e) { for (i = 0; i < e.changedTouches.length; i++) pUp('t' + e.changedTouches[i].identifier, e.changedTouches[i].clientX, e.changedTouches[i].clientY, false); }, opt);
+      window.addEventListener('touchend', function (e) { gestureEnd(); for (i = 0; i < e.changedTouches.length; i++) pUp('t' + e.changedTouches[i].identifier, e.changedTouches[i].clientX, e.changedTouches[i].clientY, false); }, opt);
       window.addEventListener('touchcancel', function (e) { for (i = 0; i < e.changedTouches.length; i++) pUp('t' + e.changedTouches[i].identifier, 0, 0, true); }, opt);
       window.addEventListener('mousedown', function (e) { if (e.button === 0) pDown('m', e.clientX, e.clientY); });
       window.addEventListener('mousemove', function (e) { pMove('m', e.clientX, e.clientY); });
-      window.addEventListener('mouseup', function (e) { pUp('m', e.clientX, e.clientY, false); });
+      window.addEventListener('mouseup', function (e) { gestureEnd(); pUp('m', e.clientX, e.clientY, false); });
     }
     // Kill scroll, pinch, double-tap zoom, long-press menus and selection.
     var stop = ['touchstart', 'touchmove', 'touchend', 'gesturestart', 'gesturechange', 'gestureend', 'contextmenu', 'selectstart', 'dblclick', 'dragstart'];
@@ -10339,6 +11293,12 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   var BTN_X = { S: 4, G: 62, F: 120 };
   var PX = 44, RX = 136;                       // fighter feet x
   var STATUS = ['guardBroken', 'bleed', 'fortify', 'focus'];
+  // Shared draw options and names: nothing below may build an object or a string per frame.
+  var OPT_R = { align: 'right' }, OPT_C = { align: 'center' }, OPT_CS = { align: 'center', shadow: 1 }, OPT_CS2 = { align: 'center', shadow: 1, scale: 2 };
+  var OPT_P2 = { phase2: true }, BAR_P = { ticks: 0 }, BAR_R = { ticks: 0, flip: true };
+  var ST_SPR = { guardBroken: 'st_guardBroken', bleed: 'st_bleed', fortify: 'st_fortify', focus: 'st_focus' };
+  var ACT_SPR = { glimpse: 'act_glimpse', honesty: 'act_honesty', coin: 'act_coin' };
+  var DIGIT = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
   function hex(i) { return R.Pal.hex[i]; }
   function sfx(n, o) { if (R.Audio) R.Audio.sfx(n, o); }
@@ -10445,6 +11405,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     for (i = 0; i < S.floats.length; i++) if (S.floats[i].life <= 0) { f = S.floats[i]; break; }
     if (!f) { if (S.floats.length >= 10) return; f = {}; S.floats.push(f); }
     f.text = String(text); f.x = x; f.y = y; f.col = col; f.life = 0.9; f.big = !!big;
+    f.opts = f.big && f.text.length < 4 ? OPT_CS2 : OPT_CS;
+    f.hw = (R.Font.width(f.text, f.opts === OPT_CS2 ? 2 : 1) >> 1) + 2;   // half width (+ shadow): keeps long names on screen
   }
   function sideX(side) { return side === 'p' ? PX : RX; }
   function headY() { return L.floorY - 46; }
@@ -10552,7 +11514,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
   function* intro() {
     var n = S.duelN;
-    S.banner = { t: 0, a: 'DUEL ' + n, b: (R.Text.duelNames && R.Text.duelNames[n - 1]) || '' };
+    S.banner = { t: 0, a: 'DUEL ' + n, b: String((R.Text.duelNames && R.Text.duelNames[n - 1]) || '').toUpperCase() };
     S.rv.ox = 50; play(S.rv, 'idle', 'loop');
     slide(S.rv, 0, 0.5);
     sfx('step');
@@ -10604,7 +11566,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       run.pending = { sealed: sealed, turn: duel.turn, n: duel.n, phase: duel.phase, called: called };
       G.save();
     }
-    S.called = called;
+    S.called = called; S.calledText = called ? mname(called).toUpperCase() + '?' : '';
     S.rSigil = 'sealed'; S.rSigilT = 0; S.pSigil = 'gone'; S.glass = null; S.stamp = null;
     sfx('seal');
     yield 0.3;
@@ -10640,7 +11602,10 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     S.reveal = function (kind) {               // active boons (Keyhole / Candle of Truth)
       if (kind === 'glimpse') S.glass = sealed.move;
       else if (kind === 'honesty') S.stamp = sealed.honest;
+      if (run.pending) run.pending['seen_' + kind] = true;      // saved by useActive(): a reload shows it again
     };
+    if (resume && pend.seen_glimpse) S.glass = sealed.move;
+    if (resume && pend.seen_honesty) S.stamp = sealed.honest;
     S.choice = null; S.coin = false; S.idleT = 0;
     S.fast = false; E.timeScale = 1;
     S.hint = hintFor(duel);
@@ -10970,10 +11935,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     g.fillStyle = hex(2); g.fillRect(0, 0, 180, y + 33);
     g.fillStyle = hex(5); g.fillRect(0, y + 33, 180, 1);
     var pulse = low(d.p) && (Math.floor(S.clock * 2.2) & 1) ? 19 : 18;
-    R.UI.bar(g, 4, y + 4, 72, 7, S.hp.p / d.p.maxHp, S.lag.p / d.p.maxHp, pulse, { ticks: d.p.maxHp });
-    R.UI.bar(g, 104, y + 4, 72, 7, S.hp.r / d.r.maxHp, S.lag.r / d.r.maxHp, S.phase2 ? 31 : 18, { ticks: d.r.maxHp, flip: true });
+    BAR_P.ticks = d.p.maxHp; BAR_R.ticks = d.r.maxHp;
+    R.UI.bar(g, 4, y + 4, 72, 7, S.hp.p / d.p.maxHp, S.lag.p / d.p.maxHp, pulse, BAR_P);
+    R.UI.bar(g, 104, y + 4, 72, 7, S.hp.r / d.r.maxHp, S.lag.r / d.r.maxHp, S.phase2 ? 31 : 18, BAR_R);
     R.Font.draw(g, S.txtP, 4, y + 13, 10);
-    R.Font.draw(g, S.txtR, 176, y + 13, 10, { align: 'right' });
+    R.Font.draw(g, S.txtR, 176, y + 13, 10, OPT_R);
     // duel pips
     var n = S.duelN;
     for (i = 1; i <= 7; i++) {
@@ -10995,8 +11961,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     var px = 4, rx = 168, s;
     for (i = 0; i < STATUS.length; i++) {
       s = STATUS[i];
-      if (d.p.status[s] > 0) { R.Art.sprite(g, 'st_' + s, px, y + 23); px += 10; }
-      if (d.r.status[s] > 0) { R.Art.sprite(g, 'st_' + s, rx, y + 23); rx -= 10; }
+      if (d.p.status[s] > 0) { R.Art.sprite(g, ST_SPR[s], px, y + 23); px += 10; }
+      if (d.r.status[s] > 0) { R.Art.sprite(g, ST_SPR[s], rx, y + 23); rx -= 10; }
     }
     for (i = 0; i < 3; i++) {
       var m = MOVES[i];
@@ -11019,11 +11985,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     for (i = 0; i < S.actives.length; i++) {
       var id = S.actives[i], ch = (S.duel.p.charges && S.duel.p.charges[id]) || 0;
       R.UI.button(g, 4 + i * 26, y + 1, 22, 22, '', { disabled: ch <= 0 || !S.input, pressed: S.pressA === i });
-      R.Art.sprite(g, 'act_' + ((R.Boons.byId[id].active || {}).kind || 'glimpse'), 4 + i * 26 + 5, y + 5 + (S.pressA === i ? 1 : 0));
-      if (ch > 0) R.Font.draw(g, String(ch), 4 + i * 26 + 20, y + 15, 22, { align: 'right' });
+      R.Art.sprite(g, ACT_SPR[(R.Boons.byId[id].active || OPT_C).kind] || 'act_glimpse', 4 + i * 26 + 5, y + 5 + (S.pressA === i ? 1 : 0));
+      if (ch > 0) R.Font.draw(g, DIGIT[ch] || '9', 4 + i * 26 + 20, y + 15, 22, OPT_R);
     }
     var hint = S.input ? (S.hint || S.infoLine) : null;
-    if (hint) R.Font.draw(g, hint, 176, y + 8, S.hint ? ((Math.floor(S.clock * 3) & 1) ? 21 : 19) : 12, { align: 'right' });
+    if (hint) R.Font.draw(g, hint, 176, y + 8, S.hint ? ((Math.floor(S.clock * 3) & 1) ? 21 : 19) : 12, OPT_R);
     // moves
     for (i = 0; i < 3; i++) {
       m = MOVES[i];
@@ -11038,25 +12004,23 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     }
   }
 
+  // Boon ledger: one page per fighter (S.overlay 1 = its boons, 2 = yours). Wrapped once when it opens.
+  function ledgerPage(ids) {
+    var out = [], i, b;
+    for (i = 0; i < ids.length; i++) { b = R.Boons.byId[ids[i]]; out.push({ name: boonName(ids[i]), lines: R.Font.wrap(b ? b.desc : '', 158) }); }
+    return out;
+  }
+  function openLedger() { S.ledger = [ledgerPage(S.duel.r.boons), ledgerPage(S.duel.p.boons)]; S.overlay = 1; sfx('tick'); }
   function drawOverlay(g) {
-    var d = S.duel, y = L.arenaY + 4, i, id, b;
-    R.UI.panel(g, 4, L.arenaY, 172, L.bandY - L.arenaY + 30, 'dark');
-    R.Font.draw(g, 'YOUR BOONS', 10, y + 2, 21); y += 12;
-    if (!d.p.boons.length) { R.Font.draw(g, '(none yet)', 10, y, 7); y += 10; }
-    for (i = 0; i < d.p.boons.length && y < L.bandY + 10; i++) {
-      id = d.p.boons[i]; b = R.Boons.byId[id];
-      R.Font.draw(g, boonName(id), 10, y, 10); y += 9;
-      var ls = R.Font.wrap(b ? b.desc : '', 158);
-      for (var k = 0; k < ls.length; k++) { R.Font.draw(g, ls[k], 14, y, 8); y += 8; }
-      y += 2;
-    }
-    y += 3; R.Font.draw(g, 'ITS BOONS', 10, y, 19); y += 12;
-    if (!d.r.boons.length) { R.Font.draw(g, '(none yet)', 10, y, 7); y += 10; }
-    for (i = 0; i < d.r.boons.length && y < L.bandY + 10; i++) {
-      id = d.r.boons[i]; b = R.Boons.byId[id];
-      R.Font.draw(g, boonName(id), 10, y, 10); y += 9;
-      var lr = R.Font.wrap(b ? b.desc : '', 158);
-      for (var j = 0; j < lr.length; j++) { R.Font.draw(g, lr[j], 14, y, 8); y += 8; }
+    var its = S.overlay === 1, list = S.ledger[its ? 0 : 1], y = L.arenaY + 6, bot = L.btnY + L.btnH, i, k;
+    R.UI.panel(g, 4, L.arenaY, 172, bot - L.arenaY, 'dark');
+    R.Font.draw(g, its ? 'ITS BOONS' : 'YOUR BOONS', 10, y, its ? 19 : 21);
+    R.Font.draw(g, its ? 'TAP: YOURS' : 'TAP: CLOSE', 170, y, 7, OPT_R);
+    y += 12;
+    if (!list.length) R.Font.draw(g, '(none yet)', 10, y, 7);
+    for (i = 0; i < list.length && y + 9 + list[i].lines.length * 8 <= bot - 3; i++) {
+      R.Font.draw(g, list[i].name, 10, y, 10); y += 9;
+      for (k = 0; k < list[i].lines.length; k++) { R.Font.draw(g, list[i].lines[k], 14, y, 8); y += 8; }
       y += 2;
     }
   }
@@ -11156,14 +12120,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         R.Art.sigil(g, 36, L.floorY - 68 - dp + bob, S.pSigil, S.shownP, 'p');
       }
       if (S.stamp !== null && S.input) {
-        R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, { align: 'center', shadow: 1 });
+        R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, OPT_CS);
       }
-      if (S.called && S.input) R.Font.draw(g, mname(S.called).toUpperCase() + '?', PX, L.floorY - 84, 31, { align: 'center', shadow: 1 });
+      if (S.called && S.input) R.Font.draw(g, S.calledText, PX, L.floorY - 84, 31, OPT_CS);
       // floating numbers / labels
       for (i = 0; i < S.floats.length; i++) {
         var f = S.floats[i];
         if (f.life > 0 && (f.life > 0.25 || (Math.floor(f.life * 30) & 1))) {
-          R.Font.draw(g, f.text, Math.max(30, Math.min(150, Math.round(f.x))), Math.round(f.y), f.col, { align: 'center', shadow: 1, scale: f.big && f.text.length < 4 ? 2 : 1 });
+          R.Font.draw(g, f.text, Math.max(f.hw, Math.min(180 - f.hw, Math.round(f.x))), Math.round(f.y), f.col, f.opts);
         }
       }
       // deathblow letterbox
@@ -11174,8 +12138,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (S.banner) {
         var bt = S.banner.t;
         if (bt < 1.9 || (Math.floor(bt * 20) & 1)) {
-          R.Font.draw(g, S.banner.a, 90, L.arenaY + 16, 10, { align: 'center', shadow: 1, scale: 2 });
-          R.Font.draw(g, S.banner.b.toUpperCase(), 90, L.arenaY + 36, 21, { align: 'center', shadow: 1 });
+          R.Font.draw(g, S.banner.a, 90, L.arenaY + 16, 10, OPT_CS2);
+          R.Font.draw(g, S.banner.b, 90, L.arenaY + 36, 21, OPT_CS);
         }
       }
       if (S.dying > 0) {                         // the arena drains to black in steps
@@ -11185,20 +12149,20 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       }
       drawHud(g);
       drawButtons(g);
-      if (S.bub) R.UI.bubble(g, 4, L.bandY + 2, 172, bubbleLines(S.bub), 136, 'up', S.phase2 ? { phase2: true } : null);
+      if (S.bub) R.UI.bubble(g, 4, L.bandY + 2, 172, bubbleLines(S.bub), 136, 'up', S.phase2 ? OPT_P2 : null);
       if (S.card) {
         R.UI.panel(g, 14, L.arenaY + 40, 152, 44, 'card');
-        R.Font.draw(g, S.card.name, 90, L.arenaY + 47, 31, { align: 'center', scale: 1 });
-        var cl = R.Font.wrap(S.card.line, 140);
-        for (i = 0; i < cl.length && i < 2; i++) R.Font.draw(g, cl[i], 90, L.arenaY + 60 + i * 9, 10, { align: 'center' });
+        R.Font.draw(g, S.card.name, 90, L.arenaY + 47, 31, OPT_C);
+        var cl = S.card.lines || (S.card.lines = R.Font.wrap(S.card.line, 140));   // wrapped once per card
+        for (i = 0; i < cl.length && i < 2; i++) R.Font.draw(g, cl[i], 90, L.arenaY + 60 + i * 9, 10, OPT_C);
       }
       if (S.overlay) drawOverlay(g);
     },
     down: function (x, y) {
       if (!S) return;
-      if (S.overlay) { S.overlay = false; sfx('back'); return; }
+      if (S.overlay) { S.overlay = S.overlay === 1 ? 2 : 0; sfx(S.overlay ? 'tick' : 'back'); return; }
       S.tapped = true;
-      if (y >= L.hudY + 18 && y < L.hudY + 34 && x >= 74 && x < 106) { S.overlay = true; sfx('tick'); return; }
+      if (y >= L.hudY + 14 && y < L.hudY + 34 && x >= 74 && x < 106) { openLedger(); return; }
       var a = activeAt(x, y);
       if (a >= 0) { S.pressA = a; return; }
       var m = btnAt(x, y);
@@ -11219,7 +12183,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     // Test hook: public information only (what a player can see on screen).
     peek: function () { return S ? { input: S.input, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
     pause: function () { if (S && G) G.save(); },
-    back: function () { if (S) S.overlay = !S.overlay; }
+    back: function () { if (!S) return; if (S.overlay) S.overlay = 0; else openLedger(); },
+    resize: function () { if (S) layout(); }       // update() does not run while paused / in hit-stop: keep the layout current
   };
 
   R.Scenes = R.Scenes || {};
@@ -11461,7 +12426,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         bBack: K.Button(40, 0, 100, 36, K.ui('back', 'BACK')),
         btns: null
       };
-      S.bCred.hidden = !(G.meta && G.meta.seenCredits);
+      // seenCredits is only set when the roll starts; a page closed on the first victory screen never gets there,
+      // so anyone who has won may replay it.
+      S.bCred.hidden = !(G.meta && (G.meta.seenCredits || (G.meta.memory && G.meta.memory.wins >= 1)));
       S.btns = [S.bMute, S.bHap, S.bMask, S.bArena, S.bCred, S.bBack];
       labels();
       layout();
@@ -11477,6 +12444,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
           S.erased = true; S.leaving = true;
           K.sfx('you_died', { vol: 0.6 }); E.buzz([40, 60, 120]);
           G.resetAll();
+          if (R.Audio && R.Audio.setMuted) R.Audio.setMuted(!!st().muted);   // settings are back to defaults: un-mute the mixer too
         }
       } else if (S.warn > 0) {
         S.warn -= dt;
@@ -12216,8 +13184,22 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
   function now() { return Date.now(); }
   function freshSeed() { return ((now() & 0xffffffff) ^ Math.floor(Math.random() * 0x100000000)) >>> 0; }
+  // A stored run must be complete enough to resume. Anything else (hand-edited or half-written storage, a save from
+  // an older build) is dropped; a current duel or commit of an older shape is dropped alone, so the duel restarts
+  // and the run survives.
   function validRun(run) {
-    return !!(run && typeof run === 'object' && typeof run.stage === 'string' && run.stats && Array.isArray(run.pBoons) && Array.isArray(run.rBoons));
+    if (!(run && typeof run === 'object' && run.stats && typeof run.stats === 'object' && Array.isArray(run.pBoons) && Array.isArray(run.rBoons))) return false;
+    if (run.stage !== 'duel' && run.stage !== 'bonfire') return false;      // 'won' / 'dead' are never resumable
+    if (!(run.duelN >= 1 && run.duelN <= 7 && run.pHp >= 0 && run.pMaxHp >= 1)) return false;
+    if (run.stage === 'bonfire' && !(run.offer && Array.isArray(run.offer.choices))) return false;
+    var d = run.duel, q = run.pending && run.pending.sealed;
+    if (d && !(d.turn >= 1 && d.tally && d.p && d.r && d.p.status && d.r.status && d.p.status.sealed && d.r.status.sealed &&
+               d.p.counters && d.r.counters && d.p.charges && d.r.charges && Array.isArray(d.p.moves) && Array.isArray(d.r.moves) &&
+               Array.isArray(d.p.results) && Array.isArray(d.r.results) && Array.isArray(d.p.boons) && Array.isArray(d.r.boons))) {
+      run.duel = null; run.pending = null;
+    }
+    if (run.pending && !(q && q.pred && typeof q.move === 'string' && typeof q.tell === 'string')) run.pending = null;
+    return true;
   }
 
   var G = R.Game = {

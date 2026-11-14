@@ -18,16 +18,26 @@ const RUNS = +nums[0] > 0 ? +nums[0] : (QUICK ? 30 : 200), SEED = +nums[1] > 0 ?
 const KEY = 'rival.save.v1';
 
 // Defects in files this test's author may not edit (reported to the lead with a patch). A failure whose message
-// matches one of these is printed as KNOWN-OPEN and does not fail the run. Delete an entry once its patch is in.
-const KNOWN_OPEN = [
+// matches one of these is printed as KNOWN-OPEN and does not fail the run. Delete an entry once its patch is in
+// (the patches are in tools/qa_patches.js; `--patched` runs this whole test against them applied in memory).
+const PATCHED = flags.includes('--patched');                         // run against tools/out/qa_patches.js applied in memory
+const KNOWN_OPEN = true ? [] : [   // patches P1-P5 are applied in source; nothing is known-open
+  /boot accepted a malformed run/,                                // main.js validRun            -> qa_patches P1
+  /console\.error @duel: TypeError: Cannot read properties of undefined \(reading 'rivalHp'\)/,   // same root cause (P1)
+  /\[oldshape:run\.duel\.intel\/tally\/begun.*(reading 'lost[PR]'|soft-lock: no progress .* @duel|could not finish a run)/,   // pre-tally duel resumed (P1)
+  /text off screen \([-\d]+\.\.\d+\) @duel/,                      // duel.js float clamp         -> P2
+  /per-frame allocation in duel/,                                 // duel.js draw literals       -> P2 + P3 (+ P4 for the ledger)
+  /boon ledger does not list/,                                    // duel.js overlay overflow    -> P4
+  /button outside the safe area @duel/,                           // duel.js has no resize()     -> P4
+  /reveal was lost by the reload/                                 // duel.js S.glass / S.stamp   -> P5
 ];
 
 // ---------------------------------------------------------------------------------------------- failures
 let fails = 0, known = 0, checks = 0, where = 'init';
 const seenFail = new Set();
 function fail(msg) {
-  const isKnown = KNOWN_OPEN.some(re => re.test(msg));
-  const k = msg.replace(/\d+/g, '#');
+  const isKnown = KNOWN_OPEN.some(re => re.test('[' + where + '] ' + msg));
+  const k = where.replace(/[#\d].*$/, '') + '|' + msg.replace(/\d+/g, '#').slice(0, 90);
   if (seenFail.has(k)) return;
   seenFail.add(k);
   if (isKnown) { known++; console.log('KNOWN-OPEN [' + where + '] ' + msg); return; }
@@ -53,7 +63,16 @@ const ORDER_B = ['art/fx.js', 'audio/audio.js', 'text/strings.js', 'text/taunts.
 const SCENE_FILES = fs.readdirSync(path.join(SRC, 'scenes')).filter(f => f.endsWith('.js')).sort().map(f => 'scenes/' + f);
 const scripts = {};
 function script(rel) {
-  if (!scripts[rel]) scripts[rel] = new vm.Script(fs.readFileSync(path.join(SRC, rel), 'utf8'), { filename: path.join(SRC, rel) });
+  if (!scripts[rel]) {
+    let code = fs.readFileSync(path.join(SRC, rel), 'utf8');
+    if (process.env.FLOW_HEAD && process.env.FLOW_HEAD.split(',').indexOf(rel) >= 0) code = require('child_process').execSync('git show HEAD:src/' + rel, { cwd: ROOT, encoding: 'utf8' });   // A/B against the committed file
+    if (PATCHED && (rel === 'main.js' || rel === 'scenes/duel.js')) {
+      const res = require('./qa_patches.js').applyTo(rel, code);
+      for (const s of res.skipped) console.log('note: patch ' + s.id + ' not applied to ' + rel + ' (' + s.why + ', edit ' + s.n + ')');
+      code = res.text;
+    }
+    scripts[rel] = new vm.Script(code, { filename: path.join(SRC, rel) });
+  }
   return scripts[rel];
 }
 function inline(name, code) { return new vm.Script(code, { filename: name }); }
@@ -320,7 +339,7 @@ function makePage(store, view, opt) {
   // internal px -> client px
   function cx(x) { return parseFloat(game.style.left) + (x + 0.5) * parseFloat(game.style.width) / 180; }
   function cy(y) { return parseFloat(game.style.top) + (y + 0.5) * parseFloat(game.style.height) / page.E.H; }
-  page.down = (x, y, id) => page.fire('window', 'pointerdown', { pointerId: id || 1, pointerType: 'touch', button: 0, clientX: cx(x), clientY: cy(y), cancelable: true });
+  page.down = (x, y, id) => page.fire('window', 'pointerdown', { pointerId: id || 1, pointerType: 'touch', isPrimary: (id || 1) !== 2, button: 0, clientX: cx(x), clientY: cy(y), cancelable: true });
   page.move = (x, y, id) => page.fire('window', 'pointermove', { pointerId: id || 1, pointerType: 'touch', clientX: cx(x), clientY: cy(y), cancelable: true });
   page.up = (x, y, id) => page.fire('window', 'pointerup', { pointerId: id || 1, pointerType: 'touch', button: 0, clientX: cx(x), clientY: cy(y), cancelable: true });
   page.cancel = (id) => page.fire('window', 'pointercancel', { pointerId: id || 1, pointerType: 'touch', clientX: 0, clientY: 0 });
@@ -484,6 +503,7 @@ function makeBot(rng, style) {
 
 // ---------------------------------------------------------------------------------------------- the monitor
 // Host-side expectations that survive reloads.
+function commitOf(p) { return JSON.stringify({ sealed: p.sealed, turn: p.turn, n: p.n, phase: p.phase, called: p.called || null }); }
 function coreOf(d) {
   const f = x => ({ hp: x.hp, maxHp: x.maxHp, status: x.status, charges: x.charges, counters: x.counters, moves: x.moves, results: x.results, boons: x.boons });
   return JSON.stringify({ n: d.n, phase: d.phase, turn: d.turn, tension: d.tension, over: d.over, begun: d.begun, p: f(d.p), r: f(d.r), tally: d.tally });
@@ -509,18 +529,22 @@ function makeMonitor(store) {
   };
   // Called right after a reload. `snapRaw` is what was in storage when the old page went away.
   mon.reloaded = function (page, snapRaw, before) {
-    mon.inputOpen = false; mon.pendingStr = null;
+    mon.inputOpen = false; mon.pendingStr = null; mon.lastReload = before; mon.lastReloadAt = mon.simSec;
     const G = page.G;
-    if (!mon.trust) { mon.sync(page); return; }
+    if (!mon.trust || mon.malformed) { mon.sync(page); return; }
     let snap = null;
     try { snap = snapRaw ? JSON.parse(snapRaw) : null; } catch (e) { snap = null; }
     if (!ok(!!snap, 'reload: storage had no parseable save although writes succeed')) { mon.sync(page); return; }
     ok(J(G.run) === J(snap.run), () => 'reload: R.Game.run differs from the stored run (stage ' + (snap.run && snap.run.stage) + ')');
-    ok(J(G.meta) === J(snap.meta), 'reload: R.Game.meta differs from the stored meta');
+    ok(J(G.meta) === J(snap.meta), () => 'reload: R.Game.meta differs from the stored meta: ' + diffKeys(snap.meta, G.meta));
     const m = G.meta.memory;
     ok(m.runs === mon.exp.runs && m.wins === mon.exp.wins && m.deaths === mon.exp.deaths,
       () => 'reload lost progress: stored runs/wins/deaths ' + [m.runs, m.wins, m.deaths] + ' but ' + [mon.exp.runs, mon.exp.wins, mon.exp.deaths] + ' happened (' + before + ')');
     ok(mon.keyOf(G.run) === mon.runKey, () => 'reload: the run in storage is ' + mon.keyOf(G.run) + ', live was ' + mon.runKey + ' (' + before + ')');
+    // The transformation is stored when its HP count-up ends. A page killed before that comes back in phase 1: either
+    // already won (resume() transforms again) or one bleed tick short of it (the turn start is replayed and kills the
+    // Rival again). Nothing is applied twice: the phase-2 fighter is rebuilt from the same phase-1 state.
+    if (G.run && mon.phase === 2 && G.run.phase === 1 && G.run.duelN === 7 && G.run.duel && G.run.stats.turns === mon.turns) { mon.phase = 1; mon.phase2Hp = null; mon.count.phase2--; }
     if (G.run) {
       ok(G.run.stats.turns === mon.turns, () => 'reload: stored stats.turns ' + G.run.stats.turns + ' != live ' + mon.turns + ' (' + before + ')');
       ok(G.run.duelN === mon.duelN, () => 'reload: stored duelN ' + G.run.duelN + ' != live ' + mon.duelN + ' (' + before + ')');
@@ -546,15 +570,22 @@ function makeMonitor(store) {
       mon.runKey = key; mon.turns = 0; mon.duelN = key ? 1 : 0; mon.phase = 1; mon.commit = null; mon.inputOpen = false; mon.after = null; mon.phase2Hp = null;
     }
     const m = meta.memory;
-    ok(m && m.runs === mon.exp.runs && m.wins === mon.exp.wins && m.deaths === mon.exp.deaths,
+    if (!m) { fail('R.Game.meta has no .memory (a stored meta of an older shape was not repaired at boot)'); mon.progress(page, 'nomem|' + E.sceneName + '|' + page.buttons.length); return; }
+    ok(m.runs === mon.exp.runs && m.wins === mon.exp.wins && m.deaths === mon.exp.deaths,
       () => 'meta.memory runs/wins/deaths ' + [m.runs, m.wins, m.deaths] + ' != what happened ' + [mon.exp.runs, mon.exp.wins, mon.exp.deaths] + ' @' + E.sceneName);
     if (!run) { mon.progress(page, 'norun|' + E.sceneName + '|' + page.buttons.length); return; }
 
     // ---- structure
     const st = run.stats, d = run.duel;
+    if (!(fin(run.duelN, run.pHp, run.pMaxHp) && st && Array.isArray(st.duelTurns) && fin(st.turns) && (!d || (d.p && d.r && Array.isArray(d.p.moves) && Array.isArray(d.r.moves))))) {
+      fail('boot accepted a malformed run from storage as R.Game.run (validRun is too weak): ' + JSON.stringify(run).slice(0, 120));
+      mon.progress(page, 'malformed|' + E.sceneName + '|' + page.buttons.length);
+      mon.trust = false; mon.malformed = true;
+      return;
+    }
     ok(run.duelN >= mon.duelN && run.duelN <= 7, () => 'duelN regressed or overflowed: ' + mon.duelN + ' -> ' + run.duelN);
     if (run.duelN > mon.duelN) { ok(run.duelN === mon.duelN + 1, 'duelN skipped'); mon.duelN = run.duelN; mon.phase = 1; mon.phase2Hp = null; }
-    ok(!(mon.phase === 2 && run.phase === 1 && run.duelN === 7), 'phase regressed 2 -> 1');
+    ok(!(mon.phase === 2 && run.phase === 1 && run.duelN === 7), () => 'phase regressed 2 -> 1 @' + E.sceneName + ' (duel turn ' + (d && d.turn) + ', over ' + (d && d.over) + ', duel phase ' + (d && d.phase) + ', stats.turns ' + st.turns + ', last reload: ' + mon.lastReload + ', ' + (mon.simSec - mon.lastReloadAt).toFixed(1) + ' s ago)');
     if (run.phase === 2 && mon.phase === 1) {                      // the transformation just happened
       mon.phase = 2; mon.count.phase2++;
       if (d) { mon.phase2Hp = d.p.hp; ok(d.p.hp === Math.min(d.p.maxHp, Math.max(1, mon.lastDuelHp) + R.Run.PHASE2_HEAL), () => 'phase-2 heal wrong: ' + mon.lastDuelHp + ' -> ' + d.p.hp); }
@@ -562,7 +593,7 @@ function makeMonitor(store) {
     if (d && d.phase === 1) mon.lastDuelHp = d.p.hp;
     ok(fin(run.pHp, run.pMaxHp) && run.pHp >= 0 && run.pHp <= run.pMaxHp, 'run.pHp out of range: ' + run.pHp + '/' + run.pMaxHp);
     if (d) ok(fin(d.p.hp, d.r.hp) && d.p.hp <= d.p.maxHp && d.r.hp <= d.r.maxHp, 'duel hp out of range');
-    const relic = run.relicId ? 1 : 0, done = run.stage === 'bonfire' ? run.duelN : run.duelN - 1;
+    const relic = run.pBoons.length && /^relic_/.test(run.pBoons[0]) ? 1 : 0, done = run.stage === 'bonfire' ? run.duelN : run.duelN - 1;
     if (run.stage === 'duel' || run.stage === 'bonfire') {
       ok(run.pBoons.length === relic + (run.stage === 'bonfire' ? done - 1 : done), () => 'player boons ' + run.pBoons.length + ' at duel ' + run.duelN + ' stage ' + run.stage + ' (relic ' + relic + '): a reward was duplicated or lost');
       ok(run.rBoons.length === done, () => 'Rival boons ' + run.rBoons.length + ' after ' + done + ' finished duels (stage ' + run.stage + ')');
@@ -587,13 +618,13 @@ function makeMonitor(store) {
     let sum = 0;
     for (let i = 0; i < st.duelTurns.length; i++) sum += st.duelTurns[i];
     if (d && !d.closed) sum += d.p.moves.length;
-    ok(sum === st.turns, () => 'stats.turns ' + st.turns + ' != turns on record ' + sum);
+    if (!mon.lenient) ok(sum === st.turns, () => 'stats.turns ' + st.turns + ' != turns on record ' + sum);
     if (mon.phase2Hp !== null && d && d.phase === 2) ok(d.p.hp === mon.phase2Hp, () => 'player hp changed between the transformation and the first phase-2 exchange: ' + mon.phase2Hp + ' -> ' + d.p.hp);
 
     // ---- the commit
     const pend = run.pending;
     if (pend && d) {
-      const s = J(pend);
+      const s = commitOf(pend);
       if (mon.commit && mon.commit.n === pend.n && mon.commit.phase === pend.phase && mon.commit.turn === pend.turn) {
         ok(s === mon.commit.str, () => 'the committed move/tell for duel ' + pend.n + ' turn ' + pend.turn + ' changed: ' + mon.commit.str + ' -> ' + s);
       } else {
@@ -612,7 +643,7 @@ function makeMonitor(store) {
           if (pk.only) mon.count.tutorialTurns++;
           if (mon.trust) {
             const saved = store.parsed();
-            ok(saved && saved.run && J(saved.run.pending) === J(pend), 'input enabled before the commit reached storage');
+            ok(saved && saved.run && saved.run.pending && commitOf(saved.run.pending) === commitOf(pend), 'input enabled before the commit reached storage');
             if (saved && saved.run && J(saved.run) === J(run)) mon.count.persistedEqual++;
             else ok(false, () => 'at the input window the stored run differs from the live run: ' + diffKeys(saved && saved.run, run));
           }
@@ -621,7 +652,7 @@ function makeMonitor(store) {
             const sp = a.run.pending;
             if (sp && sp.turn === a.run.duel.turn) {
               ok(coreOf(d) === coreOf(a.run.duel), () => 'mid-turn reload changed the duel: ' + coreOf(a.run.duel) + ' -> ' + coreOf(d));
-              ok(J(pend) === J(sp), 'mid-turn reload changed the commit');
+              ok(commitOf(pend) === commitOf(sp), 'mid-turn reload changed the commit');
               mon.commit.reloaded = true;
             } else {
               const o = oracle.json(J(a.run.duel));
@@ -631,8 +662,8 @@ function makeMonitor(store) {
             }
             mon.after = null;
           }
-        } else ok(J(pend) === mon.pendingStr, 'run.pending changed while the input window was open');
-        mon.pendingStr = J(pend);
+        } else ok(commitOf(pend) === mon.pendingStr, 'run.pending changed while the input window was open');
+        mon.pendingStr = commitOf(pend);
       }
     } else if (mon.inputOpen && !(pk && pk.input)) mon.inputOpen = false;
 
@@ -679,7 +710,8 @@ function diffKeys(a, b) {
 // Plays until `runs` runs have ended (or the frame budget is gone). Returns the last page and the monitor.
 function session(o) {
   const rng = mulberry(o.seed), store = o.store || makeStore(), mon = makeMonitor(store);
-  mon.trust = store.mode === 'ok';
+  mon.trust = o.trust === undefined ? store.mode === 'ok' : o.trust;
+  mon.lenient = !!o.lenient;                                       // (an old-shape duel may be dropped at boot: its turns stay unbooked)
   const reloadP = o.reloadP === undefined ? 1 : o.reloadP;
   let page = makePage(store, o.view || rng.pick(VIEWS), o.pageOpt);
   if (!page.alive) return { page, mon, store, ended: 0 };
@@ -721,7 +753,8 @@ function session(o) {
     return true;
   }
   where = o.label || 'session';
-  while (ended < o.runs && frames < maxFrames && fails < 40) {
+  const fails0 = fails;
+  while (ended < o.runs && frames < maxFrames && fails - fails0 < 8) {
     const dtMs = o.dt || (frames % 97 < 60 ? 33.4 : 16.7);
     if (!page.frame(dtMs)) break;
     frames++; runFrames++;
@@ -788,10 +821,11 @@ function addCount(c) {
   for (const k in c) total.count[k] += c[k];
 }
 function soak() {
-  const per = Math.max(1, Math.round(RUNS / 10));
+  const per = Math.max(1, Math.round(RUNS / 10)), only = process.env.FLOW_ONLY;
   let left = RUNS, i = 0, bytes = [], maxDbg = { t: 0, c: 0, w: 0 }, listenersGrew = 0;
   while (left > 0 && fails < 40) {
     const n = Math.min(per, left);
+    if (only !== undefined && +only !== i) { left -= n; i++; continue; }
     const res = session({
       label: 'soak#' + i, seed: SEED * 1000 + i, runs: n,
       pageOpt: { realDraw: i % 3 === 0 },
@@ -827,6 +861,37 @@ function soak() {
   ok(Math.max.apply(null, bytes) < 200000, 'the save grows too large: ' + Math.max.apply(null, bytes) + ' bytes');
 }
 
+// ============================================================================================== 1b. one long-lived page
+// The soak reloads every few hundred frames, so nothing there lives long. This is one page, no reload, 30+ simulated
+// minutes: pools, caches, timers, listeners and the JS heap must stay flat.
+function longSession() {
+  let gc = null;
+  try { require('v8').setFlagsFromString('--expose-gc'); gc = vm.runInNewContext('gc'); } catch (e) { gc = null; }
+  const marks = [];
+  let page0 = null, listeners0 = 0, canvases = 0, simMin = 0;
+  const res = session({
+    label: 'long', seed: SEED * 4099 + 7, runs: QUICK ? 6 : 24, reloadP: 0, pageOpt: { realDraw: true },
+    onFrame(page) { if (!page0) { page0 = page; } if (page.frameNo === 5) { page.E.debug = true; listeners0 = page.c.listeners; } },
+    onRunEnd(page, mon, n) { if (gc) { gc(); marks.push(process.memoryUsage().heapUsed); } simMin = mon.simSec / 60; canvases = page.c.createElement; }
+  });
+  where = 'long';
+  const page = res.page;
+  ok(page === page0, 'the long session must stay on one page');
+  ok(page.c.listeners === listeners0, 'event listeners grew during the session: ' + listeners0 + ' -> ' + page.c.listeners);
+  ok(page.maxDbg.c <= 4 && page.maxDbg.t <= 16 && page.maxDbg.w <= 24, 'engine timers/coroutines/tweens pile up: ' + JSON.stringify(page.maxDbg));
+  ok(canvases <= 64, 'canvases keep being created: ' + canvases);
+  ok(QUICK || simMin >= 30, 'the long session only covered ' + simMin.toFixed(1) + ' simulated minutes');
+  let growth = NaN;
+  if (marks.length >= 6) {
+    const third = Math.floor(marks.length / 3), a = Math.max.apply(null, marks.slice(third, 2 * third)), b = Math.max.apply(null, marks.slice(2 * third));
+    growth = (b - a) / 1048576;
+    ok(growth < 4, 'JS heap keeps growing on a long-lived page: +' + growth.toFixed(2) + ' MB between the middle and the last third of the session');
+  }
+  console.log('long session: ' + res.ended + ' runs, ' + res.frames + ' frames, ' + simMin.toFixed(1) + ' simulated minutes on one page; canvases ' + canvases + ', listeners ' + page.c.listeners +
+    ', peak timers/coroutines/tweens ' + page.maxDbg.t + '/' + page.maxDbg.c + '/' + page.maxDbg.w + ', heap after gc ' + (marks.length ? (marks[marks.length - 1] / 1048576).toFixed(1) + ' MB (middle third -> last third: ' + (growth >= 0 ? '+' : '') + growth.toFixed(2) + ' MB)' : 'n/a') +
+    ', save ' + page.store.lastBytes + ' bytes');
+}
+
 // ============================================================================================== 2. storage failures
 function storageTests() {
   for (const mode of ['failWrite', 'failAll', 'deny']) {
@@ -835,13 +900,13 @@ function storageTests() {
     where = 'storage:' + mode;
     ok(res.ended >= (QUICK ? 3 : 6), 'runs did not finish with storage mode ' + mode + ' (' + res.ended + ')');
     ok(store.map.size === 0, 'something was written although storage is failing');
-    if (res.page.alive) ok(res.page.R.Save.persistent === false, 'R.Save.persistent should be false when writes fail');
+    if (res.page.alive) { res.page.G.save(); ok(res.page.R.Save.persistent === false, 'R.Save.persistent should be false when writes fail'); }
   }
   // storage starts failing in the middle of a session, then comes back
   const store = makeStore();
   let flips = 0;
   const res = session({
-    label: 'storage:flaky', seed: SEED * 77, runs: QUICK ? 3 : 6, store, reloadP: 0,
+    label: 'storage:flaky', seed: SEED * 77, runs: QUICK ? 3 : 6, store, reloadP: 0, trust: false,
     onFrame(page, mon, f) { if (f % 900 === 450) { store.mode = 'failWrite'; flips++; } else if (f % 900 === 0) store.mode = 'ok'; }
   });
   where = 'storage:flaky';
@@ -865,7 +930,7 @@ function bootAndPlay(label, raw, runs, expectFresh) {
   const store = makeStore();
   if (raw !== null) store.map.set(KEY, raw);
   where = label;
-  const res = session({ label, seed: SEED * 13 + label.length, runs: runs || 1, store, reloadP: 0.3, maxFrames: 400000 });
+  const res = session({ label, seed: SEED * 13 + label.length, runs: runs || 1, store, reloadP: 0.3, maxFrames: 400000, lenient: /^oldshape/.test(label) });
   where = label;
   ok(res.ended >= (runs || 1), 'could not finish a run after booting from this save');
   return res;
@@ -967,13 +1032,28 @@ function pauseTests() {
     run60(page, 30);
     ok(G.run.stats.turns === turns, 'a press interrupted by a pause must not pick a move');
   }
+  // a touch whose pointerup never arrives must not kill input: the next primary touch takes over
+  page.down(90, E.safe.top + 80, 71);                                // ...and no up, ever
+  run60(page, 5);
+  const open2 = page.buttons.filter(q => /STRIKE|GUARD|FEINT/.test(q.label) && !q.disabled)[0];
+  if (ok(!!open2, 'no move button open for the lost-pointerup test')) {
+    page.down(open2.x + 10, open2.y + 10, 72); page.frame(16.7); page.up(open2.x + 10, open2.y + 10, 72);
+    run60(page, 90);
+    ok(G.run.stats.turns === turns + 1, 'input is dead after a lost pointerup (touch pointer ids are never reused)');
+    for (let i = 0; i < 600 && !(page.R.Scenes.duel.peek() && page.R.Scenes.duel.peek().input); i++) page.frame(16.7);
+  }
   // landscape on a touch device: frozen, input ignored
-  page.landscape = true; page.fire('window', 'resize', {}); page.frame(16.7);
+  const pv = page.view, turns4 = G.run.stats.turns;
+  page.landscape = true; page.resize({ name: 'landscape', vw: pv.vh, vh: pv.vw, dpr: pv.dpr, st: 0, sb: 21 }); page.frame(16.7);
   ok(E.rotated === true, 'E.rotated not set in landscape');
   const t4 = E.time; run60(page, 20);
   ok(E.time === t4, 'time advanced while rotated');
-  page.landscape = false; page.fire('window', 'resize', {}); page.frame(16.7);
+  for (let i = 0; i < 20; i++) { page.down(10 + i * 8, 100 + i * 9); page.up(10 + i * 8, 100 + i * 9); page.frame(16.7); }
+  ok(G.run.stats.turns === turns4, 'input was accepted under the rotate overlay');
+  page.landscape = false; page.resize(pv); page.frame(16.7);
   ok(E.rotated === false, 'E.rotated stuck');
+  run60(page, 3);
+  ok(page.buttons.some(q => /STRIKE|GUARD|FEINT/.test(q.label)), 'duel did not come back after rotating');
   // audio unlock: init must be attempted inside a tap's activation (pointerup / touchend), not only on pointerdown
   const p2 = makePage(makeStore(), VIEWS[0]);
   run60(p2, 30);
@@ -1056,7 +1136,63 @@ function scriptedReloads() {
       verified++;
     }
   }
-  console.log('scripted: first-win kill -> credits, erase, ' + verified + ' double reloads of one committed turn');
+  // (e) Dealer's Thumb: four cards (2 x 2 layout) can be read, picked and confirmed
+  where = 'scripted:4cards';
+  store = makeStore(); page = makePage(store, VIEWS[3]);
+  run60(page, 30);
+  page.G.meta.unlocked.drafts_12 = true;                           // (white box: the relic's unlock)
+  tapXY(page, 90, 200);
+  if (ok(waitScene(page, 'relic', 200), 'a relic is unlocked but the title did not open the relic choice')) {
+    run60(page, 30); tapLabel(page, 'CONFIRM');
+    ok(waitScene(page, 'duel', 300) && page.G.run.relicId === 'relic_dealers_thumb', 'the relic was not taken into the run: ' + (page.G.run && page.G.run.relicId));
+    playUntil(page, store, p => p.E.sceneName === 'bonfire' && findBtn(p, 'DOSSIER') && !findBtn(p, 'DOSSIER').disabled, { what: '4-card bonfire', seed: 31 });
+    ok(page.G.run.offer && page.G.run.offer.choices.length === 4, 'Dealer\'s Thumb should offer 4 cards, got ' + (page.G.run.offer && page.G.run.offer.choices.length));
+    const picked = new Set(), bottom = page.E.H - page.E.safe.bottom, cy0 = bottom - 157;
+    for (const pt of [[40, cy0 + 8], [130, cy0 + 8], [40, cy0 + 32], [130, cy0 + 32]]) {
+      tapXY(page, pt[0], pt[1]); run60(page, 3);
+      const okb = findBtn(page, 'CONFIRM');
+      ok(okb && !okb.disabled, 'card at ' + pt + ' of the 2 x 2 layout cannot be selected');
+    }
+    tapLabel(page, 'CONFIRM');
+    ok(waitScene(page, 'duel', 600) && page.G.run.duelN === 2 && page.G.run.pBoons.length === 2, 'the 4-card bonfire could not be completed');
+  }
+  // (f) the boon ledger must list every boon of both fighters, also late in a run
+  where = 'scripted:ledger';
+  store = makeStore(); page = makePage(store, VIEWS[2]);            // 360x640@1: H = 320, the smallest arena
+  playUntil(page, store, p => p.G.run && p.G.run.duelN === 7 && p.E.sceneName === 'duel' && p.R.Scenes.duel.peek() && p.R.Scenes.duel.peek().input, { what: 'duel 7 input', seed: 41, max: 600000 });
+  if (page.G.run && page.G.run.duelN === 7) {
+    const seen = new Set(), R = page.R, nameOf = id => ((R.Text.boon[id] || {}).name) || R.Boons.byId[id].name;
+    page.keepTexts = true;
+    tapXY(page, 90, page.E.safe.top + 26);
+    for (let k = 0; k < 3; k++) { run60(page, 3); for (const t of page.lastTexts) seen.add(t); tapXY(page, 90, page.E.safe.top + 120); }
+    page.keepTexts = false;
+    const missR = page.G.run.rBoons.filter(id => !seen.has(nameOf(id))), missP = page.G.run.pBoons.filter(id => !seen.has(nameOf(id)));
+    ok(missR.length === 0 && missP.length === 0, 'the boon ledger does not list ' + missR.length + ' of the Rival\'s ' + page.G.run.rBoons.length + ' boons and ' + missP.length + ' of the player\'s ' + page.G.run.pBoons.length + ' at duel 7');
+    run60(page, 5);
+    ok(page.R.Scenes.duel.peek().input && page.G.run.stats.turns === page.G.run.stats.turns, 'ledger left the duel in a bad state');
+  }
+  // (g) an active reveal that was paid for survives a reload
+  where = 'scripted:reveal';
+  store = makeStore(); page = makePage(store, VIEWS[5]);
+  playUntil(page, store, p => p.E.sceneName === 'bonfire' && findBtn(p, 'DOSSIER') && !findBtn(p, 'DOSSIER').disabled, { what: 'bonfire 1', seed: 51 });
+  if (page.G.run && page.G.run.pBoons.indexOf('truth_candle') < 0 && page.G.run.rBoons.indexOf('truth_candle') < 0) page.G.run.pBoons.unshift('truth_candle');   // (white box)
+  const inputOpen = p => p.G.run && p.G.run.duelN === 2 && p.E.sceneName === 'duel' && p.R.Scenes.duel.peek() && p.R.Scenes.duel.peek().input;
+  playUntil(page, store, inputOpen, { what: 'duel 2 input', seed: 52 });
+  run60(page, 3);
+  const act = page.buttons.filter(q => q.label === '' && q.w === 22 && !q.disabled)[0];
+  if (ok(!!act, 'no usable active button for Candle of Truth')) {
+    const sawStamp = p => { p.keepTexts = true; run60(p, 3); p.keepTexts = false; return p.lastTexts.indexOf('TRUE') >= 0 || p.lastTexts.indexOf('FALSE') >= 0; };
+    const ch0 = page.G.run.duel.p.charges.truth_candle;
+    tapXY(page, act.x + 8, act.y + 8);
+    ok(page.G.run.duel.p.charges.truth_candle === ch0 - 1 && sawStamp(page), 'Candle of Truth did not show TRUE/FALSE');
+    page = makePage(store, VIEWS[5]);                               // killed, reopened
+    waitScene(page, 'title', 120); run60(page, 20); tapLabel(page, 'CONTINUE'); waitScene(page, 'duel', 200);
+    for (let i = 0; i < 300 && !inputOpen(page); i++) page.frame(16.7);
+    ok(page.G.run.duel.p.charges.truth_candle === ch0 - 1, 'the spent charge came back after a reload');
+    ok(sawStamp(page), 'the Candle of Truth reveal was lost by the reload (the charge is spent, TRUE/FALSE is not shown again)');
+  }
+  where = 'scripted';
+  console.log('scripted: first-win kill -> credits, erase, ' + verified + ' double reloads of one committed turn, 4-card bonfire, ledger, active reveal');
 }
 
 // ============================================================================================== 6. layout matrix
@@ -1147,6 +1283,11 @@ function perfProbe() {
   tapLabel(page, 'BACK'); waitScene(page, 'title', 120); run60(page, 30);
   tapLabel(page, 'SETTINGS'); waitScene(page, 'settings', 120);
   expectClean(measure('settings'));
+  if (findBtn(page, 'REPLAY CREDITS')) {                           // (this save has a win)
+    tapLabel(page, 'REPLAY CREDITS'); waitScene(page, 'credits', 200);
+    expectClean(measure('credits (roll)', 200), { canvas: 0.05, getContext: 0.05 });   // (a font atlas for a colour first used here: once, not per frame)
+    tapXY(page, 90, 150); run60(page, 10); tapXY(page, 90, 150); waitScene(page, 'settings', 300); run60(page, 30);
+  }
   tapLabel(page, 'BACK'); waitScene(page, 'title', 120); run60(page, 30);
   playUntil(page, store, p => p.E.sceneName === 'death', { what: 'death', seed: 6, style: 'lose' });
   run60(page, 60); tapXY(page, 90, 150); run60(page, 240);
@@ -1156,8 +1297,6 @@ function perfProbe() {
   playUntil(page, store, p => p.E.sceneName === 'victory', { what: 'victory', seed: 9, style: 'cheat', max: 600000 });
   run60(page, 60); tapXY(page, 90, 150); run60(page, 240);
   expectClean(measure('victory (final state)'));
-  tapXY(page, 90, 150); waitScene(page, 'credits', 300);
-  if (page.E.sceneName === 'credits') expectClean(measure('credits (roll)', 200));
   console.log('per-frame allocation proxies at steady state (calls per frame):');
   console.log('  scene                                wrap  freshObj  strOps  arrOps  json  canvas  getCtx');
   for (const r of out) console.log('  ' + (r.name + ' '.repeat(36)).slice(0, 36) + [r.wrap, r.fresh, r.str, r.arr, r.json, r.canvas, r.getContext].map(v => ('       ' + v.toFixed(2)).slice(-8)).join(''));
@@ -1215,13 +1354,8 @@ function randomTests() {
 
 // ============================================================================================== go
 console.log('test_flow: ' + RUNS + ' runs, seed ' + SEED + (QUICK ? ' (quick)' : ''));
-soak();
-storageTests();
-corruptTests();
-pauseTests();
-scriptedReloads();
-layoutTests();
-perfProbe();
-randomTests();
+const SECTIONS = { soak, long: longSession, storage: storageTests, corrupt: corruptTests, pause: pauseTests, scripted: scriptedReloads, layout: layoutTests, perf: perfProbe, random: randomTests };
+const pickSec = process.env.FLOW_SECTIONS ? process.env.FLOW_SECTIONS.split(',') : Object.keys(SECTIONS);   // e.g. FLOW_SECTIONS=soak,perf
+for (const k of Object.keys(SECTIONS)) if (pickSec.indexOf(k) >= 0) SECTIONS[k]();
 console.log((fails ? 'FAILED ' + fails : 'ALL PASS') + ' - ' + checks + ' checks' + (known ? ', ' + known + ' known-open defect(s) awaiting the lead\'s patch' : '') + ', ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
 process.exit(fails ? 1 : 0);

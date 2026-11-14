@@ -274,7 +274,13 @@
       def = scenes[name] || (R.Scenes && R.Scenes[name]);          // scene files register on R.Scenes
       if (!def) { warn('RIVAL: unknown scene "' + name + '"'); def = {}; }
       cur = def; E.sceneName = name;
-      if (cur.enter) cur.enter(nxArgs);
+      if (cur.enter) {
+        try { cur.enter(nxArgs); }
+        catch (e2) {                                               // a scene that cannot start (bad save...) must not
+          warn(e2);                                                // strand the player on a dead screen: back to the title
+          if (name !== 'title') { nxName = 'title'; nxArgs = null; nxFade = 0.25; hasNext = true; }
+        }
+      }
     }
     trDur = nxFade;
   }
@@ -373,6 +379,9 @@
     gestured = true;
     try { if (R.Audio && R.Audio.init) R.Audio.init(); } catch (e) { warn(e); }
   }
+  // A touch pointerdown / touchstart is not a user activation (iOS Safari, Chrome): an AudioContext created there
+  // stays suspended. Releases and key presses are activations, so every one retries (a no-op once audio runs).
+  function gestureEnd() { try { if (gestured && R.Audio && R.Audio.init) R.Audio.init(); } catch (e) { warn(e); } }
   function blocked() { return trPhase === 1 || hasNext || E.rotated; }
   function ix(clientX) { return Math.floor((clientX - cssL) / cssPer); }
   function iy(clientY) { return Math.floor((clientY - cssT) / cssPer); }
@@ -408,20 +417,27 @@
     if (window.PointerEvent) {
       window.addEventListener('pointerdown', function (e) {
         if (e.pointerType === 'mouse' && e.button !== 0) return;
+        // A new primary pointer while another one is still tracked: that one's up/cancel never arrived (touch
+        // ids are never reused, so the same-id check in pDown cannot catch it). Without this, input stays dead.
+        if (e.isPrimary && ptrId !== null && ptrId !== e.pointerId) releasePointer();
         pDown(e.pointerId, e.clientX, e.clientY);
       }, opt);
       window.addEventListener('pointermove', function (e) { pMove(e.pointerId, e.clientX, e.clientY); }, opt);
-      window.addEventListener('pointerup', function (e) { pUp(e.pointerId, e.clientX, e.clientY, false); }, opt);
+      window.addEventListener('pointerup', function (e) { gestureEnd(); pUp(e.pointerId, e.clientX, e.clientY, false); }, opt);
       window.addEventListener('pointercancel', function (e) { pUp(e.pointerId, e.clientX, e.clientY, true); }, opt);
     } else {
       // Fallback for browsers without Pointer Events: touches (first finger) and the mouse.
-      window.addEventListener('touchstart', function (e) { var t = e.changedTouches[0]; if (t) pDown('t' + t.identifier, t.clientX, t.clientY); }, opt);
+      window.addEventListener('touchstart', function (e) {
+        var t = e.changedTouches[0];
+        if (ptrId !== null && e.touches && e.touches.length === e.changedTouches.length) releasePointer();   // no other finger is down: the tracked one was lost
+        if (t) pDown('t' + t.identifier, t.clientX, t.clientY);
+      }, opt);
       window.addEventListener('touchmove', function (e) { for (i = 0; i < e.changedTouches.length; i++) pMove('t' + e.changedTouches[i].identifier, e.changedTouches[i].clientX, e.changedTouches[i].clientY); }, opt);
-      window.addEventListener('touchend', function (e) { for (i = 0; i < e.changedTouches.length; i++) pUp('t' + e.changedTouches[i].identifier, e.changedTouches[i].clientX, e.changedTouches[i].clientY, false); }, opt);
+      window.addEventListener('touchend', function (e) { gestureEnd(); for (i = 0; i < e.changedTouches.length; i++) pUp('t' + e.changedTouches[i].identifier, e.changedTouches[i].clientX, e.changedTouches[i].clientY, false); }, opt);
       window.addEventListener('touchcancel', function (e) { for (i = 0; i < e.changedTouches.length; i++) pUp('t' + e.changedTouches[i].identifier, 0, 0, true); }, opt);
       window.addEventListener('mousedown', function (e) { if (e.button === 0) pDown('m', e.clientX, e.clientY); });
       window.addEventListener('mousemove', function (e) { pMove('m', e.clientX, e.clientY); });
-      window.addEventListener('mouseup', function (e) { pUp('m', e.clientX, e.clientY, false); });
+      window.addEventListener('mouseup', function (e) { gestureEnd(); pUp('m', e.clientX, e.clientY, false); });
     }
     // Kill scroll, pinch, double-tap zoom, long-press menus and selection.
     var stop = ['touchstart', 'touchmove', 'touchend', 'gesturestart', 'gesturechange', 'gestureend', 'contextmenu', 'selectstart', 'dblclick', 'dragstart'];

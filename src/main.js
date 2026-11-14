@@ -6,8 +6,22 @@
 
   function now() { return Date.now(); }
   function freshSeed() { return ((now() & 0xffffffff) ^ Math.floor(Math.random() * 0x100000000)) >>> 0; }
+  // A stored run must be complete enough to resume. Anything else (hand-edited or half-written storage, a save from
+  // an older build) is dropped; a current duel or commit of an older shape is dropped alone, so the duel restarts
+  // and the run survives.
   function validRun(run) {
-    return !!(run && typeof run === 'object' && typeof run.stage === 'string' && run.stats && Array.isArray(run.pBoons) && Array.isArray(run.rBoons));
+    if (!(run && typeof run === 'object' && run.stats && typeof run.stats === 'object' && Array.isArray(run.pBoons) && Array.isArray(run.rBoons))) return false;
+    if (run.stage !== 'duel' && run.stage !== 'bonfire') return false;      // 'won' / 'dead' are never resumable
+    if (!(run.duelN >= 1 && run.duelN <= 7 && run.pHp >= 0 && run.pMaxHp >= 1)) return false;
+    if (run.stage === 'bonfire' && !(run.offer && Array.isArray(run.offer.choices))) return false;
+    var d = run.duel, q = run.pending && run.pending.sealed;
+    if (d && !(d.turn >= 1 && d.tally && d.p && d.r && d.p.status && d.r.status && d.p.status.sealed && d.r.status.sealed &&
+               d.p.counters && d.r.counters && d.p.charges && d.r.charges && Array.isArray(d.p.moves) && Array.isArray(d.r.moves) &&
+               Array.isArray(d.p.results) && Array.isArray(d.r.results) && Array.isArray(d.p.boons) && Array.isArray(d.r.boons))) {
+      run.duel = null; run.pending = null;
+    }
+    if (run.pending && !(q && q.pred && typeof q.move === 'string' && typeof q.tell === 'string')) run.pending = null;
+    return true;
   }
 
   var G = R.Game = {

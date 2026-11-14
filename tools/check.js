@@ -22,7 +22,11 @@ function where(idx) {
 }
 
 // Plain substring bans (case-insensitive): nothing that could make, or look like, an external request.
-const banned = ['http://', 'https://', 'fetch(', 'xmlhttprequest', 'import(', '<img', '<script src', '@import', 'url('];
+const banned = ['http://', 'https://', 'fetch(', 'xmlhttprequest', 'import(', '<img', '<script src', '@import', 'url(',
+  // other ways to reach the network or pull in a second file
+  'new image(', 'sendbeacon', 'websocket', 'eventsource', 'importscripts', 'serviceworker', 'new worker(', 'sharedworker', '@font-face',
+  '<iframe', '<audio', '<video', '<source', '<object', '<embed', '<frame', 'srcset', 'window.open', 'location.href', 'location.assign', 'location.replace',
+  'indexeddb', 'document.cookie', 'ws://', 'wss://'];
 for (const needle of banned) {
   let i = -1, n = 0;
   while ((i = lower.indexOf(needle, i + 1)) >= 0) {
@@ -30,6 +34,14 @@ for (const needle of banned) {
   }
   if (n > 5) fails.push('...and ' + (n - 5) + ' more "' + needle + '"');
 }
+
+// Protocol-relative URLs ("//host.tld/...") in a string or a CSS/HTML attribute.
+const relRe = /["'(=]\/\/[a-z0-9-]+(\.[a-z0-9-]+)+[\/"')]/gi;
+let rm;
+while ((rm = relRe.exec(html))) fails.push('protocol-relative URL at ' + where(rm.index));
+// .src / .href assignments from script (an Image, a script tag or a stylesheet would load something).
+const srcRe = /\.(src|href)\s*=[^=]/g;
+while ((rm = srcRe.exec(html))) fails.push('assignment to .' + rm[1] + ' at ' + where(rm.index));
 
 // <link> is only allowed as the empty-favicon stub: href="data:,"
 const linkRe = /<link\b[^>]*>/gi;

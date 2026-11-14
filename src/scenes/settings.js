@@ -109,7 +109,9 @@
         bBack: K.Button(40, 0, 100, 36, K.ui('back', 'BACK')),
         btns: null
       };
-      S.bCred.hidden = !(G.meta && G.meta.seenCredits);
+      // seenCredits is only set when the roll starts; a page closed on the first victory screen never gets there,
+      // so anyone who has won may replay it.
+      S.bCred.hidden = !(G.meta && (G.meta.seenCredits || (G.meta.memory && G.meta.memory.wins >= 1)));
       S.btns = [S.bMute, S.bHap, S.bMask, S.bArena, S.bCred, S.bBack];
       labels();
       layout();
@@ -125,6 +127,7 @@
           S.erased = true; S.leaving = true;
           K.sfx('you_died', { vol: 0.6 }); E.buzz([40, 60, 120]);
           G.resetAll();
+          if (R.Audio && R.Audio.setMuted) R.Audio.setMuted(!!st().muted);   // settings are back to defaults: un-mute the mixer too
         }
       } else if (S.warn > 0) {
         S.warn -= dt;

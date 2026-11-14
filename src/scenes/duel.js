@@ -12,6 +12,12 @@
   var BTN_X = { S: 4, G: 62, F: 120 };
   var PX = 44, RX = 136;                       // fighter feet x
   var STATUS = ['guardBroken', 'bleed', 'fortify', 'focus'];
+  // Shared draw options and names: nothing below may build an object or a string per frame.
+  var OPT_R = { align: 'right' }, OPT_C = { align: 'center' }, OPT_CS = { align: 'center', shadow: 1 }, OPT_CS2 = { align: 'center', shadow: 1, scale: 2 };
+  var OPT_P2 = { phase2: true }, BAR_P = { ticks: 0 }, BAR_R = { ticks: 0, flip: true };
+  var ST_SPR = { guardBroken: 'st_guardBroken', bleed: 'st_bleed', fortify: 'st_fortify', focus: 'st_focus' };
+  var ACT_SPR = { glimpse: 'act_glimpse', honesty: 'act_honesty', coin: 'act_coin' };
+  var DIGIT = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
   function hex(i) { return R.Pal.hex[i]; }
   function sfx(n, o) { if (R.Audio) R.Audio.sfx(n, o); }
@@ -118,6 +124,8 @@
     for (i = 0; i < S.floats.length; i++) if (S.floats[i].life <= 0) { f = S.floats[i]; break; }
     if (!f) { if (S.floats.length >= 10) return; f = {}; S.floats.push(f); }
     f.text = String(text); f.x = x; f.y = y; f.col = col; f.life = 0.9; f.big = !!big;
+    f.opts = f.big && f.text.length < 4 ? OPT_CS2 : OPT_CS;
+    f.hw = (R.Font.width(f.text, f.opts === OPT_CS2 ? 2 : 1) >> 1) + 2;   // half width (+ shadow): keeps long names on screen
   }
   function sideX(side) { return side === 'p' ? PX : RX; }
   function headY() { return L.floorY - 46; }
@@ -225,7 +233,7 @@
 
   function* intro() {
     var n = S.duelN;
-    S.banner = { t: 0, a: 'DUEL ' + n, b: (R.Text.duelNames && R.Text.duelNames[n - 1]) || '' };
+    S.banner = { t: 0, a: 'DUEL ' + n, b: String((R.Text.duelNames && R.Text.duelNames[n - 1]) || '').toUpperCase() };
     S.rv.ox = 50; play(S.rv, 'idle', 'loop');
     slide(S.rv, 0, 0.5);
     sfx('step');
@@ -277,7 +285,7 @@
       run.pending = { sealed: sealed, turn: duel.turn, n: duel.n, phase: duel.phase, called: called };
       G.save();
     }
-    S.called = called;
+    S.called = called; S.calledText = called ? mname(called).toUpperCase() + '?' : '';
     S.rSigil = 'sealed'; S.rSigilT = 0; S.pSigil = 'gone'; S.glass = null; S.stamp = null;
     sfx('seal');
     yield 0.3;
@@ -313,7 +321,10 @@
     S.reveal = function (kind) {               // active boons (Keyhole / Candle of Truth)
       if (kind === 'glimpse') S.glass = sealed.move;
       else if (kind === 'honesty') S.stamp = sealed.honest;
+      if (run.pending) run.pending['seen_' + kind] = true;      // saved by useActive(): a reload shows it again
     };
+    if (resume && pend.seen_glimpse) S.glass = sealed.move;
+    if (resume && pend.seen_honesty) S.stamp = sealed.honest;
     S.choice = null; S.coin = false; S.idleT = 0;
     S.fast = false; E.timeScale = 1;
     S.hint = hintFor(duel);
@@ -643,10 +654,11 @@
     g.fillStyle = hex(2); g.fillRect(0, 0, 180, y + 33);
     g.fillStyle = hex(5); g.fillRect(0, y + 33, 180, 1);
     var pulse = low(d.p) && (Math.floor(S.clock * 2.2) & 1) ? 19 : 18;
-    R.UI.bar(g, 4, y + 4, 72, 7, S.hp.p / d.p.maxHp, S.lag.p / d.p.maxHp, pulse, { ticks: d.p.maxHp });
-    R.UI.bar(g, 104, y + 4, 72, 7, S.hp.r / d.r.maxHp, S.lag.r / d.r.maxHp, S.phase2 ? 31 : 18, { ticks: d.r.maxHp, flip: true });
+    BAR_P.ticks = d.p.maxHp; BAR_R.ticks = d.r.maxHp;
+    R.UI.bar(g, 4, y + 4, 72, 7, S.hp.p / d.p.maxHp, S.lag.p / d.p.maxHp, pulse, BAR_P);
+    R.UI.bar(g, 104, y + 4, 72, 7, S.hp.r / d.r.maxHp, S.lag.r / d.r.maxHp, S.phase2 ? 31 : 18, BAR_R);
     R.Font.draw(g, S.txtP, 4, y + 13, 10);
-    R.Font.draw(g, S.txtR, 176, y + 13, 10, { align: 'right' });
+    R.Font.draw(g, S.txtR, 176, y + 13, 10, OPT_R);
     // duel pips
     var n = S.duelN;
     for (i = 1; i <= 7; i++) {
@@ -668,8 +680,8 @@
     var px = 4, rx = 168, s;
     for (i = 0; i < STATUS.length; i++) {
       s = STATUS[i];
-      if (d.p.status[s] > 0) { R.Art.sprite(g, 'st_' + s, px, y + 23); px += 10; }
-      if (d.r.status[s] > 0) { R.Art.sprite(g, 'st_' + s, rx, y + 23); rx -= 10; }
+      if (d.p.status[s] > 0) { R.Art.sprite(g, ST_SPR[s], px, y + 23); px += 10; }
+      if (d.r.status[s] > 0) { R.Art.sprite(g, ST_SPR[s], rx, y + 23); rx -= 10; }
     }
     for (i = 0; i < 3; i++) {
       var m = MOVES[i];
@@ -692,11 +704,11 @@
     for (i = 0; i < S.actives.length; i++) {
       var id = S.actives[i], ch = (S.duel.p.charges && S.duel.p.charges[id]) || 0;
       R.UI.button(g, 4 + i * 26, y + 1, 22, 22, '', { disabled: ch <= 0 || !S.input, pressed: S.pressA === i });
-      R.Art.sprite(g, 'act_' + ((R.Boons.byId[id].active || {}).kind || 'glimpse'), 4 + i * 26 + 5, y + 5 + (S.pressA === i ? 1 : 0));
-      if (ch > 0) R.Font.draw(g, String(ch), 4 + i * 26 + 20, y + 15, 22, { align: 'right' });
+      R.Art.sprite(g, ACT_SPR[(R.Boons.byId[id].active || OPT_C).kind] || 'act_glimpse', 4 + i * 26 + 5, y + 5 + (S.pressA === i ? 1 : 0));
+      if (ch > 0) R.Font.draw(g, DIGIT[ch] || '9', 4 + i * 26 + 20, y + 15, 22, OPT_R);
     }
     var hint = S.input ? (S.hint || S.infoLine) : null;
-    if (hint) R.Font.draw(g, hint, 176, y + 8, S.hint ? ((Math.floor(S.clock * 3) & 1) ? 21 : 19) : 12, { align: 'right' });
+    if (hint) R.Font.draw(g, hint, 176, y + 8, S.hint ? ((Math.floor(S.clock * 3) & 1) ? 21 : 19) : 12, OPT_R);
     // moves
     for (i = 0; i < 3; i++) {
       m = MOVES[i];
@@ -711,25 +723,23 @@
     }
   }
 
+  // Boon ledger: one page per fighter (S.overlay 1 = its boons, 2 = yours). Wrapped once when it opens.
+  function ledgerPage(ids) {
+    var out = [], i, b;
+    for (i = 0; i < ids.length; i++) { b = R.Boons.byId[ids[i]]; out.push({ name: boonName(ids[i]), lines: R.Font.wrap(b ? b.desc : '', 158) }); }
+    return out;
+  }
+  function openLedger() { S.ledger = [ledgerPage(S.duel.r.boons), ledgerPage(S.duel.p.boons)]; S.overlay = 1; sfx('tick'); }
   function drawOverlay(g) {
-    var d = S.duel, y = L.arenaY + 4, i, id, b;
-    R.UI.panel(g, 4, L.arenaY, 172, L.bandY - L.arenaY + 30, 'dark');
-    R.Font.draw(g, 'YOUR BOONS', 10, y + 2, 21); y += 12;
-    if (!d.p.boons.length) { R.Font.draw(g, '(none yet)', 10, y, 7); y += 10; }
-    for (i = 0; i < d.p.boons.length && y < L.bandY + 10; i++) {
-      id = d.p.boons[i]; b = R.Boons.byId[id];
-      R.Font.draw(g, boonName(id), 10, y, 10); y += 9;
-      var ls = R.Font.wrap(b ? b.desc : '', 158);
-      for (var k = 0; k < ls.length; k++) { R.Font.draw(g, ls[k], 14, y, 8); y += 8; }
-      y += 2;
-    }
-    y += 3; R.Font.draw(g, 'ITS BOONS', 10, y, 19); y += 12;
-    if (!d.r.boons.length) { R.Font.draw(g, '(none yet)', 10, y, 7); y += 10; }
-    for (i = 0; i < d.r.boons.length && y < L.bandY + 10; i++) {
-      id = d.r.boons[i]; b = R.Boons.byId[id];
-      R.Font.draw(g, boonName(id), 10, y, 10); y += 9;
-      var lr = R.Font.wrap(b ? b.desc : '', 158);
-      for (var j = 0; j < lr.length; j++) { R.Font.draw(g, lr[j], 14, y, 8); y += 8; }
+    var its = S.overlay === 1, list = S.ledger[its ? 0 : 1], y = L.arenaY + 6, bot = L.btnY + L.btnH, i, k;
+    R.UI.panel(g, 4, L.arenaY, 172, bot - L.arenaY, 'dark');
+    R.Font.draw(g, its ? 'ITS BOONS' : 'YOUR BOONS', 10, y, its ? 19 : 21);
+    R.Font.draw(g, its ? 'TAP: YOURS' : 'TAP: CLOSE', 170, y, 7, OPT_R);
+    y += 12;
+    if (!list.length) R.Font.draw(g, '(none yet)', 10, y, 7);
+    for (i = 0; i < list.length && y + 9 + list[i].lines.length * 8 <= bot - 3; i++) {
+      R.Font.draw(g, list[i].name, 10, y, 10); y += 9;
+      for (k = 0; k < list[i].lines.length; k++) { R.Font.draw(g, list[i].lines[k], 14, y, 8); y += 8; }
       y += 2;
     }
   }
@@ -829,14 +839,14 @@
         R.Art.sigil(g, 36, L.floorY - 68 - dp + bob, S.pSigil, S.shownP, 'p');
       }
       if (S.stamp !== null && S.input) {
-        R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, { align: 'center', shadow: 1 });
+        R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, OPT_CS);
       }
-      if (S.called && S.input) R.Font.draw(g, mname(S.called).toUpperCase() + '?', PX, L.floorY - 84, 31, { align: 'center', shadow: 1 });
+      if (S.called && S.input) R.Font.draw(g, S.calledText, PX, L.floorY - 84, 31, OPT_CS);
       // floating numbers / labels
       for (i = 0; i < S.floats.length; i++) {
         var f = S.floats[i];
         if (f.life > 0 && (f.life > 0.25 || (Math.floor(f.life * 30) & 1))) {
-          R.Font.draw(g, f.text, Math.max(30, Math.min(150, Math.round(f.x))), Math.round(f.y), f.col, { align: 'center', shadow: 1, scale: f.big && f.text.length < 4 ? 2 : 1 });
+          R.Font.draw(g, f.text, Math.max(f.hw, Math.min(180 - f.hw, Math.round(f.x))), Math.round(f.y), f.col, f.opts);
         }
       }
       // deathblow letterbox
@@ -847,8 +857,8 @@
       if (S.banner) {
         var bt = S.banner.t;
         if (bt < 1.9 || (Math.floor(bt * 20) & 1)) {
-          R.Font.draw(g, S.banner.a, 90, L.arenaY + 16, 10, { align: 'center', shadow: 1, scale: 2 });
-          R.Font.draw(g, S.banner.b.toUpperCase(), 90, L.arenaY + 36, 21, { align: 'center', shadow: 1 });
+          R.Font.draw(g, S.banner.a, 90, L.arenaY + 16, 10, OPT_CS2);
+          R.Font.draw(g, S.banner.b, 90, L.arenaY + 36, 21, OPT_CS);
         }
       }
       if (S.dying > 0) {                         // the arena drains to black in steps
@@ -858,20 +868,20 @@
       }
       drawHud(g);
       drawButtons(g);
-      if (S.bub) R.UI.bubble(g, 4, L.bandY + 2, 172, bubbleLines(S.bub), 136, 'up', S.phase2 ? { phase2: true } : null);
+      if (S.bub) R.UI.bubble(g, 4, L.bandY + 2, 172, bubbleLines(S.bub), 136, 'up', S.phase2 ? OPT_P2 : null);
       if (S.card) {
         R.UI.panel(g, 14, L.arenaY + 40, 152, 44, 'card');
-        R.Font.draw(g, S.card.name, 90, L.arenaY + 47, 31, { align: 'center', scale: 1 });
-        var cl = R.Font.wrap(S.card.line, 140);
-        for (i = 0; i < cl.length && i < 2; i++) R.Font.draw(g, cl[i], 90, L.arenaY + 60 + i * 9, 10, { align: 'center' });
+        R.Font.draw(g, S.card.name, 90, L.arenaY + 47, 31, OPT_C);
+        var cl = S.card.lines || (S.card.lines = R.Font.wrap(S.card.line, 140));   // wrapped once per card
+        for (i = 0; i < cl.length && i < 2; i++) R.Font.draw(g, cl[i], 90, L.arenaY + 60 + i * 9, 10, OPT_C);
       }
       if (S.overlay) drawOverlay(g);
     },
     down: function (x, y) {
       if (!S) return;
-      if (S.overlay) { S.overlay = false; sfx('back'); return; }
+      if (S.overlay) { S.overlay = S.overlay === 1 ? 2 : 0; sfx(S.overlay ? 'tick' : 'back'); return; }
       S.tapped = true;
-      if (y >= L.hudY + 18 && y < L.hudY + 34 && x >= 74 && x < 106) { S.overlay = true; sfx('tick'); return; }
+      if (y >= L.hudY + 14 && y < L.hudY + 34 && x >= 74 && x < 106) { openLedger(); return; }
       var a = activeAt(x, y);
       if (a >= 0) { S.pressA = a; return; }
       var m = btnAt(x, y);
@@ -892,7 +902,8 @@
     // Test hook: public information only (what a player can see on screen).
     peek: function () { return S ? { input: S.input, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
     pause: function () { if (S && G) G.save(); },
-    back: function () { if (S) S.overlay = !S.overlay; }
+    back: function () { if (!S) return; if (S.overlay) S.overlay = 0; else openLedger(); },
+    resize: function () { if (S) layout(); }       // update() does not run while paused / in hit-stop: keep the layout current
   };
 
   R.Scenes = R.Scenes || {};
