@@ -16,6 +16,7 @@
 //
 // --set overrides balance numbers for a sweep without editing files, e.g.
 //   --set maxhp=24 --set hp=5,6,7,7,8,9,8 --set p2hp=7 --set heal=6 --set p2heal=3 --set exploit=.15,.3,.45,.55,.65,.75,.9
+//   --set stake=5 (lights of the Vigil out)  --set V.healCut=2 --set V.hp=1 --set V.callsFrom=1
 //   --set honesty=.92,.85,.75,.65,.55,.5,.42 --set p2honesty=.35 --set p2exploit=1 --set K.H_TRUST_UP_LATE=0.8
 'use strict';
 const path = require('path');
@@ -36,6 +37,7 @@ const BUCKETS = [[1, 10], [11, 50], [51, 200], [201, 1e9]];
 const BUCKET_NAMES = ['1-10', '11-50', '51-200', '201+'];
 
 // ------------------------------------------------------------------ overrides
+let STAKE = 0;                                        // --set stake=N: every run is played with N lights of the Vigil out
 function applySet(list) {
   (list || []).forEach(function (kv) {
     const i = kv.indexOf('=');
@@ -52,6 +54,8 @@ function applySet(list) {
     else if (k === 'heal') RUN.HEAL = nums[0];
     else if (k === 'maxhp') RUN.PLAYER_MAX_HP = nums[0];
     else if (k === 'p2heal') RUN.PHASE2_HEAL = nums[0];
+    else if (k === 'stake') STAKE = nums[0];
+    else if (k.indexOf('V.') === 0) RUN.VIGIL_TUNE[k.slice(2)] = nums[0];
     else if (k.indexOf('K.') === 0) R.Brain.K[k.slice(2)] = nums[0];
     else if (k.indexOf('A.') === 0) ADAPT[k.slice(2)] = nums[0];
     else throw new Error('unknown --set key: ' + k);
@@ -429,9 +433,9 @@ function runChain(job) {
       C.beginTurn(duel);
       if (duel.over) break;
       const ctx = C.ctx(duel), legalP = C.legal(duel, 'p'), legalR = C.legal(duel, 'r');
-      const cfg = duel.phase === 2 ? RUN.DUELS.phase2 : RUN.DUELS[duel.n];
+      const cfg = RUN.cfg(run, duel);
       let called = null;
-      if (duel.phase === 2 && duel.turn % 3 === 2) called = argmaxMove(brain.predict(ctx, legalP), legalP);
+      if ((duel.phase === 2 || duel.calls) && duel.turn % 3 === 2) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       const payoff = C.payoff(duel);
       const sealed = brain.commit({ ctx: ctx, payoff: payoff, legalR: legalR, legalP: legalP, exploit: cfg.exploit, honestyBase: cfg.honesty, rng: rng });
@@ -500,7 +504,7 @@ function runChain(job) {
     const now = 1.7e12 + i * 600000;
     const owned = RUN.relics(meta).map(function (b) { return b.id; });
     const relicId = bot.relic(owned);
-    const run = RUN.create(meta, { seed: seed, relicId: relicId, now: now });
+    const run = RUN.create(meta, { seed: seed, relicId: relicId, now: now, stake: STAKE, anyStake: true, dossier: STAKE >= 4 ? brain.dossier() : null });
     brain.beginRun({ days: run.daysAway || 0 });
     const rng = R.RNG.create((seed ^ 0x5bd1e995) >>> 0);
     bot.runStart();

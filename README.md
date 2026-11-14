@@ -51,6 +51,30 @@ Measured by `tools/sim.js`: bot players, 8 chains of 400 sequential runs each, o
 
 Duels last about seven turns; a winning run is about fifty.
 
+## The Vigil (harder runs)
+
+Seven lights keep watch over you. Each win with every earned light out earns the right to put out the next, and each light you put out hands the Rival what it guarded. You set the Vigil on the relic screen by tapping the candles; the rules stack.
+
+| Light | When it is out |
+|---|---|
+| 1. The Benefit of the Doubt | It acts on what it knows one duel sooner |
+| 2. The Kinder Fire | Bonfires heal 4, not 6 |
+| 3. The Honest Face | Its stances start lying one duel sooner |
+| 4. The Empty Hand | It arrives with a boon already drafted (shown to you) |
+| 5. A Moment's Peace | No healing when the mask breaks |
+| 6. The Glass Jaw | It has +1 health in every duel |
+| 7. The Unsaid | It calls your move out loud in every duel |
+
+Run win rate by lights out (8 chains of 300 runs per bot):
+
+| Lights out | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| Adaptive stance-reader | 55 | 54 | 48 | 40 | 32 | 30 | 21 | 20 |
+| Equilibrium mixer | 35 | 33 | 24 | 24 | 18 | 16 | 10 | 8 |
+| Creature of habit | 10 | 8 | 7 | 4 | 2 | 2 | 1 | 0.5 |
+
+Lights 1, 3 and 7 make the Rival sharper rather than tougher, so they cost a predictable player far more than an unpredictable one.
+
 ## Design highlights
 
 - **Fair by construction.** The sealed commit lives where the input code cannot reach it, and an automated test replays hundreds of mid-turn reloads to confirm the committed move never changes.

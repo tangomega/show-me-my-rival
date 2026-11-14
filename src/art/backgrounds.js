@@ -609,6 +609,8 @@
     var v = variantClass(opts && opts.variant), p2 = !!(opts && opts.phase2), e = cathedral(v, opts && opts.arena, p2);
     var floorY = Math.round(opts && opts.floorY > 0 ? opts.floorY : (E.lay ? E.lay.floorY : 172)), y0 = floorY - TOP;
     var gut = opts && opts.gutter > 0 ? (opts.gutter > 1 ? 1 : opts.gutter) : 0, H = E.H, i, c, s, fr, st, sway, k, fy, mx, pool, off = p2 ? 5 : 0;
+    // the Vigil: lights put out before the run stay out here too (the last candle never goes)
+    var dark = opts && opts.snuffed > 0 ? Math.min(e.n - 1, Math.ceil(opts.snuffed * (e.n - 1) / 7)) : 0;
     flames();
     if (e.cv) g.drawImage(e.cv, 0, y0);
     g.fillStyle = P[1];
@@ -630,6 +632,7 @@
     }
     // candles: pools of lit stone first, then halo + flame. `gutter` dims them one after another.
     for (k = 0; k < 2; k++) for (i = 0; i < e.n; i++) {
+      if (i >= e.n - dark) continue;
       c = e.list[i];
       s = gut <= 0 ? 0 : gut * 1.6 - 0.6 * (e.n > 1 ? i / (e.n - 1) : 0);
       st = s < 0.25 ? 0 : s < 0.6 ? 1 : s < 0.95 ? 2 : 3;                    // 0 burning, 1 guttering, 2 nearly out, 3 out
@@ -858,7 +861,7 @@
   // Public API
   // ============================================================================================
   // name: 'cathedral' | 'bonfire' | 'title'. t = seconds. Paints the whole buffer.
-  // opts: { floorY, variant:1..7, gutter:0..1, phase2:bool, arena:'cathedral'|'blood_moon'|'pale_dawn' }
+  // opts: { floorY, variant:1..7, gutter:0..1, snuffed:0..7, phase2:bool, arena:'cathedral'|'blood_moon'|'pale_dawn' }
   function bg(g, name, t, opts) {
     var E = dims();
     t = t > 0 ? t : 0;

@@ -1116,6 +1116,87 @@ section('4b. Run, draft, memory and unlock checks');
   console.log('  memory after 3 runs: ' + JSON.stringify(m.memory));
 })();
 
+// ================================================================== 4c. the Vigil (stakes)
+section('4c. The Vigil: each light adds exactly its rule');
+{
+  const mk = (stake, seed, max) => {
+    const meta = allMeta(); meta.vigil.max = max === undefined ? 7 : max; meta.vigil.sel = stake;
+    return { meta, run: RUN.create(meta, { seed: seed || 77, now: 1.7e12, stake }) };
+  };
+  eq(RUN.VIGIL.length, 7, 'seven lights');
+  eq(new Set(RUN.VIGIL.map(v => v.id)).size, 7, 'light ids are unique');
+  eq(RUN.repairMeta({}).vigil.max, 0, 'repairMeta adds the Vigil to an old save');
+  eq(RUN.repairMeta({ vigil: { max: 99, sel: 99, wins: 'x' } }).vigil.sel, 7, 'a hand-edited Vigil is clamped');
+  eq(mk(5, 1, 2).run.stake, 2, 'a run cannot have more lights out than were earned');
+  eq(RUN.create(allMeta(), { seed: 1, now: 1, stake: 5, anyStake: true }).stake, 5, 'anyStake (the sim) bypasses the earned limit');
+  const D = RUN.DUELS;
+  for (let s = 0; s <= 7; s++) {
+    const { run } = mk(s);
+    eq(RUN.stakeOf(run), s, 'stake ' + s + ' stored on the run');
+    eq(RUN.lightsOut(run).length, s, 'lightsOut lists ' + s);
+    for (let n = 1; n <= 7; n++) {
+      const c = RUN.cfg(run, { n, phase: 1 });
+      const wantEx = s >= 1 ? (n < 7 ? D[n + 1].exploit : D.phase2.exploit) : D[n].exploit;
+      const wantHo = s >= 3 ? (n < 7 ? D[n + 1].honesty : (D[7].honesty + D.phase2.honesty) / 2) : D[n].honesty;
+      eq(c.exploit, wantEx, 'stake ' + s + ' duel ' + n + ' exploit');
+      ok(Math.abs(c.honesty - wantHo) < 1e-9, 'stake ' + s + ' duel ' + n + ' honesty (got ' + c.honesty + ', want ' + wantHo + ')');
+      eq(c.rivalHp, D[n].rivalHp + (s >= 6 ? 1 : 0), 'stake ' + s + ' duel ' + n + ' rival hp');
+      ok(c.exploit >= D[n].exploit && c.honesty <= D[n].honesty, 'a light never makes the Rival gentler');
+    }
+    const p2 = RUN.cfg(run, { n: 7, phase: 2 });
+    eq(p2.exploit, D.phase2.exploit, 'stake ' + s + ' phase-2 exploit unchanged');
+    eq(p2.honesty, D.phase2.honesty, 'stake ' + s + ' phase-2 honesty unchanged');
+    eq(p2.rivalHp, D.phase2.rivalHp + (s >= 6 ? 1 : 0), 'stake ' + s + ' phase-2 rival hp');
+    eq(RUN.healOf(run), RUN.HEAL - (s >= 2 ? 2 : 0), 'stake ' + s + ' bonfire heal');
+    eq(run.rBoons.length, s >= 4 ? 1 : 0, 'stake ' + s + ' head-start boon');
+    eq(run.rivalHead, s >= 4 ? run.rBoons[0] : null, 'stake ' + s + ' rivalHead recorded');
+    if (s >= 4) ok(B.byId[run.rBoons[0]] && B.byId[run.rBoons[0]].who !== 'player' && !B.byId[run.rBoons[0]].relic, 'the head-start boon is one the Rival may draft');
+    // duel 1: health, Called Shot flag; then a bonfire heals by the stake's amount
+    const d1 = RUN.startDuel(run);
+    eq(d1.r.hp, D[1].rivalHp + (s >= 6 ? 1 : 0), 'stake ' + s + ' duel-1 rival hp');
+    eq(!!d1.calls, s >= 7, 'stake ' + s + ' Called Shot allowed in duel 1');
+    eq(d1.tension, 0, 'no Embers before phase 2 at stake ' + s);
+    run.duel.p.hp = 10; run.duel.over = 'p';
+    const off = RUN.endDuel(run, mk(s).meta, 'p', null);
+    eq(off.healed, RUN.HEAL - (s >= 2 ? 2 : 0), 'stake ' + s + ' healed at the first fire');
+    eq(off.choices.length, 3, 'stake ' + s + ' still offers three boons');
+    eq(run.rBoons.length, (s >= 4 ? 1 : 0) + 1, 'stake ' + s + ' Rival boons after the first fire');
+    eq(new Set(run.pBoons.concat(run.rBoons, off.choices)).size, run.pBoons.length + run.rBoons.length + off.choices.length, 'stake ' + s + ' no boon offered or owned twice');
+    // phase 2: the heal goes at light 5
+    const r2 = mk(s).run; r2.duelN = 7; RUN.startDuel(r2); r2.duel.p.hp = 9; r2.pHp = 9;
+    const d2 = RUN.startPhase2(r2);
+    eq(d2.p.hp, 9 + (s >= 5 ? 0 : RUN.PHASE2_HEAL), 'stake ' + s + ' hp after the transformation');
+    eq(d2.r.hp, D.phase2.rivalHp + (s >= 6 ? 1 : 0), 'stake ' + s + ' Unmasked hp');
+    ok(d2.calls && d2.embers && d2.tension === 1, 'phase 2 keeps Embers and Called Shot at stake ' + s);
+    // a Called Shot only counts where it is allowed
+    const r3 = mk(s).run; r3.duelN = 3; const d3 = RUN.startDuel(r3);
+    d3.intel.called = 'S';
+    const before = d3.p.hp, res = C.resolve(d3, 'S', 'G');
+    eq(res.called || null, s >= 7 ? 'hit' : null, 'stake ' + s + ' Called Shot in duel 3');
+    eq(before - d3.p.hp, 2 + (s >= 7 ? 2 : 0), 'stake ' + s + ' damage from a riposte on the called move');
+  }
+  // earning lights: a win with every earned light out earns the next; a win below the top does not
+  const meta = allMeta();
+  const win = (stake) => { const run = RUN.create(meta, { seed: 5, now: 1.7e12, stake }); run.stage = 'won'; run.duelN = 7; run.phase = 2; return RUN.finish(run, meta, 1.7e12); };
+  eq(win(0).light, 1, 'the first win earns light 1');
+  eq(meta.vigil.max, 1, 'max is 1 after the first win');
+  eq(win(0).light, 0, 'a second win with nothing out earns nothing');
+  eq(win(1).light, 2, 'a win with light 1 out earns light 2');
+  for (let s = 2; s <= 6; s++) eq(win(s).light, s + 1, 'a win with ' + s + ' out earns light ' + (s + 1));
+  eq(meta.vigil.max, 7, 'all seven earned');
+  eq(win(7).light, 0, 'a lightless win earns no further light');
+  eq(meta.vigil.wins.join(','), '2,1,1,1,1,1,1,1', 'wins are counted per stake');
+  const lost = RUN.create(meta, { seed: 6, now: 1.7e12, stake: 3 }); lost.stage = 'dead';
+  eq(RUN.finish(lost, meta, 1.7e12).light, 0, 'a death earns no light');
+  const twice = RUN.create(meta, { seed: 7, now: 1.7e12, stake: 7 }); twice.stage = 'won'; twice.duelN = 7; twice.phase = 2;
+  RUN.finish(twice, meta, 1.7e12); RUN.finish(twice, meta, 1.7e12);
+  eq(meta.vigil.wins[7], 2, 'finish() twice counts the win once');
+  // JSON round trip keeps the stake
+  const rt = JSON.parse(JSON.stringify(mk(6).run));
+  eq(RUN.stakeOf(rt), 6, 'stake survives a save');
+  eq(RUN.stakeOf({}), 0, 'a run saved before the Vigil existed has nothing out');
+}
+
 // ================================================================== 5. smoke sim
 section('5. Smoke sim: uniform-random player vs uniform-random Rival');
 (function () {

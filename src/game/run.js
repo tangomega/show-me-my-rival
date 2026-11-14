@@ -27,7 +27,22 @@
   var WHY_THRESHOLD = 3;                          // counter >= this sets offer.rivalWhy
   var SHARE_G = 0.40, SHARE_S = 0.40, SHARE_F = 0.35;
   var REPEAT_PCT = 45, PREDICTABLE = 55, TRUST_HI = 60, TRUST_LO = 20;
+  // The Vigil (stakes): run.stake = how many of the seven lights are out. Each light adds one rule to all the ones before it.
+  // healCut: bonfires heal HEAL - this (light 2). hp: extra Rival health in every duel (light 6). callsFrom: first duel with Called Shot (light 7).
+  var VT = { healCut: 2, hp: 1, callsFrom: 1 };
   // =====================================================================================
+
+  // Order matters: light k is VIGIL[k - 1], and a run with stake s has lights 1..s out.
+  var VIGIL = [
+    { id: 'benefit_of_doubt', name: 'The Benefit of the Doubt' },   // 1: the exploit curve runs one duel early
+    { id: 'kinder_fire', name: 'The Kinder Fire' },                 // 2: bonfires heal less
+    { id: 'honest_face', name: 'The Honest Face' },                 // 3: the honesty curve runs one duel early
+    { id: 'empty_hand', name: 'The Empty Hand' },                   // 4: the Rival drafts once before duel 1
+    { id: 'moments_peace', name: "A Moment's Peace" },              // 5: no heal at the phase-2 transformation
+    { id: 'glass_jaw', name: 'The Glass Jaw' },                     // 6: the Rival has more health in every duel
+    { id: 'unsaid', name: 'The Unsaid' }                            // 7: Called Shot in every duel
+  ];
+  var VIGIL_MAX = VIGIL.length;
 
   var NAMES = ['The Nave', 'Vespers', 'The Leak', 'Draught', 'The Wake', 'Blood Moon', 'The Altar'];
   var VARIANTS = ['nave', 'vespers', 'leak', 'draught', 'wake', 'bloodmoon', 'altar'];
@@ -71,9 +86,13 @@
         runs: 0, wins: 0, deaths: 0, streakW: 0, streakL: 0, bestDuel: 0,
         closestLoss: null, fastestDeath: null, lastWin: null,
         lastPlayed: 0, firstPlayed: 0, lastFavorite: null, favorites: [], totalTurns: 0
-      }
+      },
+      // max: lights the player has earned the right to put out. sel: how many they choose to. wins[s]: wins with s out.
+      vigil: { max: 0, sel: 0, wins: [0, 0, 0, 0, 0, 0, 0, 0] }
     };
   }
+  function clampStake(v) { v = Math.floor(num(v, 0)); return v < 0 ? 0 : v > VIGIL_MAX ? VIGIL_MAX : v; }
+  function stakeOf(run) { return run ? clampStake(run.stake) : 0; }
 
   // Fill in anything a stored meta is missing (older saves, hand-edited storage). In place.
   function repair(meta) {
@@ -93,6 +112,13 @@
         else if (v === undefined) meta[name][k] = dv;
       }
     }
+    var vg = meta.vigil;
+    if (!vg || typeof vg !== 'object') vg = meta.vigil = d.vigil;
+    vg.max = clampStake(vg.max);
+    vg.sel = Math.min(clampStake(vg.sel), vg.max);
+    if (!Array.isArray(vg.wins)) vg.wins = [];
+    for (k = 0; k <= VIGIL_MAX; k++) vg.wins[k] = Math.max(0, Math.floor(num(vg.wins[k], 0)));
+    vg.wins.length = VIGIL_MAX + 1;
     return meta;
   }
 
@@ -149,7 +175,9 @@
     }
     var seed = num(o.seed, 1) >>> 0;
     var maxHp = R.Run.PLAYER_MAX_HP;
-    return {
+    var stake = clampStake(o.stake);
+    if (!o.anyStake && stake > meta.vigil.max) stake = meta.vigil.max;      // only earned lights (the sim passes anyStake)
+    var run = {
       seed: seed,
       rngState: (seed ^ 0x51ed270b) >>> 0,
       duelN: 1, phase: 1, stage: 'duel',
@@ -161,8 +189,40 @@
       stats: newStats(),
       runNo: mem.runs,                         // extra: this run's ordinal
       daysAway: days,                          // extra: days since the previous visit (for brain.beginRun)
-      finished: null
+      finished: null,
+      stake: stake,                            // the Vigil: how many lights are out for this run
+      rivalHead: null                          // The Empty Hand: the boon the Rival walked in with
     };
+    if (stake >= 4) {                          // The Empty Hand: it drafts once before duel 1 (bonfire-1 odds)
+      var rng = rngOf(run);
+      var head = rivalDraft(run, meta, o.dossier || null, rng);
+      run.rngState = rng.state();
+      if (head.id) { run.rBoons.push(head.id); run.rivalHead = head.id; }
+    }
+    return run;
+  }
+
+  // ---------------------------------------------------------------- the Vigil
+
+  // Effective duel table row for this run (see VIGIL for which light does what).
+  function cfg(run, duel) {
+    var D = R.Run.DUELS, s = stakeOf(run);
+    var n = duel ? duel.n : run.duelN, p2 = !!(duel ? duel.phase === 2 : run.phase === 2);
+    var base = p2 ? D.phase2 : D[n];
+    if (s < 1) return base;
+    var next = p2 ? null : (n < 7 ? D[n + 1] : D.phase2);
+    var ex = next ? next.exploit : base.exploit;
+    var ho = s >= 3 && next ? (n < 7 ? next.honesty : (base.honesty + next.honesty) / 2) : base.honesty;
+    return { n: base.n, name: base.name, rivalHp: base.rivalHp + (s >= 6 ? VT.hp : 0), exploit: ex, honesty: ho, tau: tau(ex), rivalBoons: base.rivalBoons, variant: base.variant };
+  }
+  function healOf(run) { return Math.max(0, R.Run.HEAL - (stakeOf(run) >= 2 ? VT.healCut : 0)); }
+  function phase2HealOf(run) { return stakeOf(run) >= 5 ? 0 : R.Run.PHASE2_HEAL; }
+  function callsOn(run, n) { return stakeOf(run) >= 7 && n >= VT.callsFrom; }
+  // The lights that are out for this run, in order: [{ k, id, name }].
+  function lightsOut(run) {
+    var out = [], s = stakeOf(run), i;
+    for (i = 0; i < s; i++) out.push({ k: i + 1, id: VIGIL[i].id, name: VIGIL[i].name });
+    return out;
   }
 
   function applySpent(fighter, spent) {
@@ -191,7 +251,7 @@
     var s = statsOf(run);
     if (run.duelN < 1) run.duelN = 1;
     if (run.duelN > 7) run.duelN = 7;
-    var D = R.Run.DUELS[run.duelN];
+    var D = cfg(run, { n: run.duelN, phase: 1 });
     var p = R.Combat.newFighter(run.pMaxHp, run.pHp, run.pBoons);
     var r = R.Combat.newFighter(D.rivalHp, D.rivalHp, run.rBoons);
     applySpent(p, s.spent.p);
@@ -200,7 +260,7 @@
     run.stage = 'duel';
     run.pending = null;
     run.offer = null;
-    run.duel = R.Combat.newDuel({ n: run.duelN, phase: 1, p: p, r: r });
+    run.duel = R.Combat.newDuel({ n: run.duelN, phase: 1, p: p, r: r, calls: callsOn(run, run.duelN) });
     return run.duel;
   }
 
@@ -226,7 +286,7 @@
   function startPhase2(run) {
     var s = statsOf(run);
     var old = run.duel;
-    var D = R.Run.DUELS.phase2;
+    var D = cfg(run, { n: 7, phase: 2 });
     var p, r;
     run.duelN = 7;
     if (old) {
@@ -240,7 +300,7 @@
     p.status = { guardBroken: 0, bleed: 0, fortify: 0, focus: 0, sealed: { S: 0, G: 0, F: 0 } };
     p.moves = [];
     p.results = [];
-    var healed = Math.max(0, Math.min(R.Run.PHASE2_HEAL, p.maxHp - p.hp));
+    var healed = Math.max(0, Math.min(phase2HealOf(run), p.maxHp - p.hp));
     p.hp += healed;
     r = R.Combat.newFighter(D.rivalHp, D.rivalHp, run.rBoons);
     if (old) {                                   // same duel: per-duel caps and charges carry over
@@ -481,7 +541,7 @@
     // 1. rest
     var x = {
       run: run, side: 'p', self: { hp: run.pHp, maxHp: run.pMaxHp },
-      low: isLow(run.pHp, run.pMaxHp), heal: R.Run.HEAL, events: []
+      low: isLow(run.pHp, run.pMaxHp), heal: healOf(run), events: []
     };
     for (i = 0; i < run.pBoons.length; i++) {
       b = byId(run.pBoons[i]);
@@ -600,7 +660,7 @@
   function finish(run, meta, now) {
     meta = repair(meta);
     var s = statsOf(run), m = meta.memory, i, u;
-    if (run.finished) return { unlocks: entriesFor(run.finished.unlocks || []), firstWin: !!run.finished.firstWin };
+    if (run.finished) return { unlocks: entriesFor(run.finished.unlocks || []), firstWin: !!run.finished.firstWin, light: run.finished.light || 0 };
     now = num(now, m.lastPlayed);
 
     closeSegment(run, run.stage === 'won' ? 'p' : (run.stage === 'dead' ? 'r' : null));
@@ -649,9 +709,16 @@
     }
     for (i = 0; i < ids.length; i++) meta.unlocked[ids[i]] = true;
 
+    // The Vigil: a win with every earned light out earns the next one. light = its number (1..7), or 0.
+    var light = 0, vg = meta.vigil, st = stakeOf(run);
+    if (won) {
+      vg.wins[st]++;
+      if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; }
+    }
+
     var firstWin = won && m.wins === 1;
-    run.finished = { unlocks: ids, firstWin: firstWin, outcome: outcome };
-    return { unlocks: entriesFor(ids), firstWin: firstWin };
+    run.finished = { unlocks: ids, firstWin: firstWin, outcome: outcome, light: light };
+    return { unlocks: entriesFor(ids), firstWin: firstWin, light: light };
   }
 
   R.Run = {
@@ -660,6 +727,12 @@
     PHASE2_HEAL: PHASE2_HEAL,
     DUELS: DUELS,
     UNLOCKS: UNLOCKS,
+    VIGIL: VIGIL,
+    VIGIL_TUNE: VT,
+    cfg: cfg,
+    healOf: healOf,
+    stakeOf: stakeOf,
+    lightsOut: lightsOut,
     RARITY_WEIGHTS: RARITY_WEIGHTS,
     defaultMeta: defaultMeta,
     repairMeta: repair,

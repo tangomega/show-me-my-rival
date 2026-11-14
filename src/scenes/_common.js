@@ -11,8 +11,8 @@
   'use strict';
 
   var RAR_COL = { common: 7, uncommon: 25, rare: 30 };
-  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA' };
-  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28 };
+  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA', vigil: 'LIGHT' };
+  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28, vigil: 22 };
   var ARENA_SWATCH = { cathedral: [26, 28], blood_moon: [16, 18], pale_dawn: [7, 22] };
   var BAYER = [0, 2, 3, 1];
   var RAMP = [3, 5, 7, 8];                        // fade-in ramp for text on black (then the real colour)
@@ -296,7 +296,7 @@
     var o = {
       id: u.id, type: u.type, ref: u.ref, name: u.name || String(u.ref),
       title: (tu && tu.name) || '', how: (tu && tu.how) || u.how || '',
-      icon: null, swatch: null, desc: '', rival: false, rarCol: 25,
+      icon: null, swatch: null, candle: u.type === 'vigil', desc: '', rival: false, rarCol: 25,
       typeLabel: TYPE_LABEL[u.type] || 'ITEM', typeCol: TYPE_COL[u.type] || 10,
       nameLines: null, howLines: null, descLines: null
     };
@@ -322,12 +322,52 @@
   // 12x12 icon of a boonInfo / unlockInfo (arenas have no sprite: a two-tone palette swatch).
   K.icon = function (g, o, x, y) {
     if (o.icon) R.Art.sprite(g, o.icon, x, y);
+    else if (o.candle) K.candle(g, x + 2, y - 2, 0, R.Engine ? R.Engine.time : 0, 3);
     else if (o.swatch) {
       g.fillStyle = hex(1); g.fillRect(x, y, 12, 12);
       g.fillStyle = hex(o.swatch[0]); g.fillRect(x + 1, y + 1, 10, 10);
       g.fillStyle = hex(o.swatch[1]); g.fillRect(x + 4, y + 3, 4, 4);
       g.fillStyle = hex(1); g.fillRect(x + 1, y + 8, 10, 1);
     }
+  };
+
+  // A light of the Vigil: a 7x14 candle with its top-left at (x, y). state 0 = lit, 1 = put out, 2 = locked.
+  K.candle = function (g, x, y, state, t, seed) {
+    x |= 0; y |= 0;
+    var f, lean;
+    if (state === 0) {
+      f = Math.floor((t || 0) * 7 + (seed || 0) * 1.7) % 4;
+      lean = f === 1 ? -1 : f === 3 ? 1 : 0;
+      g.fillStyle = hex(21); g.fillRect(x + 3 + lean, y + (f === 2 ? 1 : 0), 1, 2); g.fillRect(x + 2, y + 2, 3, 3);
+      g.fillStyle = hex(20); g.fillRect(x + 2, y + 4, 1, 1); g.fillRect(x + 4, y + 4, 1, 1);
+      g.fillStyle = hex(22); g.fillRect(x + 3, y + 2, 1, 3);
+      g.fillStyle = hex(23); g.fillRect(x + 3, y + 3, 1, 1);
+    } else if (state === 1) {                       // a thread of smoke off the dead wick
+      f = Math.floor((t || 0) * 3 + (seed || 0)) % 3;
+      g.fillStyle = hex(6); g.fillRect(x + 3 + (f === 1 ? 1 : 0), y + 2, 1, 1); g.fillRect(x + 3 - (f === 2 ? 1 : 0), y, 1, 1);
+      g.fillStyle = hex(14); g.fillRect(x + 3, y + 4, 1, 1);
+    }
+    g.fillStyle = hex(1); g.fillRect(x + 3, y + 5, 1, 1);
+    g.fillStyle = hex(state === 0 ? 11 : state === 1 ? 7 : 5); g.fillRect(x + 2, y + 6, 3, 6);
+    g.fillStyle = hex(state === 0 ? 10 : state === 1 ? 8 : 6); g.fillRect(x + 2, y + 6, 1, 6);
+    g.fillStyle = hex(state === 0 ? 12 : state === 1 ? 6 : 4); g.fillRect(x + 4, y + 7, 1, 5);
+    g.fillStyle = hex(state === 2 ? 5 : 24); g.fillRect(x + 1, y + 12, 5, 1);
+    g.fillStyle = hex(state === 2 ? 4 : 25); g.fillRect(x, y + 13, 7, 1);
+  };
+
+  // Text for light k (1..7) of the Vigil: { k, id, name, rule } with the numbers filled in.
+  K.light = function (k) {
+    var V = (R.Run && R.Run.VIGIL) || [], v = V[k - 1], T = (R.Text && R.Text.vigil) || {}, t = v && T.lights ? T.lights[v.id] : null;
+    if (!v) return null;
+    var tune = R.Run.VIGIL_TUNE || {};
+    var vars = { heal: R.Run.HEAL - (tune.healCut || 0), base: R.Run.HEAL, hp: tune.hp || 1 };
+    return { k: k, id: v.id, name: (t && t.name) || v.name, rule: fill((t && t.rule) || '', vars), line: (t && t.line) || '' };
+  };
+  // "3 DARK" / "LIGHTLESS" / "" for a stake.
+  K.vigilLabel = function (stake) {
+    var T = (R.Text && R.Text.vigil) || {}, n = (R.Run.VIGIL || []).length;
+    if (!(stake > 0)) return '';
+    return stake >= n ? (T.lightless || 'LIGHTLESS') : fill(T.dark || '{n} DARK', { n: stake });
   };
 
   // Boon card. Tall tiles (h >= 30): icon + rarity pips on top, name centred below (up to 3 lines).

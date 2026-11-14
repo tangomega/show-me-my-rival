@@ -601,6 +601,38 @@
     called_shot: { name: "CALLED SHOT", line: "Obey, lose: +2. Defy, win: its guard breaks." }
   };
 
+  // The Vigil (stakes). Seven lights; each one the player puts out hands the Rival what it guarded.
+  // Keys are R.Run.VIGIL ids. rule may use {heal} {base} {hp}. line = the Rival, on that light going out.
+  var VIGIL = {
+    title: "THE VIGIL",
+    intro: "Seven lights keep watch over you. Put one out, and what it guarded is mine.",
+    earnFirst: "Beat the Unmasked to earn the right to put it out.",
+    earnNext: "Win with every earned light out to earn this one.",
+    allLit: "ALL SEVEN LIT",
+    dark: "{n} DARK",
+    lightless: "LIGHTLESS",
+    lit: "LIT", out: "OUT", locked: "LOCKED",
+    earned: "You may put it out. {rule}",
+    lightlessWon: { name: "Lightless", how: "You beat it in the dark. There is nothing darker." },
+    armed: "It did not come empty-handed.",
+    lights: {
+      benefit_of_doubt: { name: "The Benefit of the Doubt", rule: "It acts on what it knows one duel sooner.",
+        line: "I used to wonder if I had you right. I have stopped wondering." },
+      kinder_fire: { name: "The Kinder Fire", rule: "Bonfires heal {heal}, not {base}.",
+        line: "The fire was kind to you. I had a word with it." },
+      honest_face: { name: "The Honest Face", rule: "Its stances start lying one duel sooner.",
+        line: "I wore an honest face for you. It never fit." },
+      empty_hand: { name: "The Empty Hand", rule: "It arrives with a boon already drafted.",
+        line: "I used to arrive with nothing. Manners. I am past them." },
+      moments_peace: { name: "A Moment's Peace", rule: "No healing when the mask breaks.",
+        line: "You caught your breath while I changed. Not tonight." },
+      glass_jaw: { name: "The Glass Jaw", rule: "It has +{hp} health in every duel.",
+        line: "You thought my jaw was glass. I let you think it." },
+      unsaid: { name: "The Unsaid", rule: "It calls your move out loud in every duel.",
+        line: "Some things I was too polite to say. I am cured." }
+    }
+  };
+
   // ------------------------------------------------------------------ menus
 
   var UI = {
@@ -668,6 +700,7 @@
   T.arenas = ARENAS;
   T.duelNames = DUEL_NAMES;
   T.rules = RULES;
+  T.vigil = VIGIL;
   T.ui = Object.assign({}, T.ui || {}, UI);
   if (T.taunts) T.taunts.dossier_headers = flatHeaders;   // the section-16 category name
 

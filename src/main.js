@@ -52,13 +52,15 @@
 
     startFlow: function () {
       if (G.hasRun()) { G.resume(); return; }
-      if (R.Run.relics(G.meta).length && R.Scenes.relic) { E.go('relic', { from: 'title' }); return; }
+      // the relic screen is also where the Vigil is set: open it once there is anything to choose
+      if ((R.Run.relics(G.meta).length || R.Run.repairMeta(G.meta).vigil.max > 0) && R.Scenes.relic) { E.go('relic', { from: 'title' }); return; }
       G.newRun(null);
     },
 
     newRun: function (relicId) {
       var t = now(), seed = freshSeed();
-      G.run = R.Run.create(G.meta, { seed: seed, relicId: relicId || null, now: t });
+      var vg = R.Run.repairMeta(G.meta).vigil;
+      G.run = R.Run.create(G.meta, { seed: seed, relicId: relicId || null, now: t, stake: Math.min(vg.sel, vg.max), dossier: G.brain.dossier() });
       G.days = G.run.daysAway || 0;
       G.brain.beginRun({ days: G.days });
       G.rng = R.RNG.create(seed ^ 0x5bd1e995);
@@ -119,13 +121,20 @@
         var u = src[k];
         unlocks.push({ id: u.id, type: u.type, ref: u.ref, name: u.name, how: u.how });
       }
+      var stake = R.Run.stakeOf(run), TV = (R.Text && R.Text.vigil) || {};
+      if (fin.light > 0) {                       // a light of the Vigil was earned: it leads the reel
+        var li = R.SceneKit && R.SceneKit.light ? R.SceneKit.light(fin.light) : null;
+        if (li) unlocks.unshift({ id: 'vigil_' + li.id, type: 'vigil', ref: fin.light, name: li.name, how: R.Text.fill(TV.earned || '{rule}', { rule: li.rule }) });
+      } else if (won && stake >= R.Run.VIGIL.length && meta.vigil.wins[stake] === 1 && TV.lightlessWon) {
+        unlocks.unshift({ id: 'vigil_lightless', type: 'vigil', ref: stake, name: TV.lightlessWon.name, how: TV.lightlessWon.how });
+      }
       G.last = {
         won: won, duel: run.duelN, phase: run.phase, rivalHp: d ? Math.max(0, d.r.hp) : 0,
         turns: run.stats.turns || 0, score: run.stats.score || 0,
         finishingMove: run.stats.lastMove || null, hp: Math.max(0, run.pHp || 0),
         unlocks: unlocks, firstWin: !!fin.firstWin, insights: insights,
         boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice(),
-        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal()
+        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal(), stake: stake
       };
       G.run = null;
       G.save();

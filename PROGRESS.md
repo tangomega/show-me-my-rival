@@ -25,6 +25,11 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 | 6. README, final build | done |
 | 7. Deploy to GitHub Pages | done — live at https://tangomega.github.io/show-me-my-rival/, served from `main` / root of https://github.com/tangomega/show-me-my-rival. Pushing to `main` redeploys. |
 
+## After ship
+
+- **The Vigil (stakes)**: seven lights, set on the relic screen; rules in `R.Run.cfg / healOf / lightsOut`, text in `R.Text.vigil`, numbers and sim table in `BALANCE.md` §8b, ruling 12 in `DESIGN.md`. Checked on screen at 375×812 and 360×640.
+- **Final-boss roster**: planned in four stages (data-driven final fight, The Three-Faced, The Hours, The Reflection). See "Bosses" below for what is built.
+
 ## Polish passes
 
 1. Duel: the arena dims during the pre-reveal hold; move names pop in their colour when the sigils crack; fighters close the distance so blades meet; hit effects follow the fighters; the stance is named on screen; the guard-break banner sits clear of the sigils.

@@ -172,6 +172,27 @@ Also worth a look: Rupture without the seal (four clashes in a row), Sealing Wax
 - `index.html` was not rebuilt; run `node tools/build.js`.
 - The layout spec has "9/12"-style numerals and an HP bar with a notch per HP; I have not looked at either at 26.
 
+## 8b. The Vigil (stakes)
+
+Added after the main pass. `node tools/sim.js --set stake=N` plays every run with N lights out; `--set V.healCut=2 --set V.hp=1 --set V.callsFrom=1` tune the three numeric rules.
+
+Run win % by lights out, 8 chains × 300 runs, natural unlocks:
+
+| Lights out | adaptive | mixer | uniform | habit | 7+ hit duels % (adaptive) |
+|---|---|---|---|---|---|
+| 0 | 55.0 | 35.4 | 21.5 | 10.2 | 3.6 |
+| 1 The Benefit of the Doubt | 53.8 | 32.9 | 21.7 | 8.4 | 3.6 |
+| 2 The Kinder Fire | 48.3 | 24.0 | 13.5 | 6.5 | 3.3 |
+| 3 The Honest Face | 40.4 | 24.2 | 13.3 | 4.1 | 3.3 |
+| 4 The Empty Hand | 32.0 | 17.6 | 9.9 | 2.2 | 4.5 |
+| 5 A Moment's Peace | 29.5 | 15.7 | 8.5 | 1.9 | 4.2 |
+| 6 The Glass Jaw | 20.7 | 9.6 | 4.3 | 0.9 | 4.4 |
+| 7 The Unsaid | 20.2 | 8.2 | 3.2 | 0.5 | 7.0 |
+
+- Every step is flat or down for every bot. Lights 1, 3 and 7 sharpen the Rival (earlier exploitation, earlier lies, called moves), so they hit the habit bot hardest and the mixer least; lights 2, 5 and 6 are resource rules and hit the mixer hardest.
+- Known cost: with The Unsaid out, duels with a hit of 7+ double to about 7%, because the Called Shot bonus is live from duel 1.
+- Rules tried and dropped: a tension floor of one pip from duel 5 raised the adaptive bot's win rate by 3.5 points (tension rewards whoever wins more exchanges); offering two boons instead of three moved no bot.
+
 ## 9. About the sim
 
 - `node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot a,b] [--quick] [--unlocks natural|all] [--no-combos] [--no-boons] [--set key=value] [--label text] [--trace]`. About 100 to 150 runs per second per worker, 1,300 per second on 11 workers.

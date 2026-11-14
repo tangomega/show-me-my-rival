@@ -228,7 +228,9 @@
       n: o.n || 1,
       phase: o.phase === 2 ? 2 : 1,
       turn: 1,
-      tension: o.phase === 2 ? 1 : 0,          // Embers: phase 2 starts at (and never drops below) 1 pip
+      tension: o.phase === 2 || o.embers ? 1 : 0,   // Embers: the duel starts at (and never drops below) 1 pip
+      embers: o.phase === 2 || !!o.embers,     // phase 2 always; earlier duels when the Vigil says so
+      calls: o.phase === 2 || !!o.calls,       // Called Shot may be used in this duel
       p: o.p || newFighter(12, 12, []),
       r: o.r || newFighter(6, 6, []),
       over: null,
@@ -361,7 +363,7 @@
       var W = duel[w], L = duel[l];
       var xw = w === 'p' ? xp : xr, xl = w === 'p' ? xr : xp;
       var wm = xw.my;
-      var called = duel.phase === 2 && intel.called ? intel.called : null;
+      var called = (duel.phase === 2 || duel.calls) && intel.called ? intel.called : null;
       res.winner = w;
       xw.won = true;
       xl.lost = true;
@@ -377,7 +379,7 @@
       }
 
       dmg += T;                                               // tension pips
-      duel.tension = duel.phase === 2 ? 1 : 0;                // Embers: floor of 1 in phase 2
+      duel.tension = duel.phase === 2 || duel.embers ? 1 : 0; // Embers: floor of 1
       if (T > 0) ev.push({ t: 'tension', n: duel.tension, from: T, spent: T });
       if (T >= TENSION_MAX) { res.deathblow = true; ev.push({ t: 'deathblow', side: w }); }
 

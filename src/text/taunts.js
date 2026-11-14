@@ -477,6 +477,44 @@
       "{pct}% of your duels begin with {move}. This one too?"
     ],
 
+    // Duel 1 of a run with lights of the Vigil out: keyed by the last light put out.
+    vigil_benefit_of_doubt: [
+      "One light out. I no longer doubt what I know about you.",
+      "You put out my doubt. Now I simply act.",
+      "I used to check my notes twice. One light fewer, one check fewer."
+    ],
+    vigil_kinder_fire: [
+      "Two lights out. The fire remembers who snuffed it.",
+      "The fire was kind to you. I had a word with it.",
+      "Rest while you can. There is less of it now."
+    ],
+    vigil_honest_face: [
+      "Three out. My honest face went with the third.",
+      "I wore an honest face for you. It never fit.",
+      "Believe my stance if you like. You dimmed the reason to."
+    ],
+    vigil_empty_hand: [
+      "Four out. Notice I did not come empty-handed.",
+      "I used to arrive with nothing. Manners. I am past them.",
+      "I packed for this one. You made the room darker for it."
+    ],
+    vigil_moments_peace: [
+      "Five out. When the mask breaks, do not expect a pause.",
+      "You used to catch your breath while I changed. Used to.",
+      "No moment of peace tonight. You put that one out yourself."
+    ],
+    vigil_glass_jaw: [
+      "Six out. You thought my jaw was glass. I let you.",
+      "One light left, and I have stopped holding back.",
+      "I was going easy on you. Six lights ago."
+    ],
+    vigil_unsaid: [
+      "Lightless. I will say every quiet thing out loud.",
+      "All seven out. You wanted me at my worst. Granted.",
+      "No lights. Good. I never needed them to see you.",
+      "You snuffed the last one yourself. I only watched."
+    ],
+
     final_duel_intro: [
       "Seven. The altar. You know every stone by now; you've died on most of them.",
       "No more lessons. I know you by heart. Come and be known.",

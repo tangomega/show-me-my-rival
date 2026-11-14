@@ -513,7 +513,7 @@ function makeMonitor(store) {
     exp: null, runKey: undefined, turns: 0, duelN: 0, phase: 1, commit: null, inputOpen: false, pendingStr: null,
     offers: {}, bonfireHp: {}, after: null, phase2Hp: null, lastDuelHp: 0, sig: '', sigAt: 0, simSec: 0, runStartSec: 0,
     count: { runs: 0, deaths: 0, wins: 0, abandons: 0, turns: 0, bonfires: 0, fourCard: 0, phase2: 0, credits: 0, midTurnReloads: 0, midTurnVerified: 0,
-      betweenTurnVerified: 0, bonfireReloadVerified: 0, lethalReloads: 0, transformReloads: 0, relicRuns: 0, tutorialTurns: 0, calledShots: 0, activesUsed: 0, persistedEqual: 0 },
+      betweenTurnVerified: 0, bonfireReloadVerified: 0, lethalReloads: 0, transformReloads: 0, relicRuns: 0, stakeRuns: 0, earlyCalls: 0, tutorialTurns: 0, calledShots: 0, activesUsed: 0, persistedEqual: 0 },
     trust: true                                                     // false while storage is failing (nothing survives a reload)
   };
   const J = JSON.stringify;
@@ -566,6 +566,9 @@ function makeMonitor(store) {
         mon.exp.runs++; mon.count.runs++; mon.runStartSec = mon.simSec;
         ok(run.duelN === 1 && run.stats.turns === 0 && run.stage === 'duel', 'a new run must start at duel 1, turn 0');
         if (run.relicId) mon.count.relicRuns++;
+        if (run.stake > 0) mon.count.stakeRuns++;
+        ok(run.stake >= 0 && run.stake <= 7 && run.stake <= G.meta.vigil.max, () => 'run stake ' + run.stake + ' beyond the earned lights ' + G.meta.vigil.max);
+        ok((run.stake >= 4) === !!run.rivalHead, () => 'The Empty Hand: stake ' + run.stake + ' but head boon ' + run.rivalHead);
       }
       mon.runKey = key; mon.turns = 0; mon.duelN = key ? 1 : 0; mon.phase = 1; mon.commit = null; mon.inputOpen = false; mon.after = null; mon.phase2Hp = null;
     }
@@ -588,7 +591,7 @@ function makeMonitor(store) {
     ok(!(mon.phase === 2 && run.phase === 1 && run.duelN === 7), () => 'phase regressed 2 -> 1 @' + E.sceneName + ' (duel turn ' + (d && d.turn) + ', over ' + (d && d.over) + ', duel phase ' + (d && d.phase) + ', stats.turns ' + st.turns + ', last reload: ' + mon.lastReload + ', ' + (mon.simSec - mon.lastReloadAt).toFixed(1) + ' s ago)');
     if (run.phase === 2 && mon.phase === 1) {                      // the transformation just happened
       mon.phase = 2; mon.count.phase2++;
-      if (d) { mon.phase2Hp = d.p.hp; ok(d.p.hp === Math.min(d.p.maxHp, Math.max(1, mon.lastDuelHp) + R.Run.PHASE2_HEAL), () => 'phase-2 heal wrong: ' + mon.lastDuelHp + ' -> ' + d.p.hp); }
+      if (d) { mon.phase2Hp = d.p.hp; ok(d.p.hp === Math.min(d.p.maxHp, Math.max(1, mon.lastDuelHp) + (R.Run.stakeOf(run) >= 5 ? 0 : R.Run.PHASE2_HEAL)), () => 'phase-2 heal wrong: ' + mon.lastDuelHp + ' -> ' + d.p.hp); }
     }
     if (d && d.phase === 1) mon.lastDuelHp = d.p.hp;
     ok(fin(run.pHp, run.pMaxHp) && run.pHp >= 0 && run.pHp <= run.pMaxHp, 'run.pHp out of range: ' + run.pHp + '/' + run.pMaxHp);
@@ -596,7 +599,7 @@ function makeMonitor(store) {
     const relic = run.pBoons.length && /^relic_/.test(run.pBoons[0]) ? 1 : 0, done = run.stage === 'bonfire' ? run.duelN : run.duelN - 1;
     if (run.stage === 'duel' || run.stage === 'bonfire') {
       ok(run.pBoons.length === relic + (run.stage === 'bonfire' ? done - 1 : done), () => 'player boons ' + run.pBoons.length + ' at duel ' + run.duelN + ' stage ' + run.stage + ' (relic ' + relic + '): a reward was duplicated or lost');
-      ok(run.rBoons.length === done, () => 'Rival boons ' + run.rBoons.length + ' after ' + done + ' finished duels (stage ' + run.stage + ')');
+      ok(run.rBoons.length === done + (run.rivalHead ? 1 : 0), () => 'Rival boons ' + run.rBoons.length + ' after ' + done + ' finished duels (stage ' + run.stage + ')');
       ok(new Set(run.pBoons.concat(run.rBoons)).size === run.pBoons.length + run.rBoons.length, 'a boon is owned twice');
     }
     // ---- turn accounting
@@ -631,6 +634,7 @@ function makeMonitor(store) {
         ok(pend.turn === d.turn && pend.n === d.n && pend.phase === d.phase, 'run.pending is for another turn');
         mon.commit = { n: pend.n, phase: pend.phase, turn: pend.turn, move: pend.sealed.move, tell: pend.sealed.tell, str: s, reloaded: false };
         if (pend.called) mon.count.calledShots++;
+        if (pend.called && pend.phase === 1) { mon.count.earlyCalls++; ok(run.stake >= 7, () => 'a Called Shot before phase 2 at stake ' + run.stake); }
       }
     }
     const pk = E.sceneName === 'duel' ? R.Scenes.duel.peek() : null;
@@ -832,6 +836,9 @@ function soak() {
       onRunEnd(page) { bytes.push(page.store.lastBytes); },
       onFrame(page) {
         if (page.frameNo === 5) page.E.debug = true;               // the engine's own t/c/w readout
+        // (white box) every other session plays with lights of the Vigil out: earned, then a different count each run
+        const pm = (i & 1) && page.G && !page.G.run ? page.G.meta : null;
+        if (pm && pm.vigil && pm.seenTutorial) { pm.vigil.max = 7; pm.vigil.sel = (pm.memory.runs * 3 + i) % 8; }
         if (page.c.listeners !== page.bootListeners) { listenersGrew++; page.bootListeners = page.c.listeners; }
       }
     });
@@ -847,11 +854,12 @@ function soak() {
   ok(listenersGrew === 0, 'event listeners were added after boot (' + listenersGrew + ' times)');
   ok(c.wins > 0 && c.deaths > 0, 'the soak must see both wins and deaths (wins ' + c.wins + ', deaths ' + c.deaths + ')');
   ok(c.phase2 > 0, 'no run reached phase 2');
+  if (only === undefined && RUNS >= 20) ok(c.stakeRuns > 0, 'no run was played with lights of the Vigil out');
   ok(c.midTurnVerified > 0, 'no mid-turn reload was verified');
   ok(c.bonfireReloadVerified > 0, 'no bonfire reload was verified');
   ok(c.lethalReloads > 0 && c.transformReloads > 0, 'no reload after a lethal blow / during the transformation');
   console.log('soak: ' + total.runs + ' runs (' + c.wins + ' wins, ' + c.deaths + ' deaths incl. ' + c.abandons + ' abandoned), ' + c.turns + ' turns, ' + c.bonfires + ' bonfires (' + c.fourCard +
-    ' with 4 cards), ' + c.phase2 + ' phase-2, ' + c.relicRuns + ' relic runs, ' + c.calledShots + ' called shots, ' + c.tutorialTurns + ' tutorial turns');
+    ' with 4 cards), ' + c.phase2 + ' phase-2, ' + c.relicRuns + ' relic runs, ' + c.stakeRuns + ' Vigil runs, ' + c.calledShots + ' called shots (' + c.earlyCalls + ' before phase 2), ' + c.tutorialTurns + ' tutorial turns');
   console.log('      ' + total.frames + ' frames, ' + total.reloads + ' reloads: ' + Object.keys(total.kinds).sort().map(k => k + ' ' + total.kinds[k]).join(', '));
   console.log('      verified: mid-turn commit unchanged ' + c.midTurnVerified + '/' + c.midTurnReloads + ' reloads (the rest never resolved that turn before the next reload), between-turn state ' +
     c.betweenTurnVerified + ', bonfire offers ' + c.bonfireReloadVerified + ', stored==live at input ' + c.persistedEqual);

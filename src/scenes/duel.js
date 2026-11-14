@@ -132,7 +132,7 @@
   function headY() { return L.floorY - 46; }
 
   // ------------------------------------------------------------------ helpers
-  function cfgOf(duel) { return duel.phase === 2 ? R.Run.DUELS.phase2 : R.Run.DUELS[duel.n]; }
+  function cfgOf(duel) { return R.Run.cfg(G.run, duel); }
   function argmaxMove(pred, legal) {
     var best = legal[0], i;
     for (i = 1; i < legal.length; i++) if (pred[legal[i]] > pred[best]) best = legal[i];
@@ -209,6 +209,10 @@
     var m = G.meta.memory, run = G.run, n = run.duelN, t = null;
     if (S.tutorial) return (R.Text.tutorial && R.Text.tutorial.intro) || null;
     if (n === 7) return taunt('final_duel_intro');
+    if (n === 1 && S.lights.length) {             // lights of the Vigil are out: it remarks on the newest
+      t = taunt('vigil_' + S.lights[S.lights.length - 1].id);
+      if (t) return t;
+    }
     if (n === 1) {
       var runs = m.runs;
       if (G.days >= 2) t = taunt('returning');
@@ -248,6 +252,13 @@
     } else {
       yield 0.4;
     }
+    if (n === 1 && G.run.rivalHead && R.Boons.byId[G.run.rivalHead]) {      // The Empty Hand: show what it walked in with
+      S.card = { name: boonName(G.run.rivalHead).toUpperCase(), line: ((R.Text.vigil || {}).armed) || 'It did not come empty-handed.' };
+      sfx('boon'); S.tapped = false;
+      var until = S.clock + 2.6;
+      yield function () { return S.clock >= until || S.tapped; };
+      S.card = null; S.tapped = false;
+    }
   }
 
   function* turn() {
@@ -278,7 +289,7 @@
       sealed = pend.sealed; called = pend.called || null;
       duel.intel.called = called;
     } else {
-      if (duel.phase === 2 && duel.turn % 3 === 2) called = argmaxMove(brain.predict(ctx, legalP), legalP);
+      if ((duel.phase === 2 || duel.calls) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       var q = { ctx: ctx, payoff: R.Combat.payoff(duel), legalR: legalR, legalP: legalP,
                 exploit: cfg.exploit, honestyBase: cfg.honesty, rng: G.rng };
@@ -582,6 +593,7 @@
     yield total * 0.55 + 0.5;
     // it rises
     R.Run.endDuel(run, G.meta, 'p', null);       // closes phase 1 (no bonfire: the run stays in stage 'duel')
+    var hpWas = S.duel.p.hp;
     var duel = R.Run.startPhase2(run);
     S.duel = duel; S.phase2 = true;
     S.rv.who = 'rival2'; play(S.rv, 'idle', 'loop');
@@ -590,7 +602,7 @@
     E.tween(S, 'gutter', 0, 0.6);
     S.hp.r = 0; S.lag.r = 0; S.hp.p = duel.p.hp; S.lag.p = duel.p.hp; hpText();
     S.lowSaid.r = false;
-    S.fx.burst('heal', PX, L.floorY - 20, 8); sfx('heal');
+    if (duel.p.hp > hpWas) { S.fx.burst('heal', PX, L.floorY - 20, 8); sfx('heal'); }      // A Moment's Peace out: no breath caught
     var k, steps = duel.r.hp;
     for (k = 1; k <= steps; k++) { S.hp.r = k; S.lag.r = k; hpText(); sfx('tick', { pitch: 0.8 + k * 0.05 }); yield 0.07; }
     G.save();
@@ -679,6 +691,14 @@
     g.fillStyle = hex(S.ledgerHot ? 25 : 24); g.fillRect(83, y + 23, 14, 9);
     g.fillStyle = hex(3); g.fillRect(84, y + 24, 12, 7);
     g.fillStyle = hex(12); g.fillRect(86, y + 26, 8, 1); g.fillRect(86, y + 28, 8, 1);
+    // the Vigil: seven stubs right of the ledger, the dark ones first
+    if (S.lights.length) {
+      for (i = 0; i < 7; i++) {
+        var vx = 101 + i * 3, dark = i < S.lights.length;
+        g.fillStyle = hex(dark ? 6 : 11); g.fillRect(vx, y + (dark ? 28 : 27), 2, dark ? 3 : 4);
+        if (!dark) { g.fillStyle = hex((Math.floor(S.clock * 5 + i) & 3) ? 21 : 22); g.fillRect(vx, y + 25, 2, 2); }
+      }
+    }
     // statuses
     var px = 4, rx = 168, s;
     for (i = 0; i < STATUS.length; i++) {
@@ -732,12 +752,18 @@
     for (i = 0; i < ids.length; i++) { b = R.Boons.byId[ids[i]]; out.push({ name: boonName(ids[i]), lines: R.Font.wrap(b ? b.desc : '', 158) }); }
     return out;
   }
-  function openLedger() { S.ledger = [ledgerPage(S.duel.r.boons), ledgerPage(S.duel.p.boons)]; S.overlay = 1; sfx('tick'); }
+  function vigilPage() {
+    var out = [], i, li;
+    for (i = 0; i < S.lights.length; i++) { li = R.SceneKit.light(S.lights[i].k); if (li) out.push({ name: li.name, lines: R.Font.wrap(li.rule, 158) }); }
+    return out;
+  }
+  function openLedger() { S.ledger = [ledgerPage(S.duel.r.boons), ledgerPage(S.duel.p.boons), vigilPage()]; S.overlay = 1; sfx('tick'); }
   function drawOverlay(g) {
-    var its = S.overlay === 1, list = S.ledger[its ? 0 : 1], y = L.arenaY + 6, bot = L.btnY + L.btnH, i, k;
+    var pg = S.overlay, its = pg === 1, list = S.ledger[pg - 1], y = L.arenaY + 6, bot = L.btnY + L.btnH, i, k;
+    var more = pg === 2 && S.lights.length;
     R.UI.panel(g, 4, L.arenaY, 172, bot - L.arenaY, 'dark');
-    R.Font.draw(g, its ? 'ITS BOONS' : 'YOUR BOONS', 10, y, its ? 19 : 21);
-    R.Font.draw(g, its ? 'TAP: YOURS' : 'TAP: CLOSE', 170, y, 7, OPT_R);
+    R.Font.draw(g, its ? 'ITS BOONS' : pg === 2 ? 'YOUR BOONS' : S.vigilTitle, 10, y, its ? 19 : pg === 2 ? 21 : 8);
+    R.Font.draw(g, its ? 'TAP: YOURS' : more ? 'TAP: VIGIL' : 'TAP: CLOSE', 170, y, 7, OPT_R);
     y += 12;
     if (!list.length) R.Font.draw(g, '(none yet)', 10, y, 7);
     R.UI.button(g, 10, bot - 26, 160, 22, S.muteText, MUTE_ST);
@@ -767,13 +793,14 @@
         only: null, glow: null, reveal: null, hint: null, infoLine: null, called: null, tell: null,
         rSigil: 'gone', pSigil: 'gone', rSigilT: 0, pSigilT: 0, shownP: null, shownR: null, glass: null, stamp: null,
         muteText: st.muted ? 'SOUND: OFF' : 'SOUND: ON', stanceText: '',
+        lights: R.Run.lightsOut(run), vigilTitle: 'VIGIL: ' + (R.SceneKit.vigilLabel(R.Run.stakeOf(run)) || ''),
         resolving: false, hush: false, fast: false, noSkip: false, tapped: false, overlay: false, ledgerHot: false,
         deathblow: false, bars: 0, gutter: 0, pipPop: 0, banner: null, card: null, dying: 0,
         cool: 0, silent: 0, nHabit: 0, nRead: 0, saidHabit: null, lowSaid: { p: low(duel.p), r: false }, forceLine: false,
         idleT: 0, idleSaid: false,
         actives: [], bst: { pressed: false, disabled: false, icon: 'S', glow: false, accent: 0, broken: false },
         labels: { S: ui('strike', 'STRIKE'), G: ui('guard', 'GUARD'), F: ui('feint', 'FEINT') },
-        bgOpts: { variant: run.duelN, gutter: 0, phase2: duel.phase === 2, floorY: 0, arena: st.arena }
+        bgOpts: { variant: run.duelN, gutter: 0, snuffed: R.Run.stakeOf(run), phase2: duel.phase === 2, floorY: 0, arena: st.arena }
       };
       for (var i = 0; i < duel.p.boons.length; i++) {
         var b = R.Boons.byId[duel.p.boons[i]];
@@ -895,7 +922,7 @@
           R.Save.commit(); sfx('tick');
           return;
         }
-        S.overlay = S.overlay === 1 ? 2 : 0; sfx(S.overlay ? 'tick' : 'back'); return;
+        S.overlay = S.overlay === 1 ? 2 : (S.overlay === 2 && S.lights.length ? 3 : 0); sfx(S.overlay ? 'tick' : 'back'); return;
       }
       S.tapped = true;
       if (y >= L.hudY + 14 && y < L.hudY + 34 && x >= 74 && x < 106) { openLedger(); return; }
