@@ -1,11 +1,11 @@
 // SHOW ME MY RIVAL — headless balance sim.
 //
 //   node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot name[,name]] [--quick] [--jobs J]
-//                     [--unlocks natural|all] [--no-combos] [--no-boons] [--rupture-fix]
+//                     [--unlocks natural|all] [--no-combos] [--no-boons]
 //                     [--set key=value ...] [--label text] [--trace]
 //
 // Plays the real logic (core/rng, ai/brain, game/boons, game/combat, game/run) in exactly the order
-// the game does (scenes/duel.js turn(), main.real.js newRun/duelOver/draft). Every chain is N
+// the game does (scenes/duel.js turn(), main.js newRun/duelOver/draft). Every chain is N
 // SEQUENTIAL runs sharing one brain + one meta, so the Rival learns the bot across runs and unlocks
 // arrive the way they would for a person. Deterministic from --seed.
 //
@@ -14,12 +14,8 @@
 // They are never handed `sealed`; the harness reads it for statistics only. Info boons reach a bot
 // through view.use() / view.info, which return exactly what the scene would draw.
 //
-// --rupture-fix simulates the rule fix proposed in BALANCE.md for the Rupture lock (a clash at 3 pips
-// no longer seals the move). It is a shim applied after R.Combat.resolve; combat.js is untouched, and
-// the shim does nothing once the rule itself has been changed.
-//
 // --set overrides balance numbers for a sweep without editing files, e.g.
-//   --set hp=5,6,7,7,8,9,8 --set p2hp=7 --set heal=6 --set p2heal=3 --set exploit=.15,.3,.45,.55,.65,.75,.9
+//   --set maxhp=24 --set hp=5,6,7,7,8,9,8 --set p2hp=7 --set heal=6 --set p2heal=3 --set exploit=.15,.3,.45,.55,.65,.75,.9
 //   --set honesty=.92,.85,.75,.65,.55,.5,.42 --set p2honesty=.35 --set p2exploit=1 --set K.H_TRUST_UP_LATE=0.8
 'use strict';
 const path = require('path');
@@ -54,6 +50,7 @@ function applySet(list) {
     else if (k === 'p2exploit') RUN.DUELS.phase2.exploit = nums[0];
     else if (k === 'p2honesty') RUN.DUELS.phase2.honesty = nums[0];
     else if (k === 'heal') RUN.HEAL = nums[0];
+    else if (k === 'maxhp') RUN.PLAYER_MAX_HP = nums[0];
     else if (k === 'p2heal') RUN.PHASE2_HEAL = nums[0];
     else if (k.indexOf('K.') === 0) R.Brain.K[k.slice(2)] = nums[0];
     else if (k.indexOf('A.') === 0) ADAPT[k.slice(2)] = nums[0];
@@ -181,9 +178,8 @@ function sharesOf(o) {
   const m = o.moves, n = m.S + m.G + m.F;
   return n > 0 ? { S: m.S / n, G: m.G / n, F: m.F / n } : { S: 1 / 3, G: 1 / 3, F: 1 / 3 };
 }
-// Rupture lock (see BALANCE.md): at 3 pips a clash seals the move for both, the two moves left always
-// contain a dominant one, both sides take it, clash again, and so on for ever. A person stuck in that
-// loop eventually just presses something else; bots that would otherwise loop do the same.
+// Safety net from before the Rupture rule was fixed (it used to seal the move, which locked the duel):
+// a bot that has clashed this many times in a row at 3 pips presses something at random.
 const BORED_AFTER = 9;
 function bored(v) { return v.tension >= 3 && v.clashRun >= BORED_AFTER; }
 function basicBot(rng, pick, relicPrefs, usable) {
@@ -457,11 +453,6 @@ function runChain(job) {
 
       duel.intel.honest = sealed.honest; duel.intel.pred = sealed.pred; duel.intel.coin = cur.coin;
       const res = C.resolve(duel, pm, sealed.move);
-      if (job.ruptureFix && res.rupture && !duel.over) {
-        // proposed rule: Rupture does not seal. (No Encores may still seal the player's repeated move.)
-        duel.r.status.sealed[pm] = 0;
-        if (!(has(duel.r.boons, 'no_encores') && ctx.prev1 === pm)) duel.p.status.sealed[pm] = 0;
-      }
       brain.observe(ctx, sealed.tell, pm, sealed.move);
       RUN.record(run, meta, res, sealed);
       bot.after(view, pm, sealed.move, res);
@@ -592,7 +583,7 @@ if (!WT.isMainThread) {
 // ------------------------------------------------------------------ main: CLI
 function parseArgs(argv) {
   const a = { runs: 400, seeds: 6, seed: 1, bots: BOT_NAMES.slice(), quick: false, jobs: Math.max(1, Math.min(os.cpus().length - 1, 16)),
-              unlocks: 'natural', combos: true, set: [], label: null, trace: false, boons: true, ruptureFix: false };
+              unlocks: 'natural', combos: true, set: [], label: null, trace: false, boons: true };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--runs') a.runs = parseInt(argv[++i], 10);
@@ -604,7 +595,7 @@ function parseArgs(argv) {
     else if (k === '--unlocks') a.unlocks = argv[++i];
     else if (k === '--no-combos') a.combos = false;
     else if (k === '--no-boons') a.boons = false;
-    else if (k === '--rupture-fix') a.ruptureFix = true;
+    else if (k === '--rupture-fix') { /* accepted for old command lines; the rule is fixed in combat.js now */ }
     else if (k === '--set') a.set.push(argv[++i]);
     else if (k === '--label') a.label = argv[++i];
     else if (k === '--trace') a.trace = true;
@@ -753,7 +744,7 @@ function boonTables(byBot, bots) {
 function comboJobs(a, runs, seeds) {
   const jobs = [];
   function add(tag, bot, o) {
-    for (let s = 0; s < seeds; s++) jobs.push(Object.assign({ tag: tag, bot: bot, seed: a.seed * 1000 + 500 + s, runs: runs, unlocks: 'all', ruptureFix: a.ruptureFix }, o));
+    for (let s = 0; s < seeds; s++) jobs.push(Object.assign({ tag: tag, bot: bot, seed: a.seed * 1000 + 500 + s, runs: runs, unlocks: 'all' }, o));
   }
   ['mixer', 'adaptive'].forEach(function (b) {
     add('base/' + b, b, {});
@@ -834,21 +825,20 @@ function comboReport(by) {
   const t0 = Date.now();
   const D = RUN.DUELS;
   const consts = 'rivalHp ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].rivalHp; }).join(',') + ' | p2 ' + D.phase2.rivalHp +
-    ' | heal ' + RUN.HEAL + ' | p2heal ' + RUN.PHASE2_HEAL + ' | exploit ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].exploit; }).join(',') + ' p2 ' + D.phase2.exploit +
+    ' | player max HP ' + RUN.PLAYER_MAX_HP + ' | heal ' + RUN.HEAL + ' | p2heal ' + RUN.PHASE2_HEAL + ' | exploit ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].exploit; }).join(',') + ' p2 ' + D.phase2.exploit +
     ' | honesty ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].honesty; }).join(',') + ' p2 ' + D.phase2.honesty + ' | hit cap ' + C.HIT_CAP;
   console.log('SHOW ME MY RIVAL balance sim   seed ' + a.seed + ', ' + a.seeds + ' chains x ' + a.runs + ' sequential runs per bot, unlocks ' + a.unlocks + ', ' + a.jobs + ' workers');
   console.log('constants: ' + consts);
   if (a.set.length) console.log('overrides: ' + a.set.join('  '));
-  console.log('rules: ' + (a.ruptureFix ? 'Rupture does NOT seal (--rupture-fix shim: the rule change proposed in BALANCE.md)' : 'as shipped in src/game/combat.js'));
 
   if (a.trace) {
-    const out = runChain({ bot: a.bots[0], seed: a.seed, runs: Math.min(a.runs, 3), unlocks: a.unlocks, trace: true, ruptureFix: a.ruptureFix });
+    const out = runChain({ bot: a.bots[0], seed: a.seed, runs: Math.min(a.runs, 3), unlocks: a.unlocks, trace: true });
     console.log(out.trace.join('\n'));
     return;
   }
 
   const jobs = [];
-  a.bots.forEach(function (b) { for (let s = 0; s < a.seeds; s++) jobs.push({ bot: b, tag: b, seed: a.seed * 1000 + s, runs: a.runs, unlocks: a.unlocks, ruptureFix: a.ruptureFix }); });
+  a.bots.forEach(function (b) { for (let s = 0; s < a.seeds; s++) jobs.push({ bot: b, tag: b, seed: a.seed * 1000 + s, runs: a.runs, unlocks: a.unlocks }); });
   const cj = a.combos ? comboJobs(a, Math.min(a.runs, 300), Math.max(2, Math.min(a.seeds, 4))) : [];
   const res = await runJobs(jobs.concat(cj), a.jobs, a.set);
   const by = {};
@@ -858,7 +848,7 @@ function comboReport(by) {
   const hl = headline(by, a.bots);
   console.log(hl.join('\n'));
   console.log('  reach = mean duel reached (8 = phase 2); life = the Rival\'s lifetime predictability score 0..100; trust = its smoothed COUNTER share at the end;');
-  console.log('  rupt% = duels with at least one Rupture; lock% = duels that reached the endless Rupture loop (' + BORED_AFTER + '+ clashes in a row at 3 pips).');
+  console.log('  rupt% = duels with at least one Rupture; lock% = duels with ' + BORED_AFTER + '+ clashes in a row at 3 pips (should be about 0).');
   console.log('\n=== PER DUEL ===');
   console.log(perDuel(by, a.bots).join('\n'));
   if (a.boons) {
@@ -877,7 +867,7 @@ function comboReport(by) {
   if (a.label) {
     const dir = path.join(__dirname, 'out');
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* exists */ }
-    const entry = '\n## ' + a.label + '  [rules: ' + (a.ruptureFix ? 'rupture-fix' : 'as shipped') + ']\n' + consts + (a.set.length ? '\noverrides: ' + a.set.join('  ') : '') + '\n' + a.seeds + ' x ' + a.runs + ' runs, unlocks ' + a.unlocks + '\n```\n' + hl.join('\n') + '\n' +
+    const entry = '\n## ' + a.label + '\n' + consts + (a.set.length ? '\noverrides: ' + a.set.join('  ') : '') + '\n' + a.seeds + ' x ' + a.runs + ' runs, unlocks ' + a.unlocks + '\n```\n' + hl.join('\n') + '\n' +
       ['mixer', 'adaptive', 'uniform'].filter(function (b) { return by[b]; }).map(function (b) {
         return pad(b, 9) + ' duel win% ' + segTable(by[b], function (g) { return 100 * g.w / g.n; }) + '\n' + pad('', 9) + ' honest %  ' + segTable(by[b], function (g) { return 100 * g.honest / g.tells; });
       }).join('\n') + '\n```\n';

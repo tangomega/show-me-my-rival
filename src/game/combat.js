@@ -9,7 +9,7 @@
   var MOVES = R.MOVES || ['S', 'G', 'F'];
   var BEATS = R.BEATS || { S: 'F', G: 'S', F: 'G' };
 
-  var HIT_CAP = 6;          // max damage of a single exchange hit
+  var HIT_CAP = 8;          // max damage of a single exchange hit
   var STATUS_CAP = 3;       // fortify / focus cap
   var TENSION_MAX = 3;
   var BREAK_VALUE = 0.86;   // payoff value of one turn of guard break
@@ -333,7 +333,8 @@
       runHooks('onClash', P, xp);
       runHooks('onClash', RV, xr);
       if (T >= TENSION_MAX) {
-        // Rupture: 1 damage each (never lethal), the move is sealed for both next turn, tension stays 3
+        // Rupture: 1 damage each (never lethal), tension stays 3. It does NOT seal the move: with a
+        // move sealed for both, the two moves left always contain a dominant one and the duel locks.
         res.rupture = true;
         ev.push({ t: 'rupture', move: pm });
         for (i = 0; i < 2; i++) {
@@ -345,8 +346,6 @@
             if (side === 'p') xp.taken = 1; else xr.taken = 1;
           }
         }
-        applyStatus(st, 'p', 'sealed', 1, { move: pm });
-        applyStatus(st, 'r', 'sealed', 1, { move: pm });
       } else {
         duel.tension = Math.min(TENSION_MAX, T + Math.max(1, xp.pips, xr.pips));
         ev.push({ t: 'tension', n: duel.tension, from: T });

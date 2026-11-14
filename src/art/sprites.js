@@ -25,7 +25,7 @@
   function A(dur, loop, loopFrom, contact) {
     var t = 0, tail = 0, i;
     for (i = 0; i < dur.length; i++) { t += dur[i]; if (loopFrom && i >= loopFrom) tail += dur[i]; }
-    return { n: dur.length, dur: dur, loop: !!loop, total: t, loopFrom: loopFrom || 0, tail: tail, contact: contact === undefined ? -1 : contact, im: [], cv: [] };
+    return { n: dur.length, dur: dur, loop: !!loop, total: t, loopFrom: loopFrom || 0, tail: tail, contact: contact === undefined ? -1 : contact, im: [], cv: [], raw: [] };
   }
   function table(who) {
     var rv = who !== 'player', r2 = who === 'rival2';
@@ -94,6 +94,90 @@
   DA('fx.glG2', 1, 1, ['.s.', 'sns', '.s.']);
   DA('fx.glF1', 2, 2, ['..u..', '..n..', 'unnnu', '..n..', '..u..']);
   DA('fx.glF2', 1, 1, ['.u.', 'unu', '.u.']);
+  // slash arc: a crescent swept from overhead to forward-down. Anchor = the swinging shoulder (arc radius ~16).
+  DA('fx.arc', 0, 18, [
+    '..................',
+    '..9999............',
+    '99nnnn999.........',
+    '....99nnnn9.......',
+    '.......99nnn9.....',
+    '.........9nnn9....',
+    '..........9nnn9...',
+    '...........9nnn9..',
+    '............9nn9..',
+    '............9nnn9.',
+    '.............9nn9.',
+    '.............9nnn9',
+    '..............9nn9',
+    '..............9nn9',
+    '..............9nnj',
+    '..............9nnj',
+    '..............9nnj',
+    '..............9nj.',
+    '.............9nnj.',
+    '.............9nj..',
+    '............9nj...',
+    '............9jj...',
+    '...........9j.....',
+    '...........j......']);
+  DA('fx.arcA', 0, 18, [                                   // first third of the swing (pre-contact smear)
+    '..................',
+    '..9999............',
+    '99nnnn999.........',
+    '....99nnnn9.......',
+    '.......99nnn9.....',
+    '.........9nn99....',
+    '..........999.....']);
+  DA('fx.arcC', 0, 18, [                                   // what is left of it on the follow-through
+    '..................',
+    '..................',
+    '..................',
+    '......8...........',
+    '........8.9.......',
+    '...........9......',
+    '............9.....',
+    '.............9....',
+    '..................',
+    '..............9...',
+    '..............9...',
+    '...............9..',
+    '..................',
+    '...............9..',
+    '...............9..',
+    '................9.',
+    '...............9..',
+    '...............9..',
+    '..............99..',
+    '..............9...',
+    '.............9j...',
+    '.............j....',
+    '............j.....']);
+  DA('fx.gflash', 4, 5, [                                  // guard: teal flash on the braced blade
+    '....s....',
+    '....s....',
+    '.s..n..s.',
+    '..s.n.s..',
+    '...snns..',
+    'ssnnnnnss',
+    '...snns..',
+    '..s.n.s..',
+    '.s..n..s.',
+    '....s....',
+    '....s....']);
+  DA('fx.stab', 0, 1, [                                    // feint: violet streak along a level thrust
+    '.....uuuuuuuuu...',
+    'ttuuunnnnnnnnnnn.',
+    '.....uuuuuuuuu...']);
+  DA('fx.spark', 3, 3, [                                   // clash spark
+    '...m...',
+    '.m.n.m.',
+    '..nnn..',
+    'mnnnnnm',
+    '..nnn..',
+    '.m.n.m.',
+    '...m...']);
+  DA('fx.daze1', 0, 0, ['.m....', 'mnm...', '.m...l']);
+  DA('fx.daze2', 0, 0, ['.....m', 'l...mn', '.....m']);
 
   // ---- compositor -----------------------------------------------------------------------------
   // layer order, back to front
@@ -139,9 +223,9 @@
   }
 
   // S = pose (see the header). Returns a fresh FW x H indexed image.
-  function compose(who, S, mask) {
-    var r2 = who === 'rival2', pre = who === 'player' ? 'p.' : 'r.', H = r2 ? FH2 : FH;
-    var img = Pix.make(FW, H), ox = S.dx || 0, oy = H - FH + (S.dy || 0) - (r2 ? HOVER : 0), i, slot, e, p, name;
+  function compose(who, S, mask, f) {
+    var r2 = who === 'rival2' || !!S.as2, pre = who === 'player' ? 'p.' : 'r.', H = who === 'rival2' ? FH2 : FH;
+    var img = Pix.make(FW, H), ox = S.dx || 0, oy = H - FH + (S.dy || 0) - (who === 'rival2' && !S.floor ? HOVER : 0), i, slot, e, p, q, g, out;
     if (S.none) return img;
     putList(img, S.under, ox, oy);
     for (i = 0; i < ORDER.length; i++) {
@@ -149,19 +233,37 @@
       if (!e) continue;
       if (slot === 'head' && who !== 'player') p = headPart(e[0], mask || 'porcelain', r2 && !S.whole);
       else {
-        name = pre + FAMILY[slot] + '.' + e[0];
-        if (r2 && SWAP) { p = SWAP(img, slot, e, ox, oy, S); if (p === true) continue; }
-        p = PART[name];
+        p = PART[pre + FAMILY[slot] + '.' + e[0]];
+        if (r2 && SWAP) { q = SWAP(img, slot, e, ox, oy, f | 0); if (q === true) continue; if (q) p = q; }
       }
       if (p) Pix.blit(img, p.img, p.x + (e[1] || 0) + ox, p.y + (e[2] || 0) + oy);
     }
-    putList(img, S.over, ox, oy);
     if (S.cut) dissolve(img, S.cut + H - FH);
+    putList(img, S.over, ox, oy);
     outline(img);
+    if (S.ghost) {                                         // afterimage of another pose, under the body, never outlined
+      g = ghostOf(compose(who, S.ghost[0], mask, f), S.ghost[2]);
+      out = Pix.make(FW, H);
+      Pix.blit(out, g, S.ghost[1] || 0, 0);
+      Pix.blit(out, img, 0, 0);
+      img = out;
+    }
     putList(img, S.fx, ox, oy);
     if (S.ash) putList(img, S.ash, 0, H - FH);
     if (S.white) img = Pix.solid(img, 23);
     return img;
+  }
+
+  // silhouette of img in bruise violet (29) with a feint-violet (30) rim; thin = checkerboard (fading)
+  function ghostOf(img, thin) {
+    var o = Pix.make(img.w, img.h), w = img.w, h = img.h, x, y, edge;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+      if (!img.d[y * w + x]) continue;
+      if (thin && ((x + y) & 1)) continue;
+      edge = !Pix.get(img, x - 1, y) || !Pix.get(img, x + 1, y) || !Pix.get(img, x, y - 1) || !Pix.get(img, x, y + 1);
+      o.d[y * w + x] = edge ? 30 : 29;
+    }
+    return o;
   }
 
   // top-down dissolve: everything above row `cut` is gone, the 6 rows below it are eaten in an ordered pattern
@@ -452,6 +554,117 @@
     mod(PF, { fx: [['fx.glF1', 39, 33]] }),
     mod(PF, { fx: [['fx.glF2', 39, 32]] })];
 
+  // ---- Ashen: action parts ----
+  D('p.legs.lunge', 14, 37, [
+    '.......fffeee........',
+    '......ffff.eeee......',
+    '.....fff....eeed.....',
+    '....eed......ddc.....',
+    '...eed.......ddc.....',
+    '...ee........edd.....',
+    '..eed........ddc.....',
+    '..ed.........ddc.....',
+    '.eee.........edd.....',
+    '.edd.........dddc....',
+    'eddd.........ddddc...']);
+  D('p.legs.kneel', 13, 39, [
+    '.........fffeee....',
+    '........ffffeeee...',
+    '.......ffff..eeed..',
+    '......fff.....ddc..',
+    '.....fff......ddc..',
+    '.....ff.......edd..',
+    '....fff.......ddc..',
+    '.eddeef.......dddc.',
+    'edddddd.......ddddc']);
+  D('p.head.back', 19, 17, [
+    '....feed....',
+    '...feeeedd..',
+    '..feee1111d.',
+    '.ffee11111..',
+    '.ffee1118...',
+    '.ffeee11....',
+    '.fffeeee....',
+    '..ffeeed....',
+    '...ffee.....']);
+  D('p.head.bowed', 22, 19, [
+    '...feee....',
+    '..feeeed...',
+    '.feeeeeed..',
+    '.feeeeeeed.',
+    'ffeeeeeedd.',
+    'ffeeee111d.',
+    'ffeeee118..',
+    '.ffeeee1...',
+    '.fffeed....',
+    '..ffee.....']);
+  DA('p.arm.fwd', 1, 0, [
+    '.bbbbb..',
+    'cbbcbbdd',
+    '.cccccdd']);
+  DA('p.arm.high', 0, 5, [
+    '.....dd',
+    '....bbd',
+    '...bbc.',
+    '..bbc..',
+    '.bbc...',
+    'bbc....',
+    'cc.....']);
+  DFX('p.arm.wide', 'p.arm.high');
+  DFX('p.arm.dnb', 'p.arm.low');
+  DA('p.sw.h', 1, 1, [
+    '..7............',
+    'dd799999.99999.',
+    '..6888888888889',
+    '..6............']);
+  DFX('p.sw.bk', 'p.sw.h');
+  DFY('p.sw.up2', 'p.sw.dn2');
+  DFY('p.sw.up45', 'p.sw.dn45');
+  DFX('p.sw.upb45', 'p.sw.up45');
+  DFX('p.sw.bkdn45', 'p.sw.dn45');
+  DFY('p.sw.down', 'p.sw.up');
+
+  // ---- Ashen: strike / guard / feint / hit / stagger / clash ----
+  var PL = { cape: ['flare', 1, -2], legs: ['lunge'], torso: ['fwd', 0, 2], head: ['level', 3, 3] };                 // lunging body
+  var PH = { cape: ['top'], hem: ['hem', -1, 0], legs: ['step'], torso: ['up'], head: ['level'], sw: ['up45', 31, 24], arm: ['high', 26, 28] };   // blade high-forward
+  FR.player.strike = [
+    PS,
+    mod(PH, { dx: 1 }),
+    mod(PL, { sw: ['up2', 33, 30], arm: ['fwd', 27, 29], fx: [['fx.arcA', 29, 34]] }),
+    mod(PL, { dx: 1, sw: ['dn2', 32, 33], arm: ['fwd', 26, 32], fx: [['fx.arc', 28, 36]] }),
+    mod(PL, { dx: 1, sw: ['dn2', 30, 38], arm: ['low', 26, 31], fx: [['fx.arcC', 28, 37]] })];
+
+  var PGD = { cape: ['top', 0, 1], hem: ['hem'], legs: ['stand'], torso: ['up', 0, 1], head: ['level', 0, 1], offM: ['brace', 29, 25], sw: ['up', 31, 32], arm: ['guard', 25, 29] };
+  FR.player.guard = [
+    mod(P0, { sw: ['up', 31, 33], arm: ['guard', 25, 29] }),
+    PGD,
+    mod(PGD, { dx: -1, fx: [['fx.gflash', 32, 24]] }),
+    PGD];
+
+  FR.player.feint = [
+    PH,
+    mod(PH, { dx: 1, sw: ['up45', 31, 23], arm: ['high', 26, 27] }),
+    { cape: ['flare', 0, -1], legs: ['crouch'], torso: ['fwd', 0, 4], head: ['level', 4, 5], sw: ['dn2', 32, 39], arm: ['low', 28, 32], ghost: [PH, 1, false] },
+    mod(PF, { offB: null, ghost: [PH, 1, true] }),
+    mod(PF, { offB: null, swB: null, sw: ['h', 33, 36], arm: ['fwd', 27, 35], fx: [['fx.stab', 31, 36]] }),
+    { cape: ['flare', 1, -2], legs: ['lunge'], torso: ['fwd', 0, 3], head: ['level', 3, 4], sw: ['dn2', 31, 38], arm: ['low', 27, 31] }];
+
+  var PHIT = { dx: -2, cape: ['top', 1, 0], hem: ['hem', 2, 0], legs: ['stand'], torso: ['back'], head: ['back'], sw: ['dn2', 27, 36], arm: ['low', 23, 29] };
+  FR.player.hit = [mod(PHIT, { white: true }), PHIT, mod(P0, { dx: -1, head: ['level', -1, 0] })];
+
+  var PST0 = { dx: -1, cape: ['top', 1, 0], hem: ['hem', 2, 0], legs: ['stand'], torso: ['back'], head: ['back'], swB: ['upb45', 17, 23], arm: ['wide', 23, 28] };
+  var PST1 = mod(PST0, { dx: -3, legs: ['step'], swB: ['upb', 16, 23], arm: ['wide', 22, 28] });
+  var PST2 = { dx: -2, cape: ['top', 1, 3], hem: ['hem', 2, 3], legs: ['kneel'], torso: ['up', 0, 3], head: ['bowed', 0, 3], swB: ['bkdn', 21, 39], arm: ['dnb', 25, 31] };
+  var PST3 = { dx: -2, cape: ['top', 2, 5], hem: ['hem', 3, 4], legs: ['kneel'], torso: ['fwd', -1, 5], head: ['bowed', 3, 6], swB: ['bkdn', 22, 40], arm: ['dnb', 26, 33] };
+  var PST4 = mod(PST3, { head: ['bowed', 3, 7] });
+  FR.player.stagger = [PST0, PST1, PST2, PST3, PST4, mod(PST4, { fx: [['fx.daze1', 26, 21]] }), mod(PST4, { fx: [['fx.daze2', 26, 21]] })];
+
+  FR.player.clash = [
+    mod(PH, { dx: 2, fx: [['fx.spark', 40, 15]] }),
+    { dx: -4, cape: ['top', 1, 0], hem: ['hem', 2, 0], legs: ['stand'], torso: ['back'], head: ['back'], sw: ['up', 29, 24], arm: ['high', 23, 28] },
+    mod(P0, { dx: -3, sw: ['up', 31, 32], arm: ['guard', 25, 28] }),
+    mod(P0, { dx: -1 })];
+
   // =============================================================================================
   // THE RIVAL — ~38 px, narrow, upright. Wine coat g/h/i, cape g with h folds, black 2/4/6, mask c/b/a.
   // =============================================================================================
@@ -536,6 +749,7 @@
     '..ghhh.hhi',
     '..gh....h.']);
   DS('r.torso.back', 'r.torso.up', -1, '22221111000000');
+  DS('r.torso.back3', 'r.torso.up', -1, '33332221110000');
   DS('r.torso.fwd', 'r.torso.up', 1, '22221111000000');
   D('r.torso.lunge', 19, 29, [
     '..........hhhh.',
@@ -581,20 +795,23 @@
     '22gghg2.....',
     '2ggg22......',
     '2g2.........']);
-  D('r.cape.flare', 5, 22, [
-    '...2gg...................',
-    '..2gggghh................',
-    '.2ggggggghhh.............',
-    '2ggg2gggggghhh...........',
-    '2gg.2ggghgggghhh.........',
-    '.2...2ggghhggggghhh......',
-    '......2gggghhgggggghhh...',
-    '.......22ggghhhggggggghh.',
-    '.........2gggghhhggggggh.',
-    '..........22ggggghhgggggg',
-    '............22ggggggggggg',
-    '..............222gggggggg',
-    '.................2ggggggg']);
+  D('r.cape.flare', 3, 22, [
+    '..2gg.....................',
+    '.2ggggh...................',
+    '2gggggghh.................',
+    '.2gggggghhh...............',
+    '2ggggggggghhh.............',
+    '.2gg2ggggggghhh...........',
+    '..2.2gggghggggghhh........',
+    '...2ggggghhgggggghhh......',
+    '..2gggggggghhgggggghhh....',
+    '.2ggg2ggggggghhgggggghh...',
+    '..2g.2gggggggghhggggggghh.',
+    '......2ggg2ggggghhgggggggg',
+    '.......2g.2gggggggggggggg.',
+    '...........2gg2gggggggggg.',
+    '............2..2ggggggggg.',
+    '................22ggggggg.']);
   D('r.cape.wrap', 18, 12, [
     '.i.........',
     '.hi........',
@@ -826,15 +1043,15 @@
   var R3 = mod(R0, { hem: ['hem', -1, 0], head: ['level', 1, 0] });
   FR.rival.idle = [R0, R1, R2, R3];
 
-  var RS = { swB: ['upb', 20, 15], cape: ['top', -2, 0], hem: ['hem', -2, 0], legs: ['step'], torso: ['back'], head: ['tiltB', -2, 0], arm: ['up', 24, 23] };
+  var RS = { swB: ['upb', 19, 15], cape: ['top', -3, 0], hem: ['hem', -2, 0], legs: ['step'], torso: ['back3'], head: ['tiltB', -3, 0], arm: ['up', 23, 23] };
   var RG = { legs: ['narrow'], torso: ['up'], head: ['level'], capeF: ['wrap'], offM: ['brace', 27, 19], sw: ['up', 30, 27], arm: ['guard', 25, 22] };
   var RF = { swB: ['bkdn3', 19, 36], offB: ['splay', 31, 34], cape: ['flare'], legs: ['crouch'], torso: ['lunge', 0, 3], head: ['tiltB', 5, 12], arm: ['back', 29, 34] };
   FR.rival.tell_S = [
     mod(R0, { sw: ['up', 30, 26], arm: ['guard', 25, 21] }),
     mod(RS, { swB: ['upb', 23, 15], arm: ['up', 26, 23], torso: ['up'], head: ['level'], cape: ['top'] }),
     mod(RS, { dx: -1 }),
-    mod(RS, { fx: [['fx.glS1', 14, 2]] }),
-    mod(RS, { fx: [['fx.glS2', 16, 8]] })];
+    mod(RS, { fx: [['fx.glS1', 13, 2]] }),
+    mod(RS, { fx: [['fx.glS2', 15, 8]] })];
   FR.rival.tell_G = [
     mod(R0, { sw: ['up', 30, 29], arm: ['guard', 25, 23] }),
     mod(RG, { capeF: null, cape: ['top'], hem: ['hem', 1, 0], offM: null }),
@@ -848,6 +1065,490 @@
     mod(RF, { fx: [['fx.glF1', 41, 34]] }),
     mod(RF, { fx: [['fx.glF2', 41, 33]] })];
 
+  // ---- Rival: action parts ----
+  D('r.legs.lunge', 11, 33, [
+    '..........445555..........',
+    '.........4455.55556.......',
+    '........445.....5556......',
+    '.......445........556.....',
+    '......445..........566....',
+    '.....445...........56.....',
+    '....445............56.....',
+    '....45.............56.....',
+    '...445.............56.....',
+    '...45..............56.....',
+    '..445..............56.....',
+    '..45...............56.....',
+    '.445...............566....',
+    '.45................5566...',
+    '4445...............55566..']);
+  D('r.legs.kneel', 12, 36, [
+    '..........44555......',
+    '.........4455555.....',
+    '........445..5556....',
+    '.......445....5566...',
+    '.......45......56....',
+    '......445......56....',
+    '......45.......56....',
+    '.....445.......56....',
+    '.....45........56....',
+    '....445........566...',
+    '.44445.........5566..',
+    '445555.........55566.']);
+  DA('r.arm.fwd', 1, 1, [
+    '.hhhhhii.56',
+    'ghhhhhhhh57',
+    '.gggggg..55']);
+  DA('r.arm.high', 0, 6, [
+    '......56',
+    '.....h57',
+    '....hhi.',
+    '...hhi..',
+    '..hhg...',
+    '.hhg....',
+    'hhg.....',
+    'gg......']);
+  DFX('r.arm.wide', 'r.arm.high');
+  DFX('r.arm.dnb', 'r.arm.cane');
+  DA('r.sw.h', 1, 1, [
+    '..o.................',
+    'pop99999999999999999',
+    '..o.................']);
+  DA('r.sw.dn2', 1, 1, [
+    '..o.................',
+    'pop99...............',
+    '..o..99.............',
+    '.......99...........',
+    '.........99.........',
+    '...........99.......',
+    '.............99.....',
+    '...............99...',
+    '.................99.',
+    '...................9']);
+  DA('r.sw.up45', 1, 13, [
+    '.............9',
+    '............9.',
+    '...........9..',
+    '..........9...',
+    '.........9....',
+    '........9.....',
+    '.......9......',
+    '......9.......',
+    '.....9........',
+    '....9.........',
+    '...9..........',
+    '.o9...........',
+    '..p...........',
+    '.o.o..........',
+    'p.............']);
+  DFY('r.sw.up2', 'r.sw.dn2');
+  DFX('r.sw.bkdn2', 'r.sw.dn2');
+  DFY('r.sw.dn45', 'r.sw.up45');
+  DFX('r.sw.upb45', 'r.sw.up45');
+  DFY('r.sw.down', 'r.sw.up');
+  DA('r.off.tomask', 0, 0, [
+    '.57',
+    '556',
+    'h5.',
+    'gh.']);
+
+  // ---- Rival: strike / guard / feint / hit / stagger / clash ----
+  var RL = { cape: ['flare', -2, -11], legs: ['lunge'], torso: ['fwd', 1, 1], head: ['level', 3, 1] };                 // lunging body
+  var RH = { cape: ['top'], hem: ['hem', -1, 0], legs: ['step'], torso: ['up'], head: ['level'], sw: ['up45', 32, 17], arm: ['high', 25, 22] };   // blade high-forward
+  FR.rival.strike = [
+    RS,
+    mod(RH, { dx: 1 }),
+    mod(RL, { sw: ['up45', 35, 24], arm: ['fwd', 26, 23], fx: [['fx.arcA', 30, 30]] }),
+    mod(RL, { sw: ['dn45', 35, 26], arm: ['fwd', 26, 25], fx: [['fx.arc', 30, 31]] }),
+    mod(RL, { sw: ['dn45', 34, 29], arm: ['fwd', 25, 28], fx: [['fx.arcC', 30, 32]] })];
+
+  var RGD = mod(R0, { sw: ['up', 30, 27], arm: ['guard', 25, 22] });
+  FR.rival.guard = [
+    mod(R0, { sw: ['up', 30, 29], arm: ['guard', 25, 23] }),
+    RGD,
+    mod(RGD, { dx: -1, fx: [['fx.gflash', 31, 18]] }),
+    RGD];
+
+  FR.rival.feint = [
+    RH,
+    mod(RH, { dx: 1, head: ['tiltB'] }),
+    { legs: ['narrow'], torso: ['up'], head: ['tiltF', 1, 0], capeF: ['wrap', 1, 0], ghost: [RH, 1, false] },
+    mod(RF, { offB: null, ghost: [RH, 1, true] }),
+    mod(RF, { dx: -4, offB: null, swB: null, sw: ['up45', 39, 36], arm: ['fwd', 30, 35], fx: [['fx.glF1', 50, 24]] }),
+    mod(RL, { sw: ['dn45', 34, 29], arm: ['fwd', 25, 28] })];
+
+  var RHIT = { dx: -1, cape: ['top', -1, 0], hem: ['hem'], legs: ['stand'], torso: ['back'], head: ['tiltB', -2, 0], sw: ['dnf', 31, 28], arm: ['cane', 23, 21], offF: ['tomask', 24, 15] };
+  FR.rival.hit = [mod(RHIT, { white: true }), RHIT, mod(R0, { dx: -1, head: ['tiltB', -1, 0] })];
+
+  var RST0 = { dx: -1, cape: ['top', -1, 0], hem: ['hem', 1, 0], legs: ['stand'], torso: ['back'], head: ['tiltB', -2, 0], swB: ['upb45', 16, 17], arm: ['wide', 23, 23] };
+  var RST1 = mod(RST0, { dx: -3, legs: ['step'] });
+  var RST2 = { dx: -2, cape: ['top', 0, 4], hem: ['hem', 1, 3], legs: ['kneel'], torso: ['up', 0, 4], head: ['tiltF', 0, 4], swB: ['bkdn3', 19, 33], arm: ['dnb', 26, 27] };
+  var RST3 = { dx: -2, cape: ['top', 1, 6], hem: ['hem', 2, 4], legs: ['kneel'], torso: ['fwd', 0, 5], head: ['tiltF', 3, 6], swB: ['bkdn2', 21, 36], arm: ['dnb', 28, 30] };
+  var RST4 = mod(RST3, { head: ['tiltB', 2, 6] });
+  FR.rival.stagger = [RST0, RST1, RST2, RST3, RST4, mod(RST4, { fx: [['fx.daze1', 22, 11]] }), mod(RST4, { fx: [['fx.daze2', 22, 11]] })];
+
+  FR.rival.clash = [
+    mod(RH, { dx: 1, fx: [['fx.spark', 40, 10]] }),
+    { dx: -4, cape: ['top', -1, 0], hem: ['hem', 1, 0], legs: ['stand'], torso: ['back'], head: ['tiltB', -2, 0], sw: ['up', 30, 18], arm: ['high', 23, 23] },
+    mod(R0, { dx: -3, sw: ['up', 30, 27], arm: ['guard', 25, 22] }),
+    mod(R0, { dx: -1 })];
+
+  // ---- Ashen: death / taunt / taunt2 / victory ----
+  DA('p.off.hood', 0, 7, [
+    '...cb',
+    '...bb',
+    '..ec.',
+    '..ee.',
+    '.ee..',
+    '.ef..',
+    'ee...',
+    'ef...']);
+  D('p.ashpile', 0, 0, [
+    '....8787....',
+    '..78888787..',
+    '.7878787878.']);
+  DA('fx.ashA', 0, 0, [
+    '......8.......',
+    '..7.......8...',
+    '.........7....',
+    '....8.........',
+    '.8.....7....8.',
+    '...7......8...',
+    '......8.......',
+    '..8......7..8.',
+    '.....7........']);
+  DA('fx.ashB', 0, 0, [
+    '....7.........',
+    '.........8....',
+    '..8...........',
+    '......7....8..',
+    '...8.....7....',
+    '.7.....8......',
+    '..........8...',
+    '....8..7......',
+    '.8.........7..']);
+
+  // knees hit the floor, the sword slips; slump; then the body is eaten top-down and drifts off as ash
+  var PD1 = { dx: -1, cape: ['top', 1, 3], hem: ['hem', 2, 3], legs: ['kneel'], torso: ['up', 0, 3], head: ['back', 1, 3], sw: ['dn2', 27, 40], arm: ['low', 23, 32] };
+  var PD2 = { dx: -1, cape: ['top', 2, 5], hem: ['hem', 3, 4], legs: ['kneel'], torso: ['fwd', -1, 5], head: ['bowed', 3, 7], over: [['p.sw.h', 31, 46]], arm: ['low', 26, 34] };
+  FR.player.death = [
+    mod(PHIT, { dx: -1 }),
+    PD1,
+    PD2,
+    mod(PD2, { cut: 28, fx: [['fx.ashA', 17, 17]] }),
+    mod(PD2, { cut: 33, fx: [['fx.ashB', 16, 20], ['fx.ashA', 20, 10]] }),
+    mod(PD2, { cut: 38, fx: [['fx.ashA', 16, 26], ['fx.ashB', 19, 14]] }),
+    mod(PD2, { cut: 43, fx: [['fx.ashB', 17, 32], ['fx.ashA', 20, 20]] }),
+    { dx: -1, over: [['p.sw.h', 31, 46], ['p.ashpile', 18, 45]], fx: [['fx.ashB', 18, 34]] }];
+
+  // pulls the hood lower
+  FR.player.taunt = [
+    P0,
+    mod(P0, { offF: ['hood', 27, 28] }),
+    mod(P1, { head: ['bowed', 0, 1], offF: ['hood', 27, 30] }),
+    mod(P1, { head: ['bowed', 0, 1] })];
+
+  // flicks ash off the blade
+  FR.player.taunt2 = [
+    P0,
+    mod(P0, { sw: ['dn2', 30, 34], arm: ['low', 26, 27] }),
+    mod(P0, { sw: ['h', 31, 30], arm: ['fwd', 25, 29], fx: [['fx.ashA', 34, 20]] }),
+    mod(P0, { sw: ['dn2', 29, 35], fx: [['fx.ashB', 34, 24]] })];
+
+  // plants the sword, kneels beside it
+  var PV3 = { cape: ['top', 1, 3], hem: ['hem', 2, 3], legs: ['kneel'], torso: ['up', 0, 3], head: ['level', 0, 3], sw: ['down', 34, 34], arm: ['fwd', 27, 33] };
+  FR.player.victory = [
+    P0,
+    mod(P0, { sw: ['down', 32, 27], arm: ['guard', 26, 24] }),
+    mod(P1, { sw: ['down', 33, 34], arm: ['low', 29, 27] }),
+    PV3,
+    mod(PV3, { torso: ['fwd', -1, 4], head: ['bowed', 1, 5], cape: ['top', 2, 4] }),
+    mod(PV3, { torso: ['fwd', -1, 4], head: ['bowed', 1, 6], cape: ['top', 2, 4], hem: ['hem', 3, 4] })];
+
+  // ---- Rival: death (it only yields) / taunt / taunt2 / victory / transform ----
+  D('r.cape.swirlA', 14, 25, [
+    '......2gghhhhhg..2g.',
+    '....2gghhhhhhhhgggg.',
+    '..2gghhhhgghhhhhgg..',
+    '.2ghhhhgghhhhhgg....',
+    '2ghhggghhhhhhg......',
+    '.2ggg.2ghhhhhg......',
+    '......2ghhhghg......',
+    '.....2ghhhghhg......',
+    '.....2ghhghhhgg.....',
+    '....2ghhghhhhhg.....',
+    '....2ghghhhhhhgg....',
+    '...2ghhghhhhgghg....',
+    '...2ghghhhhgghhhg...',
+    '..2ghhghhhgghhhhg...',
+    '..2ghghhhgghhhhhgg..',
+    '.2ghhghhgghhhhhhhg..',
+    '.2ghghhgghhhhhhghg..',
+    '2ghhghgghhhhhhghhgg.',
+    '2ghghgghhhhhhghhhhg.',
+    '2gghgghhhhhgghhhhgg.',
+    '.2ggghhhhgggghhhgg2.',
+    '..2gggggggg2gggg2...',
+    '....2222....2222....']);
+  D('r.cape.swirlB', 18, 22, [
+    '....2gh..2g.',
+    '..2gghhggg..',
+    '.2ghhhhg....',
+    '2ghhggg.....',
+    '.2gg2ghg....',
+    '....2ghhg...',
+    '....2ghhg...',
+    '...2ghghg...',
+    '...2ghhgg...',
+    '..2ghghhg...',
+    '..2ghhghgg..',
+    '.2ghghhhhg..',
+    '.2ghhghhgg..',
+    '..2ghhghg...',
+    '..2gghgg....',
+    '...2ggg.2g..',
+    '....22...g..']);
+  D('r.cape.swirlC', 20, 22, [
+    '...g.....',
+    '..gh..2..',
+    '.2hg.....',
+    '..g...g..',
+    '.....gh..',
+    '....2hg..',
+    '..g..g...',
+    '.gh......',
+    '..g....g.',
+    '......g..']);
+  DA('r.arm.clapA', 1, 0, [
+    '.hh.........',
+    'ghhi...hh67.',
+    'ghhi..hhg56.',
+    '.ghhi.g..5..',
+    '.gghhh......',
+    '...ghh67....',
+    '....g556....',
+    '......5.....']);
+  DA('r.arm.clapB', 1, 0, [
+    '.hh.........',
+    'ghhi........',
+    'ghhi........',
+    '.ghhi..677..',
+    '.gghhhh567..',
+    '...ggg.56...']);
+  DA('r.off.wagA', 0, 6, [
+    '....7.',
+    '....7.',
+    '...56.',
+    '..h55.',
+    '.hhi..',
+    'hhg...',
+    'hg....']);
+  DA('r.off.wagB', 0, 6, [
+    '.....7',
+    '....7.',
+    '...56.',
+    '..h55.',
+    '.hhi..',
+    'hhg...',
+    'hg....']);
+  DA('fx.clap', 1, 1, ['n.n', '...', 'n.n']);
+  DA('fx.crack1', 0, 0, ['...1...', '...1...', '....1..']);
+  DA('fx.crack2', 0, 0, ['...1...', '...1.1.', '....1n.', '...11..', '.n..1..', '.....1.']);
+  DA('fx.shardA', 5, 3, [
+    '..a.....a.',
+    '.....n....',
+    'a........b',
+    '...n..a...',
+    '.b......n.',
+    '....a.....']);
+  DA('fx.shardB', 7, 4, [
+    'a.........a...',
+    '......b.......',
+    '..n.........b.',
+    '..............',
+    '.a....n.......',
+    '...........a..',
+    'b......b......']);
+
+  FR.rival.death = [
+    mod(RHIT, { offF: null }),
+    RST2,
+    mod(RST3, { head: ['tiltB', 2, 6] }),
+    { dx: -2, legs: ['kneel'], head: ['tiltB', 2, 6], capeF: ['swirlA'] },
+    { dx: -2, capeF: ['swirlB'] },
+    { dx: -2, capeF: ['swirlC'] },
+    { none: true }];
+
+  // slow clap: the estoc stands planted in the floor, both hands free
+  var RC = mod(R0, { sw: ['down', 34, 30], arm: ['clapA', 25, 22] });
+  var RCb = mod(R0, { sw: ['down', 34, 30], arm: ['clapB', 25, 22], head: ['level', 1, 0] });
+  var RCc = mod(RCb, { fx: [['fx.clap', 35, 24]] });
+  FR.rival.taunt = [RC, RC, RCc, RCb, RC, RC, RC, RC, RCc, RCb, RC, mod(RC, { head: ['level', 1, 0] })];
+
+  // wags a finger, mask tilting with it
+  function RW(v, head) { return mod(R0, { offF: [v, 29, 23], head: head }); }
+  FR.rival.taunt2 = [RW('wagA', ['tiltB']), RW('wagB', ['level', 1, 0]), RW('wagA', ['tiltF', 1, 0]), RW('wagB', ['level', 1, 0]), RW('wagA', ['tiltB'])];
+
+  // mocking bow: free hand sweeps out, the estoc goes back and up, and on the last frame it looks up at you
+  var RB3 = { cape: ['flare', -1, -4], legs: ['step'], torso: ['lunge', -1, -4], head: ['tiltF', 4, 6], offB: ['splay', 29, 31], swB: ['upb45', 17, 29], arm: ['back', 27, 27] };
+  FR.rival.victory = [
+    R0,
+    mod(R0, { offB: ['splay', 27, 24] }),
+    mod(R0, { cape: ['top', 1, 1], torso: ['fwd', 0, 1], head: ['tiltF', 3, 2], offB: ['splay', 28, 26] }),
+    RB3,
+    mod(RB3, { head: ['tiltF', 5, 7] }),
+    mod(RB3, { head: ['tiltB', 4, 6] })];
+
+  // the mask breaks: kneeling (it arrives here from the last stagger frame), hand to mask, cracks, white-hot shatter, rise unmasked
+  var RT = mod(RST4, { head: ['tiltF', 3, 6], offF: ['tomask', 29, 22] });
+  var RT5 = mod(RST4, { as2: true, head: ['tiltB', 1, 6], arm: ['wide', 26, 30], swB: ['upb45', 19, 24], fx: [['fx.shardB', 28, 18]] });
+  FR.rival.transform = [
+    mod(RST4, { offF: ['tomask', 28, 22] }),
+    RT,
+    mod(RT, { fx: [['fx.crack1', 25, 17]] }),
+    mod(RT, { dx: -1, fx: [['fx.crack2', 24, 17]] }),
+    mod(RT, { white: true, fx: [['fx.shardA', 28, 20]] }),
+    RT5,
+    mod(R0, { as2: true, dy: 2, torso: ['fwd', 0, 0], head: ['tiltF', 2, 1] }),
+    mod(R0, { as2: true, dy: 0 }),
+    mod(R0, { as2: true, dy: -2, head: ['level'] }),
+    mod(R0, { as2: true, dy: -3 })];
+
+  // =============================================================================================
+  // THE UNMASKED (rival2) — the Rival's poses with part swaps: shattered mask + witchfire eye (headPart),
+  // legs -> cloak tendrils, a 1-px witchfire edge on the blade, 3 px hover, and a violet afterimage of the
+  // previous frame (frameImg). Witchfire (v = 31) appears nowhere else.
+  // =============================================================================================
+  D('r.legs.tA0', 18, 31, [
+    '...gghhgg...',
+    '..gghghhgg..',
+    '..gg.gh.gg..',
+    '..g2.gg.2g..',
+    '.gg..gg..gg.',
+    '.g2..2g..g2.',
+    '.g...2g...g.',
+    '.gg...g2..gg',
+    '..g...g...2g',
+    '..g2..gg...g',
+    '..2g...g..2g',
+    '...g...g2.g.',
+    '...g2...g.g.',
+    '...2....g.2.',
+    '..2....2t...',
+    '.t.....t....']);
+  DS('r.legs.tA1', 'r.legs.tA0', 1, '0000011122211000');
+  DS('r.legs.tA2', 'r.legs.tA0', -1, '0000001112221100');
+  D('r.legs.tS0', 16, 34, [
+    '....gghhgg......',
+    '..ggg2gghggg....',
+    '.gg2..2gg.2ggg..',
+    'gg2....2g...2gg.',
+    'g2......g2....g2',
+    't........t.....t']);
+  DS('r.legs.tS1', 'r.legs.tS0', -1, '000112');
+  // which tendrils stand in for which legs: [variant, dx, dy]
+  var TEND = { stand: ['tA', 0, 0], step: ['tA', 1, 0], narrow: ['tA', 1, 0], lunge: ['tS', -2, -1], crouch: ['tS', -1, 5], kneel: ['tS', 0, 3] };
+  D('r.cape.heapA', 15, 30, [
+    '.......2gg........',
+    '......2ghhg.......',
+    '.....2ghhhgg......',
+    '....2gghhghg......',
+    '....2ghhghhgg.....',
+    '...2gghhghhhg.....',
+    '...2ghhgghhhgg....',
+    '..2gghhghhghhg....',
+    '..2ghhgghhghhgg...',
+    '.2gghhghhhgghhg...',
+    '.2ghhgghhhhghhgg..',
+    '2gghhghhhhhgghhg2.',
+    '2ghhgghhhhhhghhgg2',
+    '2ggggggg2ggggggg2.',
+    '.2222222.2222222..',
+    '..................',
+    '..................',
+    '..................']);
+  D('r.cape.heapB', 13, 38, [
+    '........2ggg..........',
+    '......2gghhhgg........',
+    '....2gghhghhhggg......',
+    '...2ghhhgghhhghhgg....',
+    '..2gghhgghhhhgghhhg...',
+    '.2ghhhgghhhhhhgghhgg..',
+    '2gghhgghhhhhghhgghhhg2',
+    '2ggggggg2ggggg2gggggg2',
+    '.2222222.22222.222222.',
+    '......................']);
+  D('r.cape.heapC', 11, 43, [
+    '......2ggg....2gg.........',
+    '...2ggghhhggggghhgg2......',
+    '.2gghhhgghhhghhhgghhggg2..',
+    '2gggggg2ggggggg2gggggggg2.',
+    '.222222.2222222.22222222..']);
+  D('r.maskfloor', 0, 0, [
+    '.baaaaaa.',
+    'ba11a11ai',
+    'cbaaaaiic',
+    '.ccbbbcc.']);
+
+  var EDGE = {};
+  // witchfire edge of a blade: its steel pixels (9) only, in 31, nudged one pixel to the shadow side
+  function edgeOf(name) {
+    var p = PART[name], o, k, flat;
+    if (EDGE[name] !== undefined) return EDGE[name];
+    if (!p) return (EDGE[name] = null);
+    o = Pix.make(p.img.w, p.img.h);
+    for (k = 0; k < o.d.length; k++) if (p.img.d[k] === 9) o.d[k] = 31;
+    flat = p.img.w > p.img.h;                               // lying blades glow underneath, standing ones behind
+    return (EDGE[name] = { img: o, x: p.x - (flat ? 0 : 1), y: p.y + (flat ? 1 : 0) });
+  }
+  SWAP = function (img, slot, e, ox, oy, f) {
+    var m, p, name;
+    if (slot === 'legs') {
+      m = TEND[e[0]] || TEND.stand;
+      name = 'r.legs.' + m[0] + (m[0] === 'tA' ? f % 3 : f % 2);
+      p = PART[name];
+      Pix.blit(img, p.img, p.x + m[1] + (e[1] || 0) + ox, p.y + m[2] + (e[2] || 0) + oy);
+      return true;
+    }
+    if (slot === 'sw' || slot === 'swB') {
+      p = edgeOf('r.sw.' + e[0]);
+      if (p) Pix.blit(img, p.img, p.x + (e[1] || 0) + ox, p.y + (e[2] || 0) + oy);
+    }
+    return null;
+  };
+
+  // idle: hover bob, tendril ripple (frame index), slow head tilts
+  FR.rival2.idle = [
+    R0,
+    mod(R0, { dy: -1 }),
+    mod(R0, { dy: -1, hem: ['hem', -1, 0], head: ['level', 1, 0] }),
+    mod(R0, { hem: ['hem', -1, 0], head: ['level', 1, 0] }),
+    mod(R0, { dy: 1 }),
+    mod(R0, { dy: 1, head: ['tiltF', 1, 0] })];
+
+  // feint: the body blinks out on the 4th frame (only the afterimage is left)
+  FR.rival2.feint = FR.rival.feint.slice();
+  FR.rival2.feint[3] = mod(FR.rival.feint[3], { blink: true, ghost: null });
+
+  // victory: rises 6 px, arms wide
+  var R2V = mod(R0, { sw: ['up45', 32, 17], arm: ['high', 25, 22], offB: ['splay', 26, 22], head: ['tiltB'] });
+  FR.rival2.victory = [R0, mod(R0, { dy: -1, offB: ['splay', 27, 25] }), mod(R2V, { dy: -2 }), mod(R2V, { dy: -4 }), mod(R2V, { dy: -6 }), mod(R2V, { dy: -6, head: ['level', 1, 0] })];
+
+  // death: collapse, the cloak empties, the whole porcelain mask is left on the floor
+  FR.rival2.death = [
+    mod(RHIT, { offF: null }),
+    RST0,
+    RST1,
+    RST2,
+    mod(RST3, { dy: 1 }),
+    mod(RST3, { dy: 3, head: ['tiltF', 3, 7] }),
+    { floor: true, dx: -2, capeF: ['heapA'], head: ['tiltF', 1, 16], whole: false },
+    { floor: true, dx: -2, capeF: ['heapA', 0, 3], over: [['r.maskfloor', 20, 28]] },
+    { floor: true, dx: -2, capeF: ['heapB'], over: [['r.maskfloor', 21, 33]] },
+    { floor: true, dx: -2, capeF: ['heapB', 0, 2], over: [['r.maskfloor', 22, 38]] },
+    { floor: true, dx: -2, capeF: ['heapC'], over: [['r.maskfloor', 23, 42]] },
+    { floor: true, dx: -2, capeF: ['heapC'], over: [['r.maskfloor', 23, 43]] }];
+
   // =============================================================================================
   // Frames, caches, public API
   // =============================================================================================
@@ -856,17 +1557,37 @@
     return list[f < list.length ? f : list.length - 1];
   }
 
+  function rawImg(who, name, f, mi) {
+    var a = ANIMS[who][name], row = a.raw[mi] || (a.raw[mi] = []);
+    return row[f] || (row[f] = compose(who, poseOf(who, name, f), MASKS[mi], f));
+  }
+  // rival2 afterimage: the silhouette of a frame in bruise violet, checkerboarded unless solid
+  function trail(img, solid) {
+    var o = Pix.make(img.w, img.h), x, y;
+    for (y = 0; y < img.h; y++) for (x = 0; x < img.w; x++) if (img.d[y * img.w + x] && (solid || ((x + y) & 1))) o.d[y * img.w + x] = 29;
+    return o;
+  }
+
   // Pure and cached: the composed frame as an indexed image (48x48; 48x56 for rival2). Feet centre = (24, bottom row).
   function frameImg(who, name, f, mask) {
-    var t = ANIMS[who], a, mi, row, img;
+    var t = ANIMS[who], a, mi, row, img, cur, prev, S;
     if (!t) { who = 'player'; t = ANIMS.player; }
     a = t[name]; if (!a) { name = 'idle'; a = t.idle; }
     f = f | 0; if (f < 0) f = 0; else if (f >= a.n) f = a.n - 1;
     mi = who === 'player' ? 0 : (MASK_IX[mask] || 0);
     row = a.im[mi] || (a.im[mi] = []);
     img = row[f];
-    if (!img) img = row[f] = compose(who, poseOf(who, name, f), MASKS[mi]);
-    return img;
+    if (img) return img;
+    cur = rawImg(who, name, f, mi);
+    if (who !== 'rival2') return (row[f] = cur);
+    // the Unmasked drags a 2-px-offset afterimage of its previous frame (hold frames trail themselves, so they never jitter)
+    S = poseOf(who, name, f);
+    prev = a.loopFrom && f >= a.loopFrom ? f : f > 0 ? f - 1 : a.loop ? a.n - 1 : -1;
+    if (S.none || (prev < 0 && !S.blink)) return (row[f] = cur);
+    img = Pix.make(cur.w, cur.h);
+    if (prev >= 0) Pix.blit(img, trail(rawImg(who, name, prev, mi), S.blink), S.blink ? 0 : -2, 0);
+    if (!S.blink) Pix.blit(img, cur, 0, 0);
+    return (row[f] = img);
   }
 
   // x, y = feet centre. Authored facing right; opts.flip mirrors around x. opts: { flip, mask:id, white:bool, alpha }

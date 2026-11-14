@@ -442,9 +442,10 @@
     play(P, ANIM[pm], 'stay'); play(V, ANIM[rm], 'stay');
     sfx(pm === 'S' ? 'whoosh_s' : pm === 'F' ? 'whoosh_f' : 'guard_up');
     sfx(rm === 'S' ? 'whoosh_s' : rm === 'F' ? 'whoosh_f' : 'guard_up', { pitch: 0.85 });
-    var reach = { S: 30, F: 24, G: 0 };
-    if (res.clash) { slide(P, pm === 'G' ? 4 : 20, 0.18); slide(V, rm === 'G' ? -4 : -20, 0.18); }
-    else { slide(P, reach[pm], 0.18); slide(V, -reach[rm], 0.18); }
+    // Close the 92 px between them so the blades actually meet (about 44 px between feet at contact).
+    var wgt = { S: 3, F: 2.5, G: 0.5 }, gap = (pm === 'G' && rm === 'G') ? 12 : 60;
+    var stepP = Math.round(gap * wgt[pm] / (wgt[pm] + wgt[rm])), stepR = gap - stepP;
+    slide(P, stepP, 0.18); slide(V, -stepR, 0.18);
     yield 0.2;
 
     // contact
@@ -455,7 +456,7 @@
       sfx('clash_' + pm.toLowerCase());
       E.shake(1, 0.1); E.buzz(10);
       play(P, 'clash', 'once'); play(V, 'clash', 'once');
-      slide(P, -4, 0.08); slide(V, 4, 0.08);
+      slide(P, stepP - 5, 0.08); slide(V, -stepR + 5, 0.08);
       var rup = hasEv(res.events, 'rupture');
       if (rup) {
         yield 0.1;
@@ -482,7 +483,7 @@
       yield 0.2;
     } else {
       var w = res.winner, loser = w === 'p' ? V : P, win = w === 'p' ? P : V;
-      var ls = w === 'p' ? 'r' : 'p', lx = sideX(ls), dir = ls === 'p' ? -1 : 1;
+      var ls = w === 'p' ? 'r' : 'p', lx = Math.round(loser.x + loser.ox), dir = ls === 'p' ? -1 : 1;
       var dmg = ls === 'p' ? res.dmgP : res.dmgR;
       var broke = res.guardBreak === ls;
       var riposte = (w === 'p' ? pm : rm) === 'G';
@@ -491,7 +492,7 @@
       loser.white = 60;
       if (fin) { E.flash(23, 0.18); sfx('final_blow'); E.buzz(60); }
       E.shake(fin ? 4 : dmg >= 6 ? 4 : dmg >= 4 ? 3 : 2, fin ? 0.35 : 0.15);
-      if (riposte) { S.fx.burst('spark', cx + dir * -12, cy, 12); sfx('clang'); }
+      if (riposte) { S.fx.burst('spark', lx - dir * 20, cy - 4, 12); sfx('clang'); }
       else if (broke) { S.fx.burst('shard', lx - dir * 8, cy, 16); sfx('guard_break'); }
       else { S.fx.burst('spark', lx - dir * 6, cy, 8); sfx('hit'); }
       if (dmg > 0) {
@@ -503,7 +504,7 @@
       if (hasEv(res.events, 'overkill')) floatText(ui('overkill', 'OVERKILL'), cx, cy - 30, 23, true);
       if (tensionBefore > 0) S.pipPop = 0.3;
       play(loser, broke ? 'stagger' : 'hit', (fin || broke) ? 'stay' : 'once');
-      slide(loser, dir * 6, 0.08);
+      slide(loser, loser.ox + dir * 6, 0.08);
       if (broke) floatText(ui('guardBroken', 'GUARD BROKEN'), lx, headY() - 12, 28, true);
       if (fin) { S.fx.burst('ash', lx, cy, 12); yield 0.5; }
       yield broke ? 0.45 : 0.25;

@@ -49,9 +49,9 @@
   // ---------------------------------------------------------------- both (21)
 
   def('coiled_riposte', 'Coiled Riposte', U, 'both', ['RIP', 'EXE'], null,
-    'Strike deals +3 if you Guarded last turn', null, {
+    'Strike deals +2 if you Guarded last turn', null, {
       outDamage: function (x) {
-        if (x.my === 'S' && prev(x.self, 1) === 'G') { fire(x, 'coiled_riposte', { n: 3 }); return x.dmg + 3; }
+        if (x.my === 'S' && prev(x.self, 1) === 'G') { fire(x, 'coiled_riposte', { n: 2 }); return x.dmg + 2; }
         return x.dmg;
       }
     });
@@ -214,9 +214,9 @@
     });
 
   def('first_blood', 'First Blood', C, 'both', ['EXE'], null,
-    'Start each duel with focus 2', null, {
+    'Start each duel with focus 1', null, {
       duelStart: function (x) {
-        if (x.status('self', 'focus', 2)) fire(x, 'first_blood');
+        if (x.status('self', 'focus', 1)) fire(x, 'first_blood');
       }
     });
 

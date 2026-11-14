@@ -8,11 +8,11 @@
   // R.Run.HEAL / R.Run.PHASE2_HEAL / R.Run.PLAYER_MAX_HP / R.Run.DUELS[n].rivalHp at runtime:
   // every function reads them from R.Run at call time).
   // =====================================================================================
-  var PLAYER_MAX_HP = 12;
-  var HEAL = 8;                                   // bonfire heal
-  var PHASE2_HEAL = 8;                            // heal at the phase-2 transformation
-  var RIVAL_HP = [5, 5, 5, 5, 5, 5, 5];           // duels 1..7 (duel 7 = phase 1). Duel 1 must stay >= 5: the tutorial deals 4 before its turn 3
-  var PHASE2_HP = 4;                              // The Unmasked
+  var PLAYER_MAX_HP = 26;                         // one pool for the whole run: bonfires top it up, they do not refill it
+  var HEAL = 6;                                   // bonfire heal
+  var PHASE2_HEAL = 4;                            // heal at the phase-2 transformation
+  var RIVAL_HP = [6, 7, 8, 8, 9, 10, 9];          // duels 1..7 (duel 7 = phase 1). Duel 1 must stay >= 6: the tutorial deals 2+2 before its turn 3
+  var PHASE2_HP = 7;                              // The Unmasked
   var EXPLOIT = [0.30, 0.50, 0.65, 0.75, 0.85, 0.95, 1.00];
   var PHASE2_EXPLOIT = 1.00;
   var HONESTY = [0.97, 0.90, 0.82, 0.74, 0.64, 0.50, 0.42];

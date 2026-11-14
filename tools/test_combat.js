@@ -93,10 +93,10 @@ section('0. Boon table sanity');
   eq(Object.keys(ids).length, 23, 'unlock conditions');
   console.log('  36 boons (14C/14U/8R, 21 both / 6 rival / 9 player, 20 open), 6 relics, 28 unlock items / 23 conditions');
   console.log('  longest desc: ' + maxLen + ' chars');
-  eq(RUN.DUELS.slice(1).map(d => d.rivalHp).join(','), '5,5,5,5,5,5,5', 'duel HP table');
-  eq(RUN.DUELS.phase2.rivalHp, 4, 'phase 2 HP');
-  eq(RUN.HEAL, 8, 'HEAL');
-  eq(RUN.PHASE2_HEAL, 8, 'PHASE2_HEAL');
+  eq(RUN.DUELS.slice(1).map(d => d.rivalHp).join(','), '6,7,8,8,9,10,9', 'duel HP table');
+  eq(RUN.DUELS.phase2.rivalHp, 7, 'phase 2 HP');
+  eq(RUN.HEAL, 6, 'HEAL'); eq(RUN.PLAYER_MAX_HP, 26, 'PLAYER_MAX_HP');
+  eq(RUN.PHASE2_HEAL, 4, 'PHASE2_HEAL');
 })();
 
 // ================================================================== 1. core rules
@@ -150,15 +150,15 @@ section('1. Core rules');
   ok(res.rupture, 'rupture flag');
   eq(res.dmgP, 1, 'rupture dmg P'); eq(res.dmgR, 1, 'rupture dmg R');
   eq(d.tension, 3, 'rupture keeps tension at 3');
-  ok(!legalHas(d, 'p', 'S') && !legalHas(d, 'r', 'S'), 'rupture seals the move for both next turn');
-  eq(C.legal(d, 'p').length, 2, 'two legal moves after rupture');
-  turn(d, 'G', 'F');                                   // any exchange; seal expires after this turn
-  ok(legalHas(d, 'p', 'S') && legalHas(d, 'r', 'S'), 'rupture seal lasts exactly one turn');
+  ok(legalHas(d, 'p', 'S') && legalHas(d, 'r', 'S'), 'rupture does not seal the move (a seal for both locks the duel)');
+  eq(C.legal(d, 'p').length, 3, 'three legal moves after rupture'); eq(C.legal(d, 'r').length, 3, 'three legal moves for the Rival too');
+  res = turn(d, 'S', 'S');
+  ok(res.rupture && d.tension === 3 && res.dmgP === 1 && res.dmgR === 1, 'a second rupture on the same move is allowed');
   d = mk([], [], { pHp: 1, rHp: 1 });
   d.tension = 3;
   res = turn(d, 'G', 'G');
   ok(res.rupture && res.dmgP === 0 && res.dmgR === 0 && !d.over, 'rupture is never lethal');
-  console.log('  rupture: 1 dmg each, move sealed 1 turn for both, tension stays 3, cannot drop below 1 HP');
+  console.log('  rupture: 1 dmg each, no seal, tension stays 3, cannot drop below 1 HP');
 
   // --- guard break timing
   d = mk();
@@ -196,9 +196,9 @@ section('1. Core rules');
 
   // --- fortify / focus consumption
   d = mk(['first_blood'], ['mourning_veil']);
-  eq(d.p.status.focus, 2, 'focus 2 at start'); eq(d.r.status.fortify, 2, 'fortify 2 at start');
+  eq(d.p.status.focus, 1, 'focus 1 at start'); eq(d.r.status.fortify, 2, 'fortify 2 at start');
   res = turn(d, 'S', 'F');
-  eq(res.dmgR, 3, '3 + focus 2 - fortify 2');
+  eq(res.dmgR, 2, '3 + focus 1 - fortify 2');
   eq(d.p.status.focus, 0, 'focus consumed'); eq(d.r.status.fortify, 0, 'fortify consumed');
   eq(turn(d, 'S', 'F').dmgR, 3, 'second hit unmodified');
   d = mk(); d.p.status.fortify = 3; d.r.status.focus = 3;
@@ -214,10 +214,10 @@ section('1. Core rules');
   turn(d, 'S', 'S'); turn(d, 'G', 'G');              // resonance: 2 + 2 -> 3 pips, Rival's last move = Guard
   eq(d.tension, 3, 'resonance reached 3 pips in two clashes');
   res = turn(d, 'F', 'S');
-  eq(res.dmgP, 6, 'hit cap 6');
-  eq(res.overkill, 7, 'raw 13 clipped by 7');
+  eq(res.dmgP, 8, 'hit cap 8');
+  eq(res.overkill, 3, 'raw 11 clipped by 3');
   ok(hasEv(res, 'overkill'), 'overkill event');
-  console.log('  hit cap: Guard -> Strike at 3 pips with coiled+first_blood+creed = raw 13 -> ' + res.dmgP + ' (overkill ' + res.overkill + ')');
+  console.log('  hit cap: Guard -> Strike at 3 pips with coiled+first_blood+creed = raw 11 -> ' + res.dmgP + ' (overkill ' + res.overkill + ')');
 
   // --- >= 2 legal moves under seal stacking
   d = mk([], ['no_encores', 'sealing_wax', 'long_con']);
@@ -317,7 +317,7 @@ T('coiled_riposte', () => {
   let d = mk(['coiled_riposte']);
   turn(d, 'G', 'S');
   let res = turn(d, 'S', 'F');
-  eq(res.dmgR, 6, 'Guard then Strike = 6'); ok(boonFired(res, 'coiled_riposte'), 'event');
+  eq(res.dmgR, 5, 'Guard then Strike = 5'); ok(boonFired(res, 'coiled_riposte'), 'event');
   res = turn(d, 'S', 'F');
   eq(res.dmgR, 3, 'Strike after Strike = 3'); ok(!boonFired(res, 'coiled_riposte'), 'no event');
   d = mk(['coiled_riposte']);
@@ -374,9 +374,9 @@ T('ash_veil', () => {
 T('deathblow_creed', () => {
   let d = mk(['deathblow_creed']); d.tension = 3;
   let res = turn(d, 'S', 'F');
-  eq(res.dmgR, 6, '3 + 3 + 2 = 8, clipped by the hit cap (6)'); eq(res.overkill, 2, 'overkill 2'); ok(boonFired(res, 'deathblow_creed'), 'event');
+  eq(res.dmgR, 8, '3 + 3 + 2'); ok(boonFired(res, 'deathblow_creed'), 'event');
   d = mk(['deathblow_creed']); d.tension = 3;
-  eq(turn(d, 'G', 'S').dmgR, 6, 'riposte at 3 pips: 2 + 3 + 2 = 7, clipped to 6');
+  eq(turn(d, 'G', 'S').dmgR, 7, 'riposte at 3 pips: 2 + 3 + 2');
   d = mk(['deathblow_creed']); d.tension = 2;
   res = turn(d, 'S', 'F');
   eq(res.dmgR, 5, '2 pips: no bonus'); ok(!boonFired(res, 'deathblow_creed'), 'no event');
@@ -509,12 +509,12 @@ T('three_faces', () => {
 });
 T('first_blood', () => {
   let d = mk(['first_blood']);
-  eq(d.p.status.focus, 2, 'focus 2 at duel start');
+  eq(d.p.status.focus, 1, 'focus 1 at duel start');
   ok(d.pendingEvents.some(e => e.t === 'boon' && e.id === 'first_blood'), 'duelStart event queued');
-  eq(turn(d, 'S', 'F').dmgR, 5, 'first win +2');
+  eq(turn(d, 'S', 'F').dmgR, 4, 'first win +1');
   eq(turn(d, 'S', 'F').dmgR, 3, 'then normal');
   d = mk([], ['first_blood']);
-  eq(d.r.status.focus, 2, 'Rival version'); eq(d.p.status.focus, 0, 'player has none');
+  eq(d.r.status.focus, 1, 'Rival version'); eq(d.p.status.focus, 0, 'player has none');
 });
 T('headsman', () => {
   let d = mk(['headsman'], [], { rMax: 9, rHp: 3 });
@@ -687,11 +687,11 @@ T('last_candle', () => {
   eq(dd.over, 'r', 'run: spent for the rest of the run');
 });
 T('ember_hoard', () => {
-  eq(restRun(['ember_hoard'], 6).offer.healed, Math.min(RUN.HEAL + 1, 12 - 6), 'heal +1 (capped at max HP)');
-  eq(restRun(['ember_hoard'], 3).offer.healed, Math.min(RUN.HEAL + 3, 12 - 3), 'heal +3 at low HP (capped at max HP)');
+  eq(restRun(['ember_hoard'], 12).offer.healed, RUN.HEAL + 1, 'heal +1 (12 of 26 HP is not low)');
+  eq(restRun(['ember_hoard'], 3).offer.healed, Math.min(RUN.HEAL + 3, RUN.PLAYER_MAX_HP - 3), 'heal +3 at low HP (capped at max HP)');
   eq(restRun(['ember_hoard'], 1).offer.healed, RUN.HEAL + 3, 'heal +3 at low HP, uncapped from 1 HP');
   eq(restRun([], 3).offer.healed, RUN.HEAL, 'base heal without it');
-  eq(restRun([], 10).offer.healed, 2, 'heal capped at max HP');
+  eq(restRun([], RUN.PLAYER_MAX_HP - 2).offer.healed, 2, 'heal capped at max HP');
 });
 T('relic_ashen_flask', () => {
   const run = restRun(['relic_ashen_flask'], 2);
@@ -1098,7 +1098,7 @@ section('4b. Run, draft, memory and unlock checks');
   run.duel.p.hp = 5; run.duel.p.status.bleed = 2; run.duel.p.status.guardBroken = 1;
   d = RUN.startPhase2(run);
   ok(d.phase === 2 && d.tension === 1 && d.r.hp === RUN.DUELS.phase2.rivalHp, 'phase 2 duel');
-  eq(d.p.hp, Math.min(12, 5 + RUN.PHASE2_HEAL), 'phase 2 heal (capped at max HP)'); ok(d.p.status.bleed === 0 && d.p.status.guardBroken === 0, 'statuses cleared');
+  eq(d.p.hp, Math.min(RUN.PLAYER_MAX_HP, 5 + RUN.PHASE2_HEAL), 'phase 2 heal (capped at max HP)'); ok(d.p.status.bleed === 0 && d.p.status.guardBroken === 0, 'statuses cleared');
   eq(d.r.boons.length, 6, 'rival keeps its boons');
   d.r.hp = 1; d.r.boons = []; C.beginTurn(d);
   RUN.record(run, m, C.resolve(d, 'G', 'S'), null);
