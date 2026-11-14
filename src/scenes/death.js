@@ -59,7 +59,9 @@
     if (!canLeave()) return;
     S.leaving = true;
     K.sfx('select');
-    E.go('title', null, 0.4);
+    // "One more run": rise straight into the next attempt (relic choice first, if any are unlocked).
+    if (R.Game && R.Game.startFlow) R.Game.startFlow();
+    else E.go('title', null, 0.4);
   }
 
   function layout() {

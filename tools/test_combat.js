@@ -93,10 +93,10 @@ section('0. Boon table sanity');
   eq(Object.keys(ids).length, 23, 'unlock conditions');
   console.log('  36 boons (14C/14U/8R, 21 both / 6 rival / 9 player, 20 open), 6 relics, 28 unlock items / 23 conditions');
   console.log('  longest desc: ' + maxLen + ' chars');
-  eq(RUN.DUELS.slice(1).map(d => d.rivalHp).join(','), '6,7,8,8,9,10,9', 'duel HP table');
-  eq(RUN.DUELS.phase2.rivalHp, 8, 'phase 2 HP');
-  eq(RUN.HEAL, 5, 'HEAL');
-  eq(RUN.PHASE2_HEAL, 2, 'PHASE2_HEAL');
+  eq(RUN.DUELS.slice(1).map(d => d.rivalHp).join(','), '5,5,5,5,5,5,5', 'duel HP table');
+  eq(RUN.DUELS.phase2.rivalHp, 4, 'phase 2 HP');
+  eq(RUN.HEAL, 8, 'HEAL');
+  eq(RUN.PHASE2_HEAL, 8, 'PHASE2_HEAL');
 })();
 
 // ================================================================== 1. core rules
@@ -214,8 +214,8 @@ section('1. Core rules');
   turn(d, 'S', 'S'); turn(d, 'G', 'G');              // resonance: 2 + 2 -> 3 pips, Rival's last move = Guard
   eq(d.tension, 3, 'resonance reached 3 pips in two clashes');
   res = turn(d, 'F', 'S');
-  eq(res.dmgP, 8, 'hit cap 8');
-  eq(res.overkill, 5, 'raw 13 clipped by 5');
+  eq(res.dmgP, 6, 'hit cap 6');
+  eq(res.overkill, 7, 'raw 13 clipped by 7');
   ok(hasEv(res, 'overkill'), 'overkill event');
   console.log('  hit cap: Guard -> Strike at 3 pips with coiled+first_blood+creed = raw 13 -> ' + res.dmgP + ' (overkill ' + res.overkill + ')');
 
@@ -374,7 +374,9 @@ T('ash_veil', () => {
 T('deathblow_creed', () => {
   let d = mk(['deathblow_creed']); d.tension = 3;
   let res = turn(d, 'S', 'F');
-  eq(res.dmgR, 8, '3 + 3 + 2'); ok(boonFired(res, 'deathblow_creed'), 'event');
+  eq(res.dmgR, 6, '3 + 3 + 2 = 8, clipped by the hit cap (6)'); eq(res.overkill, 2, 'overkill 2'); ok(boonFired(res, 'deathblow_creed'), 'event');
+  d = mk(['deathblow_creed']); d.tension = 3;
+  eq(turn(d, 'G', 'S').dmgR, 6, 'riposte at 3 pips: 2 + 3 + 2 = 7, clipped to 6');
   d = mk(['deathblow_creed']); d.tension = 2;
   res = turn(d, 'S', 'F');
   eq(res.dmgR, 5, '2 pips: no bonus'); ok(!boonFired(res, 'deathblow_creed'), 'no event');
@@ -685,8 +687,9 @@ T('last_candle', () => {
   eq(dd.over, 'r', 'run: spent for the rest of the run');
 });
 T('ember_hoard', () => {
-  eq(restRun(['ember_hoard'], 6).offer.healed, RUN.HEAL + 1, 'heal +1');
-  eq(restRun(['ember_hoard'], 3).offer.healed, RUN.HEAL + 3, 'heal +3 at low HP');
+  eq(restRun(['ember_hoard'], 6).offer.healed, Math.min(RUN.HEAL + 1, 12 - 6), 'heal +1 (capped at max HP)');
+  eq(restRun(['ember_hoard'], 3).offer.healed, Math.min(RUN.HEAL + 3, 12 - 3), 'heal +3 at low HP (capped at max HP)');
+  eq(restRun(['ember_hoard'], 1).offer.healed, RUN.HEAL + 3, 'heal +3 at low HP, uncapped from 1 HP');
   eq(restRun([], 3).offer.healed, RUN.HEAL, 'base heal without it');
   eq(restRun([], 10).offer.healed, 2, 'heal capped at max HP');
 });
@@ -1095,7 +1098,7 @@ section('4b. Run, draft, memory and unlock checks');
   run.duel.p.hp = 5; run.duel.p.status.bleed = 2; run.duel.p.status.guardBroken = 1;
   d = RUN.startPhase2(run);
   ok(d.phase === 2 && d.tension === 1 && d.r.hp === RUN.DUELS.phase2.rivalHp, 'phase 2 duel');
-  eq(d.p.hp, 5 + RUN.PHASE2_HEAL, 'phase 2 heal'); ok(d.p.status.bleed === 0 && d.p.status.guardBroken === 0, 'statuses cleared');
+  eq(d.p.hp, Math.min(12, 5 + RUN.PHASE2_HEAL), 'phase 2 heal (capped at max HP)'); ok(d.p.status.bleed === 0 && d.p.status.guardBroken === 0, 'statuses cleared');
   eq(d.r.boons.length, 6, 'rival keeps its boons');
   d.r.hp = 1; d.r.boons = []; C.beginTurn(d);
   RUN.record(run, m, C.resolve(d, 'G', 'S'), null);
@@ -1271,7 +1274,7 @@ section('6. Dangerous combos (those measurable without the brain)');
   const c1 = bigHit(['coiled_riposte', 'first_blood', 'deathblow_creed', 'resonance'], N);
   ok(c1.max <= 8, 'combo 1: no hit above the cap');
   console.log('  1. Rival coiled_riposte+first_blood+deathblow_creed+resonance (random play, ' + N + ' duels, 12 HP vs 9 HP):');
-  console.log('     max single hit ' + c1.max + ' (cap 8); P(player takes >= 7 in one hit) per duel = ' + pct(c1.p, 1) + '  [target < 3%' + (c1.p < 0.03 ? '' : ' -- NOT MET') + ']  (' + pct(c1.share, 1) + ' of its hits)');
+  console.log('     max single hit ' + c1.max + ' (cap ' + C.HIT_CAP + '); P(player takes >= 7 in one hit) per duel = ' + pct(c1.p, 1) + '  [target < 3%' + (c1.p < 0.03 ? '' : ' -- NOT MET') + ']  (' + pct(c1.share, 1) + ' of its hits)');
   const subs = [[], ['first_blood'], ['resonance'], ['coiled_riposte'], ['deathblow_creed'], ['first_blood', 'resonance'], ['coiled_riposte', 'first_blood'], ['coiled_riposte', 'resonance'], ['coiled_riposte', 'deathblow_creed', 'resonance']];
   console.log('     same measure by subset: ' + subs.map(sb => (sb.length ? sb.join('+') : 'no boons') + ' ' + pct(bigHit(sb, N / 4).p, 1)).join(' | '));
 

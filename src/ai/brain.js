@@ -57,13 +57,13 @@
     LAMBDA: [0.93, 0.90, 0.85, 0.90, 0.85, 0.90, 0.80, 0.90, 0.88, 0.88, 0.92, 0.88, 0.88],
     HEDGE_ETA: 1.5, HEDGE_DECAY: 0.96, W_FLOOR: 0.02,
     CONF_TURNS: 20,             // confidence ramps in over the first lifetime turns
-    TAU_BASE: 1.35, TAU_SLOPE: 1.2, TAU_MIN: 0.05,  // tau = TAU_BASE - TAU_SLOPE * exploit
+    TAU_BASE: 1.2, TAU_SLOPE: 0.9, TAU_MIN: 0.05,   // tau = TAU_BASE - TAU_SLOPE * exploit
     EQ_PRIOR_FLOOR: 0.01,       // keeps a dominated move selectable when the read screams for it
     H_MIN: 0.15, H_MAX: 0.97,
     H_TRUST_DOWN: 0.45,         // honesty gained per unit of COUNTER share below 1/3 (spec value)
     H_TRUST_UP: 0.45,           // honesty lost per unit of COUNTER share above 1/3 on first contact (spec value)
-    H_TRUST_UP_LATE: 0.65,      // ...growing to this as lifetime tell evidence accumulates
-    H_MIRROR_LATE: 0.5,         // honesty lost per unit of MIRROR share above 1/3 (0 on first contact)
+    H_TRUST_UP_LATE: 0.75,      // ...growing to this as lifetime tell evidence accumulates
+    H_MIRROR_LATE: 0.7,         // honesty lost per unit of MIRROR share above 1/3 (0 on first contact)
     H_RAMP_TURNS: 150,          // lifetime tell-observed turns to reach the *_LATE values
     RUN_DECAY: 0.90, AWAY_DECAY: 0.75, AWAY_DAYS: 7,
     EQ_ITERS: 300, EQ_CACHE: 64,

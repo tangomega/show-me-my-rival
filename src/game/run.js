@@ -13,9 +13,9 @@
   var PHASE2_HEAL = 8;                            // heal at the phase-2 transformation
   var RIVAL_HP = [5, 5, 5, 5, 5, 5, 5];           // duels 1..7 (duel 7 = phase 1). Duel 1 must stay >= 5: the tutorial deals 4 before its turn 3
   var PHASE2_HP = 4;                              // The Unmasked
-  var EXPLOIT = [0.25, 0.45, 0.60, 0.70, 0.80, 0.90, 0.95];
+  var EXPLOIT = [0.30, 0.50, 0.65, 0.75, 0.85, 0.95, 1.00];
   var PHASE2_EXPLOIT = 1.00;
-  var HONESTY = [0.95, 0.90, 0.82, 0.74, 0.64, 0.50, 0.42];
+  var HONESTY = [0.97, 0.90, 0.82, 0.74, 0.64, 0.50, 0.42];
   var PHASE2_HONESTY = 0.35;
   // Offer rarity weights [common, uncommon, rare] by bonfire number (1..6)
   var RARITY_WEIGHTS = [null, [70, 27, 3], [70, 27, 3], [50, 40, 10], [50, 40, 10], [35, 45, 20], [35, 45, 20]];
@@ -33,7 +33,7 @@
   var VARIANTS = ['nave', 'vespers', 'leak', 'draught', 'wake', 'bloodmoon', 'altar'];
   var RARITIES = ['common', 'uncommon', 'rare'];
 
-  function tau(e) { return Math.round((1.35 - 1.2 * e) * 100) / 100; }   // display copy of R.Brain.K.TAU_BASE - TAU_SLOPE * e
+  function tau(e) { return Math.round((1.2 - 0.9 * e) * 100) / 100; }   // display copy of R.Brain.K.TAU_BASE - TAU_SLOPE * e
 
   var DUELS = [null];
   (function () {

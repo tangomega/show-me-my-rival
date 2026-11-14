@@ -717,6 +717,9 @@ function perDuel(byBot, bots) {
     lines.push('  duel length p50/p90/p99: ' + quantile(s.lenHist, 0.5) + ' / ' + quantile(s.lenHist, 0.9) + ' / ' + quantile(s.lenHist, 0.99) +
       '   winning run turns mean ' + (s.deathAt[9] ? (s.winTurns / s.deathAt[9]).toFixed(1) : '-') + ' (p10 ' + quantile(s.winTurnsHist, 0.1, 4) + ', p90 ' + quantile(s.winTurnsHist, 0.9, 4) + ')' +
       '   max hit on player ' + s.maxHit + '   mean legal moves ' + (s.legalSum / s.turns).toFixed(3));
+    let hits = 0, h5 = 0;
+    for (let k = 0; k < s.hitHist.length; k++) { hits += s.hitHist[k]; if (k >= 5) h5 += s.hitHist[k]; }
+    lines.push('  hits taken by size (share of the exchanges the Rival won): ' + [0, 1, 2, 3, 4, 5, 6, 7, 8].map(function (k) { return k + ': ' + pct(s.hitHist[k], hits, 0) + '%'; }).join('  ') + '   (5+: ' + pct(h5, hits) + '%)');
   });
   return lines;
 }
