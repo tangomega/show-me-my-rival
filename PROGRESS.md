@@ -23,7 +23,7 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 | 4. Balance sim and QA audit | done (`BALANCE.md`; QA fixes and patches applied) |
 | 5. Polish | two passes done (see below) |
 | 6. README, final build | done |
-| 7. Deploy to GitHub Pages | pushed to https://github.com/tangomega/show-me-my-rival (`main`); **Pages still has to be switched on** by the owner (Settings → Pages → Deploy from a branch → `main`, `/ (root)`), after which the game is at https://tangomega.github.io/show-me-my-rival/ |
+| 7. Deploy to GitHub Pages | done — live at https://tangomega.github.io/show-me-my-rival/, served from `main` / root of https://github.com/tangomega/show-me-my-rival. Pushing to `main` redeploys. |
 
 ## Polish passes
 
