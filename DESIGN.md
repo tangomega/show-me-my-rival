@@ -17,6 +17,7 @@ Developed by tangoSHELL · 2026. Phone-first, single-file HTML5. This file says 
    - `transform` is at most 10 frames. `rival2` reuses the Rival's poses with part swaps (shattered head, tendril cloak, 3 px hover) and a code-drawn afterimage.
    - The title scene is one large mask sprite plus a candle; the "smile widens" gag is optional.
 8. **Skip** is implemented as: a tap during resolution sets `timeScale` to 3 until the next input window.
+11. **Balance numbers live in `BALANCE.md` and the constants block of `src/game/run.js`; they supersede every HP, heal, exploit, honesty and boon number in this document.** As shipped: player max HP 26 (a run-long pool), bonfire heal 6, phase-2 heal 4, Rival HP 6,7,8,8,9,10,9 then 7; hit cap 8; **Rupture no longer seals a move** (a clash at 3 pips costs both fighters 1 non-lethal HP and tension stays at 3), because the seal could lock a duel into an endless loop.
 10. **The game's title is "Show Me My Rival"** (renamed from the working title "THE RIVAL"). Use "SHOW ME MY RIVAL" for the logo, the HTML `<title>`, the header comment and the README. In-fiction, the opponent is still called "the Rival". The internal `RIVAL` namespace, folder name and save key do not change.
 9. The credits roll contains only in-fiction lines, the player's lifetime stats and "Developed by tangoSHELL · 2026". No other names, roles or studios.
 

@@ -212,10 +212,10 @@
     ],
     // A clash at three pips: 1 damage each, that move sealed for both.
     clash_rupture: [
-      "Rupture. We both bleed, and that move is sealed. Happy?",
+      "Rupture. We both bleed, and nothing is settled. Happy?",
       "Too much tension. It broke. So did a little of each of us.",
       "There. We both pay. I can afford it. Can you?",
-      "It tore. One apiece, and that door is shut for a turn."
+      "It tore. One apiece. The next one to blink pays for all of it."
     ],
     // Tension has just reached three pips.
     clash_deathblow: [

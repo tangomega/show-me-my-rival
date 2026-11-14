@@ -1,31 +1,12 @@
 # SHOW ME MY RIVAL — balance pass
 
-Measured with `tools/sim.js`, which plays the real `rng`, `brain`, `boons`, `combat` and `run` modules in the game's own call order. Each bot plays chains of 400 sequential runs against one persistent brain and meta. The tables below are 8 chains per bot (3,200 runs), seed 1.
+Measured with `tools/sim.js`, which plays the real `rng`, `brain`, `boons`, `combat` and `run` modules in the game's own call order. Each bot plays chains of 400 sequential runs against one persistent brain and meta. Tables are 8 chains per bot (3,200 runs), seed 1, natural unlock order.
 
-Reproduce: `node tools/sim.js --rupture-fix --seeds 8` (about 30 s). Raw output of the final runs is in `tools/out/final_*.txt`; every tuning step is logged in `tools/out/balance_log.md`.
+Reproduce: `node tools/sim.js --seeds 8` (about 40 s). Raw output of the final run is `tools/out/final_r2.txt`; every tuning step is in `tools/out/balance_log.md`.
 
-## 1. Read this first
+## 1. The structure
 
-**1. The Rupture rule soft-locks the duel. It is a rules bug, not a balance number, and I did not change it.**
-A clash at 3 pips seals the clashed move for both fighters. In any two-move game that is left, one move dominates (Guard in Strike/Guard, Strike in Strike/Feint, Feint in Guard/Feint). The Rival always takes it, so the player's only non-losing reply is the same move, which clashes again and seals the next move. The loop G, S, F, G, S, F drains both fighters to 1 HP and then never ends. The player can only leave it by picking the dominated move and taking a 5 to 6 damage hit (death at low HP).
-
-- With the starting numbers, 8.2% of the equilibrium mixer's duels and 5.0% of the adaptive bot's duels ended in this loop. With the final numbers it is 5.6% and 2.9%.
-- Proposed fix (one rule, two lines in `combat.js`): Rupture no longer seals. A clash at 3 pips deals 1 to both, never lethal, and tension stays at 3. The three-move game has no dominant move, so the loop cannot form.
-- The sim has `--rupture-fix`, a shim that applies exactly that after `R.Combat.resolve` and touches no source file. **All tuning below assumes the fix.** Section 3 also gives the numbers under the rules as shipped.
-- In the sim, a bot stuck for 9 straight clashes at 3 pips presses a random legal move, as a person would.
-
-**2. The mixer target cannot be met with a Rival that ramps.** The player has 12 HP and a Rival hit averages about 3, so the player has about four "lives" per duel. A player who wins exactly half the decisive exchanges loses a duel 6% of the time against a one-hit Rival, 19% against a two-hit Rival and 34% against a three-hit Rival. Eight fights in a row at a 30 to 45% clear rate need about 88% per fight, so every Rival has to die in about two hits. Bonfire healing does not help: survivors already enter every duel at 11.8 HP, and runs end by losing one duel from full health.
-
-Following the stated priority (mixer first, shape targets last), the committed table is a flat 5 HP Rival. Measured frontier, same curves and brain constants, Rupture fix on:
-
-| Rival HP d1..d7 / phase 2 | mixer | adaptive | uniform | habit | mean turns per duel |
-|---|---|---|---|---|---|
-| 6,7,8,8,9,10,9 / 8 (starting table) | 7.4% | 19.3% | 3.6% | 1.0% | 5.9 |
-| 5,5,6,6,7,7,6 / 6 | 17.3% | 39.1% | 12.3% | 5.1% | 4.8 |
-| 5,5,5,6,6,6,6 / 5 | 24.4% | 42.5% | 16.6% | 7.5% | 4.6 |
-| **5,5,5,5,5,5,5 / 4 (committed)** | **29.3%** | **51.3%** | **20.9%** | **10.7%** | **4.3** |
-
-Duel 1 cannot go below 5: the scripted tutorial deals 4 damage on turns 1 and 2, and `seenTutorial` is only set on turn 3, so a 4 HP Rival would die before the lesson and the tutorial would repeat every run. If the lead prefers a Rival that feels like a boss over the mixer target, the second or third row is one edit to `RIVAL_HP` / `PHASE2_HP`. The real lever for both goals at once is outside this pass: more player HP, or smaller base damage.
+The player's HP is one pool for the whole run. With 26 max HP and a bonfire heal of 6, the bar drains from 26 to about 17 by phase 2 for a neutral player, so a bad duel costs the next duels rather than ending the run on the spot. That is what lets the Rival keep a real HP ramp (6 to 10) and duels of about 7 turns while a neutral player still clears a third of runs.
 
 ## 2. Final constants
 
@@ -33,146 +14,169 @@ Duel 1 cannot go below 5: the scripted tutorial deals 4 damage on turns 1 and 2,
 
 | Constant | Start | Final |
 |---|---|---|
-| `RIVAL_HP` (duels 1..7) | 6,7,8,8,9,10,9 | 5,5,5,5,5,5,5 |
-| `PHASE2_HP` | 8 | 4 |
-| `HEAL` | 5 | 8 |
-| `PHASE2_HEAL` | 2 | 8 |
+| `PLAYER_MAX_HP` | 12 | 26 |
+| `HEAL` | 5 | 6 |
+| `PHASE2_HEAL` | 2 | 4 |
+| `RIVAL_HP` (duels 1..7) | 6,7,8,8,9,10,9 | 6,7,8,8,9,10,9 |
+| `PHASE2_HP` | 8 | 7 |
 | `EXPLOIT` | .15,.30,.45,.55,.65,.75,.90 | .30,.50,.65,.75,.85,.95,1.00 |
 | `PHASE2_EXPLOIT` | 1.00 | 1.00 |
 | `HONESTY` | .92,.85,.75,.65,.55,.50,.42 | .97,.90,.82,.74,.64,.50,.42 |
 | `PHASE2_HONESTY` | 0.35 | 0.35 |
 
-`src/ai/brain.js`, `R.Brain.K`: `TAU_BASE` 1.5 to 1.2, `TAU_SLOPE` 1.2 to 0.9, `H_TRUST_UP_LATE` 1.0 to 0.75. `H_MIRROR_LATE` stays 0.7. The `tau()` display helper in `run.js` was updated to match.
+`src/ai/brain.js`, `R.Brain.K`: `TAU_BASE` 1.5 to 1.2, `TAU_SLOPE` 1.2 to 0.9, `H_TRUST_UP_LATE` 1.0 to 0.75. The `tau()` display helper in `run.js` matches.
 
-`src/game/combat.js`: `HIT_CAP` 8 to 6.
+`src/game/combat.js`:
+- **Rupture no longer seals the move.** A clash at 3 pips deals 1 to both (never lethal) and tension stays at 3. The old seal left two moves with one dominant, the Rival always took it, and the duel locked in an endless G, S, F loop (8.2% of mixer duels at the starting numbers).
+- `HIT_CAP` stays 8.
 
-`src/game/boons.js`: no change. No boon crossed the 12 point line consistently (section 5).
+`src/game/boons.js`:
+- `first_blood`: focus 2 to 1.
+- `coiled_riposte`: +3 to +2.
+- Both trimmed for the 7+ hit rate (4.3% of duels before, 3.5% after). Card text updated.
 
-Why each one moved:
+Why the curves and K values moved (unchanged from the previous round):
+- **Exploit up:** costs an unexploitable player nothing and is what keeps predictable play down.
+- **Honesty up in duels 1 to 5:** this is the adaptive player's edge over the mixer. Duels 6, 7 and phase 2 are unchanged.
+- **`H_TRUST_UP_LATE` 0.75:** at 1.0 a player who trusted sensibly saw only 67% honest stances in duel 1 after a few runs. At 0.65 the "truster collapses" brain benchmark failed.
+- **Tau curve:** still 0.30 at exploit 1.0, sharper before that.
 
-- **Rival HP, phase-2 HP:** section 1, point 2.
-- **Heal 8 / 8:** with a 5 HP Rival the mixer measured 26.0% at heal 6/4, 28.1% at 7/6 and 30.4% at 8/8 (12 chains each). Heal 9/12 added nothing.
-- **Exploit up:** it costs the mixer nothing (the Rival cannot gain on equilibrium play) and is the only thing holding predictable bots down once the Rival has 5 HP.
-- **Honesty up in duels 1 to 5:** this is where the adaptive bot's edge over the mixer comes from. Duels 6, 7 and phase 2 are unchanged.
-- **`H_TRUST_UP_LATE` 0.75:** at 1.0 a player who trusted sensibly was shown only 67% honest stances in duel 1 after a few runs, so the tutorial's lesson was false. At 0.65 the brain benchmark "truster collapses" failed; 0.75 passes it.
-- **Tau curve:** tau at exploit 1.0 is still 0.30 (lower made the Rival gain on a uniform player and failed a benchmark); it is sharper in duels 1 to 6. The effect on the habit bot is small (about 12% to 11%).
-- **Hit cap 6:** removes every 7+ hit and trims the swing that kills a 12 HP player.
+Both suites pass: `test_brain.js` 106 of 106, `test_combat.js` 6,652 assertions. In `test_combat.js` I updated the constant checks, the Rupture checks (no seal, three legal moves, a second Rupture on the same move), the two boon numbers, and the heal checks that depended on max HP.
 
-Both test suites pass: `test_brain.js` 106 of 106, `test_combat.js` 6,651 assertions. In `test_combat.js` I updated the constant assertions, the hit-cap expectations (8 to 6, overkill 5 to 7, Deathblow Creed 8 to 6) and three heal expectations that assumed the heal fits under max HP.
+## 3. Results
 
-## 3. Results (Rupture fix on, natural unlock order)
+| Bot | Target | All runs | Runs 1-10 | 11-50 | 51-200 | 201+ | Mean duel reached |
+|---|---|---|---|---|---|---|---|
+| guard | 0.5% or less | 0.0% | 0.0 | 0.0 | 0.0 | 0.0 | 2.19 |
+| cycle | 2% or less | 0.0% | 0.0 | 0.0 | 0.0 | 0.0 | 2.28 |
+| wsls | 6% or less | 0.2% | 0.0 | 0.9 | 0.2 | 0.1 | 3.25 |
+| truster | 20% early, 5% late | 0.0% | 0.0 | 0.0 | 0.0 | 0.0 | 3.98 |
+| habit | 10% or less after run 50 | 9.8% | 16.3 | 9.7 | 10.2 | 9.2 | 6.20 |
+| uniform | 15-35% | 21.6% | 18.8 | 17.8 | 20.9 | 22.9 | 5.68 |
+| mixer | 30-45% | 34.8% | 40.0 | 36.3 | 34.3 | 34.5 | 6.23 |
+| adaptive | 50-65% | 54.8% | 58.8 | 51.9 | 55.9 | 54.3 | 7.36 |
 
-| Bot | Target | All runs | Runs 1-10 | 11-50 | 51-200 | 201+ | Mean duel reached | Predictability | Rules as shipped |
-|---|---|---|---|---|---|---|---|---|---|
-| guard | 0.5% or less | 0.0% | 0.0 | 0.0 | 0.0 | 0.0 | 1.83 | 100 | 0.0% |
-| cycle | 2% or less | 0.0% | 0.0 | 0.0 | 0.0 | 0.0 | 1.92 | 86 | 0.0% |
-| wsls | 6% or less | 0.7% | 0.0 | 0.0 | 0.8 | 0.8 | 2.66 | 30 | 0.5% |
-| truster | 20% early, 5% late | 0.0% | 0.0 | 0.0 | 0.0 | 0.0 | 3.44 | 99 | 0.0% |
-| habit | 10% or less after run 50 | 10.7% | 11.3 | 10.6 | 10.7 | 10.8 | 5.38 | 17 | 9.1% |
-| uniform | 15-35% | 20.9% | 20.0 | 21.9 | 20.5 | 21.0 | 4.76 | 0 | 18.7% |
-| mixer | 30-45% | 29.3% | 23.8 | 30.6 | 30.2 | 28.8 | 5.20 | 2 | 19.6% |
-| adaptive | 50-65% | 51.3% | 51.3 | 49.4 | 50.3 | 52.6 | 6.92 | 15 | 39.9% |
+"Mean duel reached" counts phase 2 as 8. One standard error is about 0.8 points for the mixer and 0.9 for the adaptive bot; the runs 1-10 column is 80 runs per bot, so about 5 points.
 
-"Mean duel reached" counts phase 2 as 8. "Predictability" is the Rival's lifetime score for the bot (0 to 100). One standard error is about 0.8 points for the mixer and 0.9 for the adaptive bot. With every unlock open from run 1 the picture is the same (mixer 29.6%, adaptive 52.3%, habit 11.0%).
+Where runs end: guard and cycle die in duels 1 to 3 (about 95%), truster in duels 3 to 5 (92%), wsls in duels 2 to 4 (76%). The habit bot dies later than intended, mostly in duels 5 to 7 (66%).
 
 Per duel:
 
 | | d1 | d2 | d3 | d4 | d5 | d6 | d7 | P2 |
 |---|---|---|---|---|---|---|---|---|
-| mixer duel win % | 88.8 | 87.5 | 85.9 | 86.3 | 86.9 | 83.9 | 86.8 | 80.3 |
-| adaptive duel win % | 99.9 | 99.3 | 96.7 | 92.6 | 89.1 | 87.1 | 87.7 | 84.9 |
-| uniform duel win % | 87.0 | 84.7 | 82.2 | 83.2 | 82.4 | 83.6 | 80.9 | 74.2 |
-| habit duel win % | 96.1 | 93.4 | 89.4 | 83.5 | 76.5 | 65.5 | 60.0 | 53.3 |
-| honest stances %, adaptive | 81.7 | 74.0 | 63.9 | 55.3 | 47.5 | 39.2 | 37.0 | 34.5 |
-| honest stances %, habit | 84.8 | 79.5 | 72.9 | 66.4 | 60.1 | 48.4 | 42.0 | 35.0 |
-| honest stances %, mixer | 94.7 | 88.9 | 82.4 | 78.0 | 70.2 | 61.6 | 57.0 | 51.6 |
-| Rival exchange win %, mixer | 32.2 | 32.4 | 33.0 | 31.9 | 31.8 | 34.1 | 31.5 | 31.3 |
-| clash %, mixer | 35.7 | 35.7 | 35.6 | 35.7 | 35.4 | 35.6 | 36.8 | 37.0 |
-| Rival exchange win %, adaptive | 11.0 | 13.7 | 18.5 | 22.5 | 24.1 | 24.5 | 24.1 | 26.0 |
-| mean turns, mixer | 4.69 | 4.49 | 4.37 | 4.16 | 4.03 | 4.08 | 3.90 | 3.65 |
-| mean HP entering, mixer | 12.0 | 11.8 | 11.8 | 11.8 | 11.9 | 11.9 | 11.8 | 11.8 |
+| mixer duel win % | 98.7 | 95.8 | 92.1 | 89.2 | 85.6 | 81.2 | 83.2 | 77.4 |
+| adaptive duel win % | 100.0 | 100.0 | 99.7 | 98.2 | 94.3 | 85.7 | 84.4 | 82.0 |
+| uniform duel win % | 98.5 | 93.8 | 88.4 | 85.0 | 79.1 | 74.1 | 74.6 | 71.1 |
+| habit duel win % | 99.8 | 99.1 | 97.3 | 92.1 | 80.4 | 60.1 | 51.9 | 44.0 |
+| mean HP entering, mixer | 26.0 | 24.1 | 22.7 | 21.4 | 20.7 | 20.0 | 19.3 | 17.4 |
+| mean HP entering, adaptive | 26.0 | 25.9 | 25.6 | 24.8 | 23.7 | 22.2 | 20.7 | 18.9 |
+| mean HP entering, habit | 26.0 | 25.5 | 24.8 | 23.7 | 22.6 | 21.6 | 20.2 | 16.1 |
+| mean turns, mixer | 5.9 | 6.8 | 7.5 | 7.3 | 7.9 | 8.3 | 7.3 | 5.5 |
+| mean turns, adaptive | 3.9 | 4.9 | 6.1 | 6.6 | 7.9 | 8.8 | 7.6 | 5.2 |
+| honest stances %, adaptive | 84.0 | 74.5 | 64.8 | 56.6 | 49.9 | 43.1 | 42.3 | 39.0 |
+| honest stances %, habit | 84.4 | 79.3 | 73.3 | 67.6 | 60.5 | 49.6 | 42.8 | 36.8 |
+| honest stances %, mixer | 94.9 | 89.2 | 82.7 | 77.3 | 70.6 | 62.5 | 58.0 | 52.8 |
+| Rival exchange win %, mixer | 32.0 | 31.6 | 31.6 | 31.9 | 31.7 | 31.8 | 31.7 | 31.6 |
+| clash %, mixer | 35.7 | 36.9 | 36.7 | 36.8 | 37.1 | 37.2 | 37.2 | 37.1 |
+| Rival exchange win %, adaptive | 10.9 | 15.0 | 19.7 | 23.2 | 25.4 | 27.5 | 27.1 | 28.3 |
+| Rival exchange win %, habit | 26.8 | 29.2 | 31.7 | 35.0 | 37.9 | 43.7 | 46.7 | 50.6 |
 
-Duel length p50 / p90 / p99: mixer 4 / 8 / 11, adaptive 3 / 7 / 10. A winning run is 29 turns for the mixer and 28 for the adaptive bot. Under the shipped rules the mixer's p99 is 15.
-
-Hits of 7 or more on the player: 2.4 to 3.0% of duels at the start in normal play (33.8% with the four-boon combo in the Rival's hands), 0% now (the cap makes them impossible). Hits of 5 or 6 are 13% of the exchanges the Rival wins against the mixer and 18% against the adaptive bot.
-
-The adaptive bot is not riding one trick. Changing its best-response share from 0.5 to 0.9, its temperature from 0.35 to 1.4, or its memory weighting moved it between 50.3% and 54.0%.
+- **Duel length:** mean 7.1 turns for the mixer and 6.4 for the adaptive bot; p50 / p90 / p99 are 6 / 12 / 18 and 5 / 11 / 17.
+- **Winning run:** 51 turns for the mixer, 48 for the adaptive bot, 55 for the habit bot.
+- **Predictability score** (the Rival's lifetime rating, 0 to 100): guard 100, truster 97, cycle 94, wsls 37, habit 18, adaptive 12, mixer 3, uniform 1.
+- **Hits of 7 or more:** 3.5% of duels for the mixer and adaptive bot, 3.2% uniform, 2.6% habit. No hit exceeds a third of max HP. Without phase 2 the rate is 2.6% and 2.4%; phase 2 alone is 15% of its fights, from Embers plus the Called Shot bonus.
+- **Ruptures:** 10% of mixer duels contain one; none lock.
 
 ## 4. Targets not met
 
 | Target | Result | Why |
 |---|---|---|
-| mixer 30-45% | 29.3% (30.4% in a 12-chain run) | On the floor of the band. The next step down in Rival HP breaks the tutorial or drops phase 2 to 3 HP. |
-| habit 10% or less after run 50 | 10.7% | A 5 HP Rival loses to anyone some of the time. Lower mid-run honesty fixes it but takes the adaptive bot under 50%, which ranks higher. |
-| habit clearly worse late than early | 11.3% then 10.7% | Flat. The Rival learns this bot within the first few duels, so there is no early grace period to lose. |
-| mean duel length 5-9 turns | 4.3 | Direct result of the 5 HP Rival. |
-| winning run 60-100 turns | 28 to 29 | Same. |
-| per-duel win rate declines from duel 1 | flat for the mixer (89 to 84), phase 2 lowest at 80 | Flat HP gives a flat curve. Bots that read stances or have habits do decline. |
-| honesty 50% or less in duels 6-7 | adaptive 39 / 37, habit 48 / 42, mixer 62 / 57 | Met for players who react to stances. A player who ignores them never drives honesty down, and the Rival may still pick an honest stance on a "lie" roll. |
-| uniform duel 1 win 88% or more | 87.0% | The uniform bot Feints into broken guards. Mixer 88.8%, adaptive 99.9%. |
-| combo 8 uplift 12 or less | +18.3 | See section 5. |
+| 7+ hits in 3% of duels or fewer | 3.5% (mixer, adaptive) | Phase 2. The remaining lever is `CALLED_BONUS` (2 to 1) in `combat.js`, which I did not touch. A cap of 7 would not change the count. |
+| combo 1 under 3% | 23% (mixer), 14% (adaptive) | The four-boon Rival build still stacks to 8 under a cap of 8. Only a cap of 6 fixes it, and that makes Deathblow Creed dead again. |
+| winning run 60-100 turns | 48 to 55 | Eight fights at 6 to 7 turns. One more Rival HP per duel would get there but takes the mixer under 30%. |
+| habit bot bleeds out by duels 3-5 | mostly duels 5-7 | It still clears under 10%, and the bucket trend is now right (16% in runs 1-10, 9 to 10% after). |
+| honesty 50% or less in duels 6-7 | adaptive 43 / 42, habit 50 / 43, mixer 62 / 58 | Met for players who react to stances. A player who ignores them never drives honesty down. |
+| combo 8 uplift 12 or less | +12.3 | On the line (one standard error is about 2.5). It was +18.3 with the 5 HP Rival. |
 
 ## 5. Boons
 
 Conditional uplift is the run win rate of runs that took the boon at a bonfire minus that of runs that reached the same bonfire and took something else. Entries have 200 to 1,100 picks; one standard error is 2 to 3 points.
 
-**Player boons, strongest and weakest**
+**Player boons**
 
 | | mixer | adaptive |
 |---|---|---|
-| Strongest | last_candle +9.5, first_blood +7.8, mirror_etiquette +4.1 | keyhole +10.5, truth_candle +7.8, serrated_edge +6.1 |
-| Weakest | stolen_ledger -6.6, headsman -6.6, vampires_curtsy -5.8, debt_collector -5.8 | resonance -12.1, broken_pattern -8.4, turtle_cracker -5.9 |
+| Strongest | mirror_etiquette +10.1, ash_veil +8.7, spite +3.8 | keyhole +10.4, serrated_edge +5.6, paper_cuts +5.0 |
+| Weakest | turtle_cracker -7.6, resonance -7.6, ash_of_forgetting -6.0, deathblow_creed -5.4 | long_con -7.7, resonance -7.6, turtle_cracker -7.4 |
 
-Nothing exceeds +12. No boon number was changed.
+Nothing exceeds +12. Ember Hoard is a real pick again (+2.0 for the mixer). Deathblow Creed deals its full +2 under the cap of 8 but is still a weak pick (-5.4 mixer, -1.6 adaptive), because wins at 3 pips are rare.
 
 **Rival boons, effect on the player's win rate**
 
 | | mixer | adaptive |
 |---|---|---|
-| Worst for the player | sealing_wax -13.3, mourning_veil -7.8, paper_cuts -5.4 | no_encores -6.1, mourning_veil -5.6, ash_veil -5.1 |
-| Wasted Rival picks | painted_smile +7.1, debt_collector +5.5, salt_the_wound +5.3 | hungry_mask +6.7, salt_the_wound +5.7, mirror_etiquette +4.1 |
+| Worst for the player | sealing_wax -9.0, mourning_veil -6.4, mirror_etiquette -5.4 | mirror_etiquette -7.9, sealing_wax -7.3, serrated_edge -6.5 |
+| Wasted Rival picks | salt_the_wound +6.9, vampires_curtsy +6.0, resonance +4.8 | spare_mask +8.5, salt_the_wound +8.5, hungry_mask +6.2 |
 
-`sealing_wax` measured -13.3 against the mixer here (203 picks), and -10.0, -6.0 and -2.2 in three earlier sweeps, and -4.3 against the adaptive bot. It is on the line, not clearly over it, so I left it. It is the first boon to trim if it feels oppressive.
+Nothing costs more than 12. `sealing_wax` is under the line now, so I did not trim it.
 
-**Relics** (run win rate when carried): mixer rusty_nail 31%, dented_buckler 27%, others 13 to 21%. Adaptive rusty_nail 56%, liars_coin 53%, dented_buckler 46%, others 32 to 47%. The gap between a good and a dead relic is 10 to 20 points. Bots pick their best relic 85% of the time. An earlier sweep with random relics had the mixer 6 to 9 points lower, so relic choice is a large part of the result.
+**Relics** (run win rate when carried): mixer ashen_flask 40%, dented_buckler 37%, rusty_nail 35%, cracked_mirror 30%, liars_coin 27%, dealers_thumb 22%. Adaptive liars_coin 56%, rusty_nail 56%, dented_buckler 54%, cracked_mirror 49%, ashen_flask 45%, dealers_thumb 36%. Dealer's Thumb is the weak one for both.
 
 **Dangerous combos (DESIGN §8), all unlocks, combo held from duel 1 unless stated**
 
 | # | Combo | Result | Target |
 |---|---|---|---|
-| 1 | Rival coiled_riposte + first_blood + deathblow_creed + resonance | 7+ hits 0%, max hit 6. Run win falls 27 to 14% (mixer), 51 to 34% (adaptive) | under 3%: met |
-| 2 | guard bot with stone_patience + thorned_guard + ash_veil + mirror_etiquette | 0.0% run win, reaches duel 2.6 | still loses: met |
-| 3 | vampires_curtsy + paper_cuts + carrion_comfort + salt_the_wound | heal per duel mean 0.32, p95 2, never above 5 | 5 or less: met |
-| 4 | long_con + debt_collector + turtle_cracker | net swing per guard break 1.16 (mixer), 2.39 (adaptive) | 4 or less: met |
-| 5 | Rival no_encores + sealing_wax | player mean legal moves 2.65 (mixer), 2.75 (adaptive). Run win 27 to 13%, 51 to 32% | 2.4 or more: met |
-| 6 | Rival hungry_mask + mourning_veil + spare_mask | duel length p99 13, max 20 | p99 25 or less: met |
-| 7 | coin_of_fools + broken_pattern + three_faces | coin turn edge +0.60 damage for the uniform bot | 1.2 or less: met |
-| 8 | adaptive drafts keyhole, truth_candle, ash_of_forgetting at bonfires 1-3 | 69.0% vs 50.8%, +18.3 points | 12 or less: **not met** |
-| 9 | mirror_etiquette + resonance | healed 0.18 per duel, Rupture damage 0.18 per duel | no net farming: met |
+| 1 | Rival coiled_riposte + first_blood + deathblow_creed + resonance | 7+ hits in 23% of duels (mixer), 14% (adaptive); max hit 8. Run win 34 to 19%, 57 to 43% | under 3%: **not met** |
+| 2 | guard bot with stone_patience + thorned_guard + ash_veil + mirror_etiquette | 0.0% run win, reaches duel 3.1 | still loses: met |
+| 3 | vampires_curtsy + paper_cuts + carrion_comfort + salt_the_wound | heal per duel mean 0.78, p95 2, never above 5. Run win 34 to 44%, 57 to 69% | 5 or less: met |
+| 4 | long_con + debt_collector + turtle_cracker | net swing per guard break 1.93 (mixer), 2.46 (adaptive) | 4 or less: met |
+| 5 | Rival no_encores + sealing_wax | player mean legal moves 2.59 (mixer), 2.67 (adaptive). Run win 34 to 11%, 57 to 32% | 2.4 or more: met |
+| 6 | Rival hungry_mask + mourning_veil + spare_mask | duel length p99 20, max 28 | p99 25 or less: met |
+| 7 | coin_of_fools + broken_pattern + three_faces | coin turn edge +0.65 damage for the uniform bot | 1.2 or less: met |
+| 8 | adaptive drafts keyhole, truth_candle, ash_of_forgetting at bonfires 1-3 | 68.8% vs 56.6%, +12.3 points | 12 or less: on the line |
+| 9 | mirror_etiquette + resonance | healed 0.38 per duel, Rupture damage 0.31 per duel | see note |
 
-Combo 8 fails because of the short duels: one guaranteed winning turn per duel is about half of what it takes to kill a 5 HP Rival. The charges are already 1 per duel, so there is no number left to trim; it needs a rule change (charges per run) or a tougher Rival.
+- **Combo 5** passes its stated target but costs the player more than half their win rate. It needs two specific Rival-only boons.
+- **Combo 9:** clash heals now slightly exceed Rupture damage in normal play. The heal is still capped at 2 per duel, and the forced-mirror check in `test_combat.js` still shows Rupture outpacing it when someone farms on purpose.
 
-Combos 1 and 5 pass their stated targets but each halves the player's win rate. They are rare in a real draft (four and two specific boons).
+## 6. What we tried
 
-## 6. Side effects of these numbers
+- **Starting numbers (12 HP, heal 5):** mixer 1 to 3%, adaptive about 6%, with or without the Rupture fix.
+- **12 HP with a flat 5 HP Rival, heal 8:** mixer 29.3%, adaptive 51.3%, but duels of 4.3 turns ending in two hits and a 28-turn clear. Rejected: it removes the mind game. The cause is that 12 HP is about four hits, bonfires refill it, and each duel becomes an independent gamble that must be won 88% of the time.
+- **Hit cap 6:** removed every 7+ hit but made Deathblow Creed add nothing to a Strike. Reverted to 8 with the pooled HP.
+- **Pooled HP, coarse sweep** (Rival 6,7,8,8,9,10,9 / 7):
 
-- **Deathblow Creed** is nearly dead under a 6 cap. A Strike at 3 pips is already 6, so the +2 adds nothing; on Guard and Feint wins it adds 1. Its card text is still literally true but misleading. Coiled Riposte is capped the same way at 1+ pips.
-- **Ember Hoard and Ashen Flask** rarely matter with heal 8: the player arrives at 11.8 HP. Ember Hoard measures -3 to -5 as a pick.
-- **`DESIGN.md` §5 and §12** still show the old duel table, heal and cap. I did not edit it.
-- **`index.html`** was not rebuilt; run `node tools/build.js` to carry the constants into the build.
+| Max HP | Heal / P2 heal | mixer | adaptive | habit |
+|---|---|---|---|---|
+| 20 | 6 / 4 | 20.6% | 43.3% | 6.8% |
+| 24 | 4 / 2 | 17.7% | 43.4% | 5.3% |
+| 24 | 6 / 4 | 29.1% | 49.6% | 9.1% |
+| 24 | 7 / 5 | 36.3% | 55.8% | 9.5% |
+| 26 | 5 / 3 | 28.9% | 51.7% | 8.1% |
+| **26** | **6 / 4** | **34.8%** | **54.8%** | **9.8%** |
+| 28 | 5 / 3 | 30.9% | 55.1% | 10.1% |
+
+The first, second and last rows were measured with the hit cap at 6 and before the two boon trims; the cap moved results by about a point. 24 with heal 7/5 scores the same as 26 with 6/4. I took 26 because the bar drains further (26 to 17 against 24 to 18) and the heals sit mid-range.
 
 ## 7. What a playtester should feel-check
 
-1. **Is a 5 HP Rival a duel or a formality?** Two clean hits end every fight and a full clear is under 30 turns. If it feels thin, take the 5,5,6,6,7,7,6 / 6 row and accept a mixer near 17%.
-2. **Get into a Rupture on purpose** (four clashes in a row). Under the shipped rule, confirm the loop and how it feels to be forced to take a hit to leave. Then decide on the fix before anything else is tuned.
-3. **Duel 1 honesty and the first lie.** With 5 HP the Rival is at 1 HP when the tutorial's lie arrives on turn 3. Check that the lesson still lands, and that stances stay believable in duels 1 to 3 for someone who trusts about two times in three (the sim says 82, 74, 64% honest).
+1. **The drain.** Does arriving at duel 6 on about 20 of 26 HP feel like a run-long resource, and does a 6 HP bonfire feel like relief without undoing it?
+2. **Phase 2.** It is the hardest fight (77% for a neutral player) and where the big hits live: 15% of phase-2 fights contain a hit of 7 or 8. Check whether that reads as a finale or as unfair.
+3. **Early stances.** Duels 1 to 3 are 84, 75 and 65% honest for a player who trusts about two times in three. Check that the tutorial's lesson holds and that the first lies feel earned.
 
-Also worth a look: how a 6 damage hit feels at 12 HP (half the bar, 5 to 8% of the Rival's wins), Keyhole in a three-turn duel, and Sealing Wax or No Encores in the Rival's hands.
+Also worth a look: Rupture without the seal (four clashes in a row), Sealing Wax with No Encores in the Rival's hands, and whether Deathblow Creed is worth a rare slot.
 
-## 8. About the sim
+## 8. Follow-ups outside this pass
 
-- `node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot a,b] [--quick] [--rupture-fix] [--unlocks natural|all] [--no-combos] [--no-boons] [--set key=value] [--label text] [--trace]`. About 250 runs per second per worker, 1,900 per second on 11 workers.
-- `--set` overrides constants for a sweep without editing files, for example `--set hp=5,5,6,6,7,7,6 --set p2hp=6 --set K.TAU_BASE=1.5`. `--label` appends the headline to `tools/out/balance_log.md`.
-- Bots are never handed the sealed commit. Info boons reach them only through the same values the scene draws (Keyhole, Candle of Truth, Liar's Tally, Stolen Ledger, Liar's Coin). The mixer and uniform bots use only the Coin of Fools; the adaptive bot uses all of them.
-- The tutorial is skipped (`seenTutorial = true`), runs are spaced 10 minutes apart (no away-decay), and unlocks arrive naturally unless `--unlocks all`.
+- `DESIGN.md` §4, §5, §8 and §12 still describe the old Rupture rule, HP table, heal and boon numbers. I did not edit it.
+- `index.html` was not rebuilt; run `node tools/build.js`.
+- The layout spec has "9/12"-style numerals and an HP bar with a notch per HP; I have not looked at either at 26.
+
+## 9. About the sim
+
+- `node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot a,b] [--quick] [--unlocks natural|all] [--no-combos] [--no-boons] [--set key=value] [--label text] [--trace]`. About 100 to 150 runs per second per worker, 1,300 per second on 11 workers.
+- `--set` overrides constants for a sweep without editing files, for example `--set maxhp=24 --set heal=7 --set hp=6,7,8,8,9,10,9 --set K.TAU_BASE=1.5`. `--label` appends the headline to `tools/out/balance_log.md`.
+- Bots are never handed the sealed commit. Info boons reach them only through the values the scene draws. The mixer and uniform bots use only the Coin of Fools; the adaptive bot uses every active.
+- The tutorial is skipped, runs are spaced 10 minutes apart, and unlocks arrive naturally unless `--unlocks all`.
 - Bot relic choice is a fixed favourite with 15% exploration. Draft choice is a soft preference by move share (simple bots) or by tag synergy and counter-drafting the Rival's pick (adaptive).
+- The adaptive bot was checked for sensitivity in the previous round: changing its best-response share, temperature or memory weighting moved it by about 4 points.
