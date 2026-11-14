@@ -414,7 +414,8 @@
     var fin = !!res.over;
     var cx = 90, cy = L.floorY - 26;
 
-    // pre-reveal hold
+    // pre-reveal hold: the room goes quiet and dark around the two of them
+    S.hush = true;
     if (fin) {
       S.noSkip = true; E.timeScale = 1;
       if (R.Audio) R.Audio.heartbeat(0);
@@ -431,7 +432,10 @@
     S.fx.burst('shard', PX, L.floorY - 60, 6);
     yield 0.18;
     S.rSigil = 'open'; S.pSigil = 'open'; S.shownP = pm; S.shownR = rm;
-    yield 0.12;
+    S.hush = false;
+    floatText(mname(pm).toUpperCase(), PX, L.floorY - 80, MCOL[pm]);
+    floatText(mname(rm).toUpperCase(), RX, L.floorY - 82, MCOL[rm]);
+    yield 0.14;
 
     // exchange
     if (fin) E.timeScale = 0.35;
@@ -620,6 +624,15 @@
   }
 
   // ------------------------------------------------------------------ drawing
+  var HUSH = null;
+  function hushPattern(g) {                      // 50% checker of void, baked once
+    if (!HUSH) {
+      var c = document.createElement('canvas'); c.width = 2; c.height = 2;
+      var cg = c.getContext('2d'); cg.fillStyle = hex(1); cg.fillRect(0, 0, 1, 1); cg.fillRect(1, 1, 1, 1);
+      HUSH = g.createPattern(c, 'repeat');
+    }
+    return HUSH;
+  }
   function diamond(g, x, y, col) {
     g.fillStyle = hex(col);
     g.fillRect(x + 3, y, 1, 7); g.fillRect(x + 2, y + 1, 3, 5); g.fillRect(x + 1, y + 2, 5, 3); g.fillRect(x, y + 3, 7, 1);
@@ -738,7 +751,7 @@
         legal: { S: true, G: true, F: true }, input: false, choice: null, coin: false, press: null, pressA: -1,
         only: null, glow: null, reveal: null, hint: null, infoLine: null, called: null, tell: null,
         rSigil: 'gone', pSigil: 'gone', rSigilT: 0, pSigilT: 0, shownP: null, shownR: null, glass: null, stamp: null,
-        resolving: false, fast: false, noSkip: false, tapped: false, overlay: false, ledgerHot: false,
+        resolving: false, hush: false, fast: false, noSkip: false, tapped: false, overlay: false, ledgerHot: false,
         deathblow: false, bars: 0, gutter: 0, pipPop: 0, banner: null, card: null, dying: 0,
         cool: 0, silent: 0, nHabit: 0, nRead: 0, saidHabit: null, lowSaid: { p: low(duel.p), r: false }, forceLine: false,
         idleT: 0, idleSaid: false,
@@ -798,6 +811,7 @@
       var o = S.bgOpts, i;
       o.gutter = Math.max(S.gutter, S.deathblow ? 0.7 : 0); o.phase2 = S.phase2; o.floorY = L.floorY;
       R.Art.bg(g, 'cathedral', S.clock, o);
+      if (S.hush) { g.fillStyle = hushPattern(g); g.fillRect(0, L.arenaY, 180, L.arenaH); }
       // loser of the moment is drawn first so the winner's blade overlaps
       drawActor(g, S.rv); drawActor(g, S.pl);
       S.fx.draw(g);
@@ -874,6 +888,8 @@
       var m = k === '1' || k === 's' ? 'S' : k === '2' || k === 'g' ? 'G' : k === '3' || k === 'f' ? 'F' : null;
       if (m) pick(m); else S.tapped = true;
     },
+    // Test hook: public information only (what a player can see on screen).
+    peek: function () { return S ? { input: S.input, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
     pause: function () { if (S && G) G.save(); },
     back: function () { if (S) S.overlay = !S.overlay; }
   };

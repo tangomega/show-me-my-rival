@@ -1325,23 +1325,753 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- audio/audio.js ----
-// STUB — replaced by the audio programmer
-// Silent implementation of the full R.Audio contract so every caller is safe.
+// SHOW ME MY RIVAL — R.Audio. Every sound is synthesised at runtime with the Web Audio API; no assets.
+// Chain: sfx voices -> 4 buses (fixed reverb-send levels) -> sfxBus ┐
+//        music cue (dry fader + wet fader) -> music low-pass -> musBus ┴-> master -> limiter -> out
+//        one shared convolver (generated 1.8 s dark impulse) is "the cathedral".
+// Monophonic music parts (bass, lead, kick, snare, pad) are persistent oscillators driven by
+// AudioParam automation, so a looping cue creates almost no nodes after it has started.
 (function (R) {
   'use strict';
 
-  function noop() {}
+  var G = globalThis;
+  var MASTER = 0.8, LOOK = 0.15, TICK = 50, MAXV = 24;
+  var ctx = null, sr = 44100, ready = false, failed = false, muted = false, mutedSet = false, held = false;
+  var master, sfxBus, musBus, musLP, musSendLP, revIn, typeBus, hbGain, B = [];
+  var white, brown, typeBuf, type2Buf, hbBuf, crackBuf = null, pulse = null, curves = {};
+  var live = 0, liveType = 0, timer = null;
+  var cue = null, dying = [], want = null, hbWant = 0;
+  var hbBpm = 0, hbNext = 0, hbLast = -9, duck = false;
+  var E0 = {}, H = -99, X = -98;
+  var D1 = 36.708, D2 = 73.416, D3 = 146.83, D4 = 293.66;
 
-  R.Audio = {
+  // ------------------------------------------------------------------ helpers
+  function num(x, d) { return typeof x === 'number' && isFinite(x) ? x : d; }
+  function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
+  function fq(f) { return clamp(f, 8, 18000); }
+  function rnd() { return Math.random(); }
+  function st(n) { return Math.pow(2, n / 12); }
+  function now() { return ctx.currentTime; }
+  function nop() {}
+  function kill(n) { try { n.disconnect(); } catch (e) {} }
+  function srcEnd() { kill(this); }
+  function quiet(p) { if (p && p.catch) p.catch(nop); }
+  function gainNode(v, dst) { var g = ctx.createGain(); g.gain.value = v; if (dst) g.connect(dst); return g; }
+  function biq(type, f, q, dst) {
+    var b = ctx.createBiquadFilter();
+    b.type = type; b.frequency.value = fq(f); b.Q.value = q || 0.7;   // (low/high-pass Q is in dB)
+    if (dst) b.connect(dst);
+    return b;
+  }
+  function setType(o, type) {
+    if (type !== 'pulse') o.type = type;
+    else if (pulse) o.setPeriodicWave(pulse);
+    else o.type = 'square';
+  }
+  // 0 -> pk over `a` (exponential when x), optional hold, exponential fall to silence at t + d
+  function env(p, t, a, d, pk, hold, x) {
+    if (pk < 0.0002) pk = 0.0002;
+    p.setValueAtTime(0.0001, t);
+    if (x) p.exponentialRampToValueAtTime(pk, t + a); else p.linearRampToValueAtTime(pk, t + a);
+    if (hold) p.setValueAtTime(pk, t + a + hold);
+    p.exponentialRampToValueAtTime(0.0001, t + Math.max(d, a + (hold || 0) + 0.005));
+  }
+
+  // ------------------------------------------------------------------ voices
+  // A voice owns its nodes and disconnects all of them when its last source ends.
+  function voice(dst, vol, mus) {
+    var v = { n: [], s: 0, o: mus ? dst : gainNode(vol, dst), m: mus, end: null };
+    v.end = function () { if (--v.s <= 0 && v.n) vDone(v); };
+    if (!mus) live++;
+    return v;
+  }
+  function vDone(v) {
+    for (var i = 0; i < v.n.length; i++) kill(v.n[i]);
+    v.n = null;
+    if (!v.m) { kill(v.o); live--; }
+  }
+  function track(v, s, t0, t1, off) {
+    v.s++; v.n.push(s); s.onended = v.end;
+    if (off === undefined) s.start(t0); else s.start(t0, off);
+    s.stop(t1);
+  }
+  // o: { f1 glide target, gt glide time, a attack, s hold, x exp attack, c detune cents, d destination }
+  function osc(v, type, f, t, dur, pk, o) {
+    o = o || E0;
+    var s = ctx.createOscillator(), g = ctx.createGain();
+    setType(s, type);
+    s.frequency.setValueAtTime(fq(f), t);
+    if (o.f1) s.frequency.exponentialRampToValueAtTime(fq(o.f1), t + (o.gt || dur));
+    if (o.c) s.detune.value = o.c;
+    env(g.gain, t, o.a || 0.004, dur, pk, o.s, o.x);
+    s.connect(g); g.connect(o.d || v.o); v.n.push(g);
+    track(v, s, t, t + dur + 0.02);
+    return s;
+  }
+  // o: { b brown, ft filter type, f, f1, gt, q, a, s, x, d }
+  function noise(v, t, dur, pk, o) {
+    var s = ctx.createBufferSource(), g = ctx.createGain(), len = dur + 0.03, fl = null;
+    s.buffer = o.b ? brown : white;
+    if (len > 1.8) s.loop = true;
+    env(g.gain, t, o.a || 0.002, dur, pk, o.s, o.x);
+    if (o.ft) {
+      fl = biq(o.ft, o.f, o.q, g);
+      if (o.f1) { fl.frequency.setValueAtTime(fq(o.f), t); fl.frequency.exponentialRampToValueAtTime(fq(o.f1), t + (o.gt || dur)); }
+      s.connect(fl); v.n.push(fl);
+    } else s.connect(g);
+    g.connect(o.d || v.o); v.n.push(g);
+    track(v, s, t, t + len, s.loop ? rnd() : rnd() * (1.9 - len));
+    return fl;
+  }
+  // tremolo / ring-mod stage: returns the node to play into
+  function trem(v, t, f, dur, depth, dst) {
+    var g = gainNode(1 - depth, dst || v.o), l = ctx.createOscillator(), lg = gainNode(depth, g.gain);
+    l.frequency.value = f; l.connect(lg); v.n.push(g, lg);
+    track(v, l, t, t + dur);
+    return g;
+  }
+  // steel: four inharmonic partials, each a square + triangle pair beating 12 cents apart
+  var MP = [523, 784, 1178, 1661], MG = [1, 0.8, 0.65, 0.5];
+  function metal(v, t, m, dur, pk, bend, dst) {
+    var hp = biq('highpass', 300, 0.5, dst || v.o), i, f, d;
+    v.n.push(hp);
+    for (i = 0; i < 4; i++) {
+      f = MP[i] * m; d = dur * (1 - i * 0.13);
+      osc(v, 'square', f, t, d, pk * MG[i] * 0.13, { a: 0.005, c: -6, f1: bend ? f * bend : 0, gt: 0.3, d: hp });
+      osc(v, 'triangle', f, t, d, pk * MG[i] * 0.3, { a: 0.005, c: 6, f1: bend ? f * bend : 0, gt: 0.3, d: hp });
+    }
+    osc(v, 'sine', 2637 * m, t, dur * 0.4, pk * 0.1, { d: hp });
+    osc(v, 'sine', 3951 * m, t, dur * 0.3, pk * 0.07, { d: hp });
+    noise(v, t, 0.012, pk * 0.5, { ft: 'highpass', f: 2500, d: hp });
+  }
+  // FM bell: sine carrier, modulator at 3.5x whose index collapses, plus the octave
+  function fmBell(v, f, t, dur, pk, idx) {
+    var c = osc(v, 'sine', f, t, dur, pk, { a: 0.003 }), m = ctx.createOscillator(), mg = ctx.createGain(), fm = fq(f * 3.5);
+    m.frequency.value = fm;
+    mg.gain.setValueAtTime(fm * idx, t);
+    mg.gain.exponentialRampToValueAtTime(fm * 0.02, t + dur * 0.6);
+    m.connect(mg); mg.connect(c.frequency); v.n.push(mg);
+    track(v, m, t, t + dur + 0.02);
+    osc(v, 'sine', f * 2, t, dur * 0.5, pk * 0.3, { a: 0.003 });
+  }
+  function laugh(v, t, p) {
+    osc(v, 'triangle', 700 * p, t, 0.08, 0.9, { f1: 1100 * p, gt: 0.07 });
+    osc(v, 'triangle', 1100 * p, t + 0.09, 0.09, 0.8, { f1: 700 * p, gt: 0.07 });
+  }
+  var CHIME = [880, 1174.66, 1396.91], RAR = { common: 1, uncommon: 2, rare: 3 };
+  function chime(v, t, p, o) {
+    var n = clamp((o.n || o.notes || RAR[o.rarity] || +o.rarity || 2) | 0, 1, 3), k, e;
+    for (k = 0; k < n; k++) {
+      for (e = 0; e < 3; e++) osc(v, 'triangle', CHIME[k] * p, t + k * 0.09 + e * 0.17, 0.5, 0.8 * Math.pow(0.3, e));
+      osc(v, 'sine', CHIME[k] * p * 2, t + k * 0.09, 0.15, 0.15);
+    }
+    return n;
+  }
+  function lpTo(f, t, tc) { musLP.frequency.setTargetAtTime(f, t, tc); musSendLP.frequency.setTargetAtTime(f, t, tc); }
+
+  // ------------------------------------------------------------------ SFX
+  var S = Object.create(null), M = Object.create(null);
+  function def(name, bus, trim, crit, fn) { S[name] = fn; M[name] = [bus, trim, crit]; }
+
+  def('tick', 1, 0.13, 0, function (v, t, p) {
+    osc(v, 'triangle', 880 * p, t, 0.04, 0.9);
+    osc(v, 'square', 1760 * p, t, 0.014, 0.1);
+  });
+  def('select', 1, 0.16, 0, function (v, t, p) {
+    osc(v, 'triangle', 660 * p, t, 0.06, 0.8); osc(v, 'square', 660 * p, t, 0.04, 0.1);
+    osc(v, 'triangle', 990 * p, t + 0.045, 0.09, 0.8); osc(v, 'square', 990 * p, t + 0.045, 0.04, 0.1);
+  });
+  def('back', 1, 0.16, 0, function (v, t, p) {
+    osc(v, 'triangle', 440 * p, t, 0.11, 0.8, { f1: 330 * p, gt: 0.07 });
+    osc(v, 'square', 440 * p, t, 0.07, 0.1, { f1: 330 * p, gt: 0.07 });
+  });
+  def('seal', 1, 0.5, 0, function (v, t, p) {            // wax stamp
+    noise(v, t, 0.04, 1.6, { ft: 'bandpass', f: 300 * p, q: 4 });
+    osc(v, 'sine', 90 * p, t, 0.16, 1, { f1: 50 * p, gt: 0.12 });
+    osc(v, 'triangle', 180 * p, t, 0.12, 0.3, { f1: 100 * p, gt: 0.1 });
+  });
+  def('crack', 2, 0.3, 0, function (v, t, p) {
+    noise(v, t, 0.012, 1, { ft: 'highpass', f: 6000 * p });
+    noise(v, t + 0.04, 0.012, 0.8, { ft: 'highpass', f: 6000 * p });
+    noise(v, t + 0.09, 0.014, 1, { ft: 'highpass', f: 6000 * p });
+    osc(v, 'sine', 2400 * p, t, 0.12, 0.35);
+  });
+  def('whoosh_s', 1, 0.34, 0, function (v, t, p) {
+    noise(v, t, 0.16, 1.6, { ft: 'bandpass', f: 400 * p, f1: 2400 * p, gt: 0.14, q: 1.5, a: 0.02 });
+  });
+  def('whoosh_f', 1, 0.24, 0, function (v, t, p) {
+    var d = v.o, fl;
+    if (ctx.createStereoPanner) {                        // slight stereo wobble
+      d = ctx.createStereoPanner(); d.connect(v.o); v.n.push(d);
+      d.pan.setValueAtTime(-0.5, t); d.pan.linearRampToValueAtTime(0.5, t + 0.09); d.pan.linearRampToValueAtTime(-0.3, t + 0.2);
+    }
+    fl = noise(v, t, 0.21, 1.4, { ft: 'bandpass', f: 2000 * p, f1: 500 * p, gt: 0.09, q: 1.8, a: 0.025, d: d });
+    fl.frequency.exponentialRampToValueAtTime(fq(1800 * p), t + 0.18);
+  });
+  def('guard_up', 1, 0.36, 0, function (v, t, p) {
+    osc(v, 'triangle', 147 * p, t, 0.16, 0.9, { a: 0.01 });
+    osc(v, 'triangle', 294 * p, t, 0.12, 0.3, { a: 0.01 });
+    noise(v, t, 0.11, 0.8, { b: 1, ft: 'lowpass', f: 600 * p, a: 0.01 });
+  });
+  def('hit', 1, 0.5, 1, function (v, t, p) {
+    osc(v, 'sine', 120 * p, t, 0.16, 1, { f1: 45 * p, gt: 0.12, a: 0.002 });
+    osc(v, 'triangle', 240 * p, t, 0.11, 0.4, { f1: 90 * p, gt: 0.09, a: 0.002 });
+    noise(v, t, 0.09, 0.8, { ft: 'lowpass', f: 800 * p });
+  });
+  def('clang', 2, 0.44, 1, function (v, t, p) { metal(v, t, p, 0.55, 1); });
+  def('clash_s', 2, 0.38, 0, function (v, t, p) {        // bind: two strikes, the second shimmering
+    metal(v, t, 0.8 * p, 0.3, 0.8);
+    metal(v, t + 0.06, 0.8 * p, 0.7, 0.9, 0, trem(v, t, 30, 0.85, 0.5));
+  });
+  def('clash_g', 1, 0.4, 0, function (v, t, p) {         // standoff: no transient
+    osc(v, 'triangle', 98 * p, t, 0.3, 1, { a: 0.03 });
+    osc(v, 'triangle', 196 * p, t, 0.24, 0.35, { a: 0.03 });
+    noise(v, t, 0.22, 0.8, { b: 1, ft: 'lowpass', f: 600 * p, a: 0.03 });
+  });
+  def('clash_f', 2, 0.22, 0, function (v, t, p) { laugh(v, t, p); });
+  def('guard_break', 2, 0.5, 1, function (v, t, p) {
+    metal(v, t, p, 0.6, 1, 0.7);
+    noise(v, t, 0.45, 1.1, { ft: 'lowpass', f: 3000 * p, f1: 500 * p, gt: 0.4, a: 0.004 });
+    osc(v, 'sine', 55 * p, t, 0.5, 1, { f1: 38 * p, gt: 0.4 });
+    osc(v, 'triangle', 110 * p, t, 0.35, 0.5, { f1: 76 * p, gt: 0.3 });
+  });
+  def('bell', 3, 0.3, 1, function (v, t, p) { fmBell(v, 392 * p, t, 0.45, 0.8, 2); });
+  def('deathblow', 2, 0.5, 1, function (v, t, p) {       // inhale, then the stab
+    var lp = biq('lowpass', 240 * p, 3, v.o), t2 = t + 0.6;
+    v.n.push(lp);
+    noise(v, t, 0.64, 1.2, { ft: 'bandpass', f: 300 * p, f1: 1600 * p, gt: 0.6, q: 0.8, a: 0.6, x: 1 });
+    osc(v, 'sawtooth', 49 * p, t2, 0.8, 1, { a: 0.005, d: lp });
+    osc(v, 'sawtooth', 98 * p, t2, 0.6, 0.5, { a: 0.005, d: lp });
+    osc(v, 'triangle', 98 * p, t2, 0.5, 0.3, { a: 0.005 });
+  });
+  // Fired on contact, so the recipe's pre-swell cannot lead it: the music drops under a 400 Hz
+  // low-pass at the blow and the noise becomes the air rushing back in afterwards.
+  def('final_blow', 1, 0.6, 1, function (v, t, p) {
+    lpTo(400, t, 0.015); lpTo(18000, t + 1, 0.4);
+    metal(v, t, 0.75 * p, 1.5, 1);
+    metal(v, t, 1.5 * p, 0.6, 0.45);
+    noise(v, t, 0.03, 1.2, { ft: 'highpass', f: 1500 });
+    noise(v, t + 0.02, 0.9, 0.35, { ft: 'bandpass', f: 2400 * p, f1: 500 * p, gt: 0.8, q: 0.7, a: 0.03 });
+    osc(v, 'sine', 80 * p, t, 0.9, 1, { f1: 40 * p, gt: 0.5 });
+    osc(v, 'triangle', 160 * p, t, 0.6, 0.4, { f1: 80 * p, gt: 0.5 });
+  });
+  def('heal', 3, 0.24, 0, function (v, t, p) {
+    osc(v, 'sine', 293.66 * p, t, 0.5, 0.35, { a: 0.08 });
+    osc(v, 'sine', 440 * p, t, 0.5, 0.25, { a: 0.08 });
+    osc(v, 'triangle', 587.33 * p, t, 0.3, 0.7);
+    osc(v, 'triangle', 698.46 * p, t + 0.06, 0.3, 0.7);
+    osc(v, 'triangle', 880 * p, t + 0.12, 0.4, 0.7);
+  });
+  def('boon', 3, 0.22, 0, function (v, t, p, o) { chime(v, t, p, o); });
+  def('rival_draft', 3, 0.22, 0, function (v, t, p, o) {
+    laugh(v, t + 0.3 + 0.09 * chime(v, t, p * 0.7071, o), p * 0.8);
+  });
+  def('you_died', 3, 0.4, 1, function (v, t, p) {
+    var lp = biq('lowpass', 600 * p, 1, v.o);
+    v.n.push(lp);
+    osc(v, 'sawtooth', 73.42 * p, t, 3.3, 0.5, { a: 0.3, s: 1, c: -5, d: lp });
+    osc(v, 'sawtooth', 110 * p, t, 3.3, 0.4, { a: 0.3, s: 1, c: 4, d: lp });
+    osc(v, 'sawtooth', 146.83 * p, t, 3.3, 0.4, { a: 0.3, s: 1, c: -3, d: lp });
+    osc(v, 'sawtooth', 155.56 * p, t + 1, 2.3, 0.35, { a: 0.4, s: 0.2, d: lp });   // the E flat arrives late
+  });
+  def('phase2', 2, 0.5, 1, function (v, t, p) {
+    var k, t2 = t + 0.5, bp = biq('bandpass', 200 * p, 8, trem(v, t2, 14, 1, 0.4));
+    for (k = 0; k < 12; k++) osc(v, 'sine', (2000 + rnd() * 4000) * p, t + rnd() * 0.5, 0.03 + rnd() * 0.06, 0.2 + rnd() * 0.3, { a: 0.002 });
+    noise(v, t, 0.6, 1, { ft: 'lowpass', f: 5000 * p, f1: 400 * p, gt: 0.5, a: 0.003 });
+    osc(v, 'sine', 80 * p, t, 1, 1, { f1: 36 * p, gt: 0.6 });
+    osc(v, 'triangle', 120 * p, t, 0.7, 0.4, { f1: 60 * p, gt: 0.5 });
+    v.n.push(bp);                                         // what is under the mask
+    bp.frequency.setValueAtTime(fq(200 * p), t2);
+    bp.frequency.exponentialRampToValueAtTime(fq(3000 * p), t2 + 0.9);
+    osc(v, 'sawtooth', 55 * p, t2, 0.95, 2, { a: 0.05, s: 0.6, d: bp });
+    osc(v, 'sawtooth', 110.6 * p, t2, 0.95, 1.2, { a: 0.05, s: 0.6, d: bp });
+  });
+  def('unlock', 3, 0.22, 0, function (v, t, p) {
+    var f = [293.66, 440, 587.33, 698.46], k;
+    for (k = 0; k < 4; k++) osc(v, 'triangle', f[k] * p, t + k * 0.1, k === 3 ? 0.5 : 0.25, 0.7);
+    noise(v, t, 0.5, 0.25, { ft: 'highpass', f: 5000, a: 0.12 });
+  });
+  def('step', 1, 0.32, 0, function (v, t, p) {
+    noise(v, t, 0.05, 0.9, { b: 1, ft: 'lowpass', f: 500 * p });
+    osc(v, 'sine', 70 * p, t, 0.05, 0.9);
+    osc(v, 'triangle', 140 * p, t, 0.04, 0.35);
+  });
+  def('ember', 1, 0.14, 0, function (v, t, p) {
+    noise(v, t, 0.01 + rnd() * 0.03, 0.4 + rnd() * 1.2, { ft: 'bandpass', f: (1000 + rnd() * 3000) * p, q: 2 });
+  });
+  M.type = [0, 1, 0];
+
+  // typewriter blip: one pre-rendered buffer source per blip, nothing else
+  function typeEnd() { liveType--; kill(this); }
+  function typeBlip(t, p, vol) {
+    if (liveType >= 4) return;
+    var s = ctx.createBufferSource(), low = p < 0.75, g;
+    s.buffer = low ? type2Buf : typeBuf;
+    s.playbackRate.value = clamp((low ? p * 2 : p) * (0.88 + rnd() * 0.24), 0.1, 8);
+    if (vol === 1) { s.connect(typeBus); s.onended = typeEnd; }
+    else { g = gainNode(vol, typeBus); s.connect(g); s.onended = function () { liveType--; kill(s); kill(g); }; }
+    liveType++;
+    s.start(t); s.stop(t + 0.5);
+  }
+
+  function sfx(name, opts) {
+    if (!ready || muted || held) return;
+    var m = M[name], p, vol, v, t;
+    if (!m) return;
+    wake();
+    if (ctx.state && ctx.state !== 'running' && live >= 3) return;   // do not queue a burst behind a locked context
+    opts = opts && typeof opts === 'object' ? opts : E0;
+    p = clamp(num(opts.pitch, 1), 0.1, 8); vol = clamp(num(opts.vol, 1), 0, 4); t = now();
+    if (name === 'type') { typeBlip(t, p, vol); return; }
+    if (live >= (m[2] ? MAXV + 12 : MAXV)) return;
+    v = voice(B[m[0]], vol * m[1]);
+    try { S[name](v, t, p, opts); } catch (e) { if (!v.s && v.n) vDone(v); oops(e); }
+  }
+
+  // ------------------------------------------------------------------ generated buffers
+  function mkNoise() {
+    var n = sr * 2 | 0, i, b = 0, mx = 0, w, d, dr;
+    white = ctx.createBuffer(1, n, sr); brown = ctx.createBuffer(1, n, sr);
+    w = white.getChannelData(0); d = brown.getChannelData(0);
+    for (i = 0; i < n; i++) { w[i] = rnd() * 2 - 1; b = (b + 0.02 * w[i]) / 1.02; d[i] = b; }
+    dr = (d[n - 1] - d[0]) / n;                            // remove drift so the loop seam does not click
+    for (i = 0; i < n; i++) { d[i] -= dr * i; if (Math.abs(d[i]) > mx) mx = Math.abs(d[i]); }
+    for (i = 0; i < n; i++) d[i] *= 0.9 / (mx || 1);
+  }
+  function mkImpulse() {
+    var n = sr * 1.8 | 0, b = ctx.createBuffer(2, n, sr), c, i, k, d, lp, x;
+    for (c = 0; c < 2; c++) {
+      d = b.getChannelData(c); lp = 0;
+      for (i = 0; i < n; i++) {
+        x = i / n;
+        lp += (rnd() * 2 - 1 - lp) * (0.6 - 0.5 * x);     // the tail darkens as it dies
+        d[i] = lp * Math.pow(1 - x, 2.6) * (i < 200 ? i / 200 : 1);
+      }
+      for (k = 0; k < 6; k++) d[(0.004 + rnd() * 0.07) * sr | 0] += (rnd() < 0.5 ? -1 : 1) * (0.7 - k * 0.08);   // early slaps off stone
+    }
+    return b;
+  }
+  function mkType(f, len, ring) {
+    var n = sr * len | 0, b = ctx.createBuffer(1, n, sr), d = b.getChannelData(0), i, t, x, lp = 0;
+    for (i = 0; i < n; i++) {
+      t = i / sr;
+      x = ring ? (2 * ((t * f) % 1) - 1) * Math.sin(6.2832 * 30 * t + 1) : ((t * f) % 1 < 0.5 ? 1 : -1);
+      lp += (x - lp) * 0.3;
+      d[i] = lp * Math.min(1, i / 40) * Math.exp(-t / (len * 0.3)) * Math.min(1, (n - i) / 40);
+    }
+    return b;
+  }
+  function mkHeart() {
+    var n = sr * 0.34 | 0, b = ctx.createBuffer(1, n, sr), d = b.getChannelData(0), k, i, t, ph, off, m;
+    for (k = 0; k < 2; k++) {                              // lub, then a softer dub 140 ms later
+      off = k * 0.14 * sr | 0; ph = 0; m = sr * 0.2 | 0;
+      for (i = 0; i < m && off + i < n; i++) {
+        t = i / sr;
+        ph += 6.2832 * Math.max(38, (k ? 64 : 60) * Math.pow(0.667, t / 0.07)) / sr;
+        d[off + i] += (k ? 0.42 : 0.6) * Math.min(1, t / 0.004) * Math.exp(-t / 0.035) * Math.min(1, (m - i) / 60) *
+          (Math.sin(ph) + 0.45 * Math.sin(2 * ph) + 0.2 * Math.sin(3 * ph));   // harmonics: phone speakers have no 50 Hz
+      }
+    }
+    return b;
+  }
+  function mkCrackle() {                                   // 5.3 s of fire: about 9 crackles a second
+    var n = sr * 5.3 | 0, b = ctx.createBuffer(1, n, sr), d = b.getChannelData(0), k, i, pos, len, a, c, amp, l1, l2;
+    for (k = 0; k < 48; k++) {
+      len = (0.008 + rnd() * 0.03) * sr | 0; pos = rnd() * (n - len - 1) | 0;
+      a = 1 - Math.exp(-6.2832 * (1000 + rnd() * 3000) / sr); c = a * 0.35;
+      amp = (0.15 + rnd() * rnd() * 0.85) * 2.5; l1 = l2 = 0;
+      for (i = 0; i < len; i++) {
+        l1 += (rnd() * 2 - 1 - l1) * a; l2 += (l1 - l2) * c;
+        d[pos + i] += (l1 - l2) * amp * Math.exp(-i / (len * 0.25));
+      }
+    }
+    return b;
+  }
+  function mkPulse() {                                     // 25 % duty, band-limited
+    if (!ctx.createPeriodicWave) return null;
+    var n = 24, re = new Float32Array(n), im = new Float32Array(n), k;
+    for (k = 1; k < n; k++) re[k] = 2 / (k * Math.PI) * Math.sin(k * Math.PI * 0.25);
+    return ctx.createPeriodicWave(re, im);
+  }
+  function curve(k) {
+    if (curves[k]) return curves[k];
+    var c = new Float32Array(1024), i, th = (Math.exp(k) - Math.exp(-k)) / (Math.exp(k) + Math.exp(-k)), e;
+    for (i = 0; i < 1024; i++) { e = Math.exp(2 * k * (i / 511.5 - 1)); c[i] = (e - 1) / (e + 1) / th; }
+    return (curves[k] = c);
+  }
+
+  // ------------------------------------------------------------------ music: cue plumbing
+  function newCue(name) { return { name: name, n: [], src: [], seq: [], killAt: 0, out: gainNode(0, musLP), send: gainNode(0, musSendLP) }; }
+  function cg(c, val, dst) { var g = gainNode(val, dst); c.n.push(g); return g; }
+  function cf(c, type, f, q, dst) { var b = biq(type, f, q, dst); c.n.push(b); return b; }
+  function cbus(c, lvl, snd) { var g = cg(c, lvl, c.out); if (snd) g.connect(cg(c, snd, c.send)); return g; }
+  function cosc(c, type, f, cents, lvl, dst) {
+    var o = ctx.createOscillator();
+    setType(o, type); o.frequency.value = f; if (cents) o.detune.value = cents;
+    o.connect(cg(c, lvl, dst)); o.start(now());
+    c.src.push(o); c.n.push(o);
+    return o;
+  }
+  function cnoise(c, buf, dst) {
+    var s = ctx.createBufferSource();
+    s.buffer = buf; s.loop = true; s.connect(dst); s.start(now(), rnd() * 1.5);
+    c.src.push(s); c.n.push(s);
+  }
+  function clfo(c, f, depth, param) {
+    var o = ctx.createOscillator(), g = cg(c, depth);
+    o.frequency.value = f; o.connect(g); if (param) g.connect(param); o.start(now());
+    c.src.push(o); c.n.push(o);
+    return g;
+  }
+  function cseq(c, dur, t0, fn) { c.seq.push({ next: t0, step: 0, dur: dur, fn: fn }); }
+  function grit(c, k, dst) {
+    var pre = cg(c, 1.6), ws = ctx.createWaveShaper();
+    ws.curve = curve(k); pre.connect(ws); ws.connect(dst); c.n.push(ws);
+    return pre;
+  }
+  // monosynth: persistent oscillators (type, freq multiple, level triples) behind one envelope gain
+  function mono(c, dst, spec) {
+    var m = { g: cg(c, 0.0001, dst), o: [], k: [] }, i;
+    for (i = 0; i < spec.length; i += 3) { m.o.push(cosc(c, spec[i], 110, 0, spec[i + 2], m.g)); m.k.push(spec[i + 1]); }
+    return m;
+  }
+  function mnote(m, f, t, dur, pk, a, sus, f1, gt) {
+    var g = m.g.gain, i, p;
+    for (i = 0; i < m.o.length; i++) {
+      p = m.o[i].frequency; p.setValueAtTime(fq(f * m.k[i]), t);
+      if (f1) p.exponentialRampToValueAtTime(fq(f1 * m.k[i]), t + gt);
+    }
+    g.setValueAtTime(0.0001, t); g.linearRampToValueAtTime(pk, t + a);
+    if (sus) g.exponentialRampToValueAtTime(pk * sus, t + dur * 0.6);
+    g.exponentialRampToValueAtTime(0.0001, t + dur);
+  }
+  function dispose(c) {
+    var i;
+    for (i = 0; i < c.src.length; i++) { try { c.src[i].stop(); } catch (e) {} }
+    for (i = 0; i < c.n.length; i++) kill(c.n[i]);
+    kill(c.out); kill(c.send);
+    c.src.length = c.n.length = c.seq.length = 0;
+  }
+
+  // ------------------------------------------------------------------ music: the cues
+  var CUES = Object.create(null);
+
+  // D + A saws under a slow low-pass, wind, and a lone bell somewhere in the nave
+  function mkDrone(c, t, lvl, fixed, wind, bell) {
+    var bus = cbus(c, lvl, 0.2), lp = cf(c, 'lowpass', fixed || 190, 1, bus), wg, bp, bb;
+    cosc(c, 'sawtooth', D1, -4, 1, lp); cosc(c, 'sawtooth', D1 * 1.5, 4, 0.8, lp);
+    cosc(c, 'sawtooth', D2, 3, 0.4, lp); cosc(c, 'sawtooth', D2 * 1.5, -3, 0.25, lp);
+    cosc(c, 'sine', D3, 0, 0.07, bus); cosc(c, 'sine', D3 * 1.5 + 0.3, 0, 0.05, bus);   // a ghost fifth small speakers can carry
+    if (!fixed) clfo(c, 0.07, 70, lp.frequency);
+    if (wind) {
+      wg = cg(c, 0.5, cbus(c, 0.5 * wind, 0.4)); bp = cf(c, 'bandpass', 400, 0.7, wg);
+      cnoise(c, white, bp); clfo(c, 0.05, 0.3, wg.gain); clfo(c, 0.031, 130, bp.frequency);
+    }
+    if (bell) {
+      bb = cbus(c, 0.2, 0.7);
+      cseq(c, 0, t + 3 + rnd() * 3, function (i, tt) {
+        fmBell(voice(bb, 0, 1), D4 * st([0, 3, 7][rnd() * 3 | 0]), tt, 3.5, 0.8, 1.4);
+        return 6 + rnd() * 8;
+      });
+    }
+  }
+  CUES.drone = function (c, t) { mkDrone(c, t, 0.34, 0, 1, 1); };
+  CUES.death = function (c, t) { mkDrone(c, t, 0.085, 150, 0.3, 0); };       // -12 dB, filter pinned, no bell
+
+  var BOX = [12, 7, 3, 2, 0, X, 7, X, X, X, X, X, X, X, X, X, 12, 7, 3, 2, 0, X, 1, X, X, X, X, X, X, X, X, X];
+  CUES.title = function (c, t) {
+    var box = cbus(c, 0.22, 0.6);
+    mkDrone(c, t, 0.3, 0, 1, 0);
+    cseq(c, 1, t + 2.5, function (i, tt) {                 // music box, 60 bpm, 8 bars; the second answer sours to E flat
+      var n = BOX[i & 31], v;
+      if (n === X) return;
+      v = voice(box, 0, 1);
+      osc(v, 'triangle', D4 * st(n), tt, 1.8, 0.8);
+      osc(v, 'sine', D4 * st(n) * 4, tt, 0.25, 0.12);
+    });
+  };
+
+  var BON = [7, X, 3, 0, X, X, 2, X, -2, -5, X, X];
+  CUES.bonfire = function (c, t) {
+    var fire = cbus(c, 0.5, 0.1), pad = cbus(c, 0.2, 0.5), mel = cbus(c, 0.2, 0.55), pg = cg(c, 0, pad), ch = [0, 3, 7, 10, 14], k;
+    if (!crackBuf) crackBuf = mkCrackle();
+    cnoise(c, crackBuf, cg(c, 0.6, fire));
+    cnoise(c, brown, cf(c, 'lowpass', 320, 1, cg(c, 0.35, fire)));
+    for (k = 0; k < 5; k++) cosc(c, 'sine', D3 * st(ch[k]), 0, 0.3 - k * 0.04, pg);   // Dm9
+    pg.gain.setTargetAtTime(0.8, t, 0.7);                  // 2 s swell
+    clfo(c, 0.09, 0.15, pg.gain);
+    cseq(c, 0, t + 0.3, function (i, tt) {                 // stray live crackles over the loop
+      noise(voice(fire, 0, 1), tt, 0.01 + rnd() * 0.03, 0.3 + rnd() * 0.8, { ft: 'bandpass', f: 1000 + rnd() * 3000, q: 2 });
+      return 0.2 + rnd() * 0.8;
+    });
+    cseq(c, 0.4, t + 2.4, function (i, tt) {               // 6/8 at 50: two bars of tune, two of fire
+      var s = i % 48, n;
+      if (s % 24 >= 12) return;
+      n = s === 33 ? 0 : BON[s % 12];                      // the second time it comes home to D
+      if (n !== X) osc(voice(mel, 0, 1), 'triangle', D4 * st(n), tt, 1.3, 0.8, { a: 0.015 });
+    });
+  };
+
+  // Boss. Lead phrases: semitones from D4 per quarter note, four bars each (H holds, X rests).
+  var PH = [
+    [[0, 1, 3, 1], [0, H, -5, H], [-4, -5, -7, -5], [0, H, H, H]],      // A  the motif
+    [[0, 1, 3, 1], [0, H, -5, H], [-4, -5, -7, -5], [0, H, -2, 1]],     // A' turns back on itself
+    [[7, H, 5, 3], [1, H, 0, H], [3, 1, 0, -2], [0, H, H, H]],          // B  the answer, from above
+    [[7, H, 8, 7], [5, H, 3, 1], [0, 1, -2, 1], [0, H, H, X]]           // B'
+  ];
+  var CHD = [[0, 3, 7], [1, 8, 12], [-2, 1, 5], [0, 7, 12]];            // Dm, Eb(maj7, no 3rd), Cm, D5
+  var BASS = [0, 0, 0, 1, 0, 0, -2, 0], BASSC = [-2, -2, -2, 0, -2, -2, -4, -2];
+  // per 4-bar block of a 32-bar loop: phrase (-1 = lead out), octave, eighth-note stutter
+  var FORM1 = [0, 1, 2, 3, -1, -1, 0, 3], FORM2 = [0, 1, 2, 3, -1, 0, 2, 3];
+  var OCT = [1, 1, 1, 1, 1, 1, 2, 1], STUT = [0, 0, 0, 1, 0, 1, 1, 1];
+
+  function mkBoss(c, t, two) {
+    var sd = 15 / (two ? 132 : 96), form = two ? FORM2 : FORM1, k,
+      bassBus = cbus(c, two ? 0.26 : 0.34, 0.06), leadBus = cbus(c, two ? 0.22 : 0.26, 0.4), drumBus = cbus(c, 0.38, 0.12),
+      snBus = cbus(c, 0.6, 0.45), padBus = cbus(c, 0.2, 0.5), bellBus = cbus(c, 0.3, 0.7),
+      bassLP = cf(c, 'lowpass', two ? 440 : 300, two ? 9 : 5, two ? grit(c, 3, bassBus) : bassBus),
+      leadLP = cf(c, 'lowpass', two ? 2400 : 1700, 3, two ? grit(c, 2, leadBus) : leadBus),
+      padG = cg(c, 0, two ? cg(c, 0.65, padBus) : padBus), padLP = cf(c, 'lowpass', two ? 1300 : 900, 1, padG),
+      bass = mono(c, bassLP, ['sawtooth', 1, 1, 'sawtooth', 2, 0.3]),
+      lead = mono(c, leadLP, two ? ['pulse', 1, 1, 'sawtooth', 0.70711, 0.6] : ['pulse', 1, 1]),   // phase 2: doubled a tritone below
+      kick = mono(c, drumBus, ['sine', 1, 1, 'triangle', 2, 0.3]),
+      body = mono(c, snBus, ['triangle', 1, 0.5]),
+      sg = cg(c, 0.0001, snBus), vib = clfo(c, 5, 9), pads = [];
+    cnoise(c, white, cf(c, 'bandpass', 1800, 0.8, sg));
+    for (k = 0; k < lead.o.length; k++) vib.connect(lead.o[k].detune);
+    for (k = 0; k < 6; k++) pads.push(cosc(c, 'sawtooth', D3, k & 1 ? 7 : -7, 0.33, padLP));
+    if (two) clfo(c, 14, 0.35, padG.gain);                 // 14 Hz tremolo
+    function fx(n) { return two && ((n % 12) + 12) % 12 === 7 ? n - 1 : n; }   // Locrian: A -> A flat
+    function kk(tt, pk, short) { mnote(kick, 105, tt, short ? sd * 0.9 : 0.2, pk, 0.003, 0, 42, 0.09); }
+    function sn(tt, pk, short) {
+      env(sg.gain, tt, 0.002, short ? sd * 0.9 : 0.2, pk);
+      mnote(body, 200, tt, 0.09, pk * 0.6, 0.002, 0, 140, 0.08);
+    }
+    cseq(c, sd, t + 0.05, function (i, tt) {
+      var s = i & 15, bar = i >> 4, bi = bar & 3, b32 = bar & 31, blk = b32 >> 2, ph = form[blk],
+        fill = (b32 & 7) === 7, row = CHD[bi], q, n, len;
+      if (!s) {                                            // pad: glide to the bar's chord and swell
+        for (k = 0; k < 6; k++) pads[k].frequency.setTargetAtTime(D3 * st(fx(row[k >> 1])), tt, 0.02);
+        padG.gain.setTargetAtTime(0.3, tt, 0.015); padG.gain.setTargetAtTime(1, tt + 0.05, 0.3);
+        if (!(b32 & 7) || (ph < 0 && !(bar & 1)))          // the bell tolls on the long downbeats
+          fmBell(voice(bellBus, 0, 1), D4 * (ph < 0 && (bar & 2) ? st(fx(-5)) : 1), tt, 3.2, 0.7, 1.5);
+      }
+      if (two || !(s & 1)) {                               // bass: 8ths (16ths with an octave kick in phase 2)
+        n = (bi === 2 ? BASSC : BASS)[s >> 1];
+        if (two && (s & 7) === 7) n += 12;
+        mnote(bass, D2 * st(n), tt, sd * (two ? 0.9 : 1.7), two && (s & 1) ? 0.6 : 0.9, 0.004, 0.4);
+      }
+      if (ph >= 0 && !(s & 1)) {                           // lead
+        row = PH[ph][bi]; q = s >> 2; n = row[q];
+        if (STUT[blk] && two) {
+          while (q > 0 && row[q] === H) q--;
+          if (row[q] > X) mnote(lead, D4 * OCT[blk] * st(fx(row[q])), tt, 1.8 * sd, s & 2 ? 0.6 : 0.9, 0.008, 0.5);
+        } else if (!(s & 2) && n > X) {
+          len = 1; while (q + len < 4 && row[q + len] === H) len++;
+          mnote(lead, D4 * OCT[blk] * st(fx(n)), tt, (len * 4 - 0.4) * sd, 0.9, 0.012, 0.6);
+        }
+      }
+      if (two) {                                           // drums
+        if (!(s & 3) && !duck) kk(tt, 0.95);               // in Deathblow the heartbeat replaces the kick
+        if (s === 4 || s === 12) sn(tt, 0.8, fill && s === 12);
+        if ((bi & 1) && s === 14 && !duck) kk(tt, 0.6);
+        if (fill && s > 12) sn(tt, 0.3 + (s - 12) * 0.15, 1);
+      } else {
+        if (s === 0 || s === 8) kk(tt, 0.9);
+        if (s === 12 && (ph >= 0 || blk === 5)) sn(tt, 0.8);
+        if (bi === 3 && s === 14) kk(tt, 0.6, 1);
+        if (fill && (s === 10 || s === 11 || s === 15)) kk(tt, 0.55, s !== 11);
+      }
+    });
+  }
+  CUES.boss = function (c, t) { mkBoss(c, t, false); };
+  CUES.boss2 = function (c, t) { mkBoss(c, t, true); };
+
+  // Credits: the motif in D Dorian at 66 on a triangle; Dm - Em - Am - and at last D major.
+  var CCH = [[0, 3, 7, 12], [2, 5, 9, 14], [-5, 7, 10, 14], [0, 4, 7, 16]], CRT = [0, 2, 7, 0];
+  var CLD = [[0, 2, 3, 2], [0, H, -5, H], [-3, -5, -7, -5], [0, H, H, H]], CARP = [0, 4, 7, 12];
+  CUES.credits = function (c, t) {
+    var q = 60 / 66, k, pads = [], padG = cg(c, 0, cbus(c, 0.2, 0.6)),
+      lead = mono(c, cbus(c, 0.24, 0.55), ['triangle', 1, 1, 'sine', 2, 0.18]),
+      bass = mono(c, cbus(c, 0.3, 0.2), ['sine', 1, 1, 'triangle', 2, 0.3]),
+      vib = clfo(c, 4.5, 6);
+    for (k = 0; k < 4; k++) pads.push(cosc(c, 'sine', D3, k & 1 ? 4 : -4, 0.3 - k * 0.04, padG));
+    for (k = 0; k < 2; k++) vib.connect(lead.o[k].detune);
+    cseq(c, q, t + 0.05, function (i, tt) {
+      var s = i & 3, bi = (i >> 2) & 3, two = (i >> 4) & 1, row = CLD[bi], n, len;
+      if (!s) {
+        for (k = 0; k < 4; k++) pads[k].frequency.setTargetAtTime(D3 * st(CCH[bi][k]), tt, 0.08);
+        padG.gain.setTargetAtTime(0.5, tt, 0.05); padG.gain.setTargetAtTime(1, tt + 0.15, 0.6);
+        mnote(bass, D2 * st(CRT[bi]), tt, q * 3.8, 0.8, 0.03, 0.5);
+      }
+      if (two && bi === 3) { mnote(lead, D4 * st(CARP[s]), tt, q * 0.95, 0.85, 0.02, 0.6); return; }   // the major chord, spelled out
+      n = row[s];
+      if (n > X) {
+        len = 1; while (s + len < 4 && row[s + len] === H) len++;
+        mnote(lead, D4 * (two ? 2 : 1) * st(n), tt, (len - 0.08) * q, 0.9, 0.02, 0.6);
+      }
+    });
+  };
+
+  // ------------------------------------------------------------------ scheduler
+  function runSeqs(c, t) {
+    var i, q, n, d;
+    for (i = 0; i < c.seq.length; i++) {
+      q = c.seq[i];
+      if (q.next < t - 0.02) {                             // a late tick: skip what was missed, never burst
+        if (q.dur) { n = Math.ceil((t - q.next) / q.dur); q.step += n; q.next += n * q.dur; } else q.next = t;
+      }
+      n = 0;
+      while (q.next < t + LOOK && n++ < 8) {
+        d = 0;
+        try { d = q.fn(q.step, q.next > t ? q.next : t); } catch (e) { oops(e); }
+        q.step++; q.next += num(d, 0) > 0 ? d : (q.dur || 1);
+      }
+    }
+  }
+  function beat(t) {
+    var s = ctx.createBufferSource();
+    s.buffer = hbBuf; s.connect(hbGain); s.onended = srcEnd;
+    s.start(t); s.stop(t + 0.5);
+  }
+  function runHb(t) {
+    var n = 0;
+    if (hbNext < t - 0.02) hbNext = t + 0.02;
+    while (hbNext < t + LOOK && n++ < 4) {
+      if (!muted) beat(hbNext > t ? hbNext : t);
+      hbLast = hbNext; hbNext += 60 / hbBpm;
+    }
+  }
+  function tick() {
+    try {
+      if (!ready || held) return;
+      var t = now(), i;
+      for (i = dying.length - 1; i >= 0; i--) {
+        if (t >= dying[i].killAt) { dispose(dying[i]); dying.splice(i, 1); } else runSeqs(dying[i], t);
+      }
+      if (cue) runSeqs(cue, t);
+      if (hbBpm > 0) runHb(t);
+      if (!cue && !dying.length && hbBpm <= 0) stopTimer();
+    } catch (e) { oops(e); }
+  }
+  function startTimer() { if (timer === null && !held) timer = G.setInterval(tick, TICK); }
+  function stopTimer() { if (timer !== null) { G.clearInterval(timer); timer = null; } }
+
+  // ------------------------------------------------------------------ public API
+  function wake() {
+    if (!held && ctx.state && ctx.state !== 'running' && ctx.resume) quiet(ctx.resume());
+  }
+  function unlock() {                                      // iOS: a one-sample silent buffer inside the gesture
+    var s = ctx.createBufferSource();
+    s.buffer = ctx.createBuffer(1, 1, sr); s.connect(ctx.destination); s.onended = srcEnd;
+    s.start(now()); s.stop(now() + 0.05);
+  }
+  function build() {
+    var comp = ctx.createDynamicsCompressor(), pre, conv, i, SEND = [0, 0.12, 0.3, 0.6];
+    comp.threshold.value = -12; comp.knee.value = 8; comp.ratio.value = 14;
+    comp.attack.value = 0.002; comp.release.value = 0.2;
+    comp.connect(ctx.destination);
+    master = gainNode(muted ? 0 : MASTER, comp);
+    sfxBus = gainNode(1, master); musBus = gainNode(0.55, master);
+    musLP = biq('lowpass', 18000, 0.5, musBus);
+    revIn = gainNode(1);
+    musSendLP = biq('lowpass', 18000, 0.5, revIn);
+    pre = ctx.createDelay(0.1); pre.delayTime.value = 0.022;
+    conv = ctx.createConvolver(); conv.buffer = mkImpulse();
+    revIn.connect(pre); pre.connect(conv);
+    conv.connect(biq('lowpass', 4200, 0.5, gainNode(0.7, master)));
+    for (i = 0; i < 4; i++) { B[i] = gainNode(1, sfxBus); if (SEND[i]) B[i].connect(gainNode(SEND[i], revIn)); }
+    typeBus = gainNode(0.07, B[1]);
+    hbGain = gainNode(0.75, biq('lowpass', 300, 0.5, B[0]));
+    mkNoise();
+    typeBuf = mkType(180, 0.018, 0); type2Buf = mkType(90, 0.036, 1);
+    hbBuf = mkHeart(); pulse = mkPulse();
+  }
+  function init() {
+    if (failed) return;
+    if (ctx) { if (ready && ctx.state && ctx.state !== 'running') { unlock(); wake(); } return; }
+    var AC = G.AudioContext || G.webkitAudioContext, sv;
+    if (!AC) { failed = true; return; }
+    try {
+      ctx = new AC(); sr = ctx.sampleRate;
+      sv = R.Save && R.Save.data && R.Save.data.settings;
+      if (!mutedSet && sv) muted = !!sv.muted;
+      build();
+    } catch (e) { failed = true; oops(e); return; }
+    ready = true; A.ready = true; A.muted = muted;
+    unlock(); wake();
+    if (want) music(want, 1);
+    if (hbWant) heartbeat(hbWant);
+  }
+  function setMuted(b) {
+    muted = !!b; mutedSet = true; A.muted = muted;
+    if (ready) master.gain.setTargetAtTime(muted ? 0 : MASTER, now(), 0.01);   // ~30 ms, no click
+  }
+  function suspend() {
+    held = true;
+    if (!ready) return;
+    stopTimer();
+    if (ctx.suspend) quiet(ctx.suspend());
+  }
+  function resume() {
+    held = false;
+    if (!ready) return;
+    if (ctx.resume) quiet(ctx.resume());
+    if (cue || dying.length || hbBpm > 0) { startTimer(); tick(); }
+  }
+  function music(name, fade) {
+    if (name === undefined || name === '') name = null;
+    if (name !== null && !CUES[name]) return;
+    if (!ready) { want = name; return; }
+    if ((cue ? cue.name : null) === name) return;
+    var t = now(), c, old = cue;
+    fade = clamp(num(fade, 1), 0.02, 10);
+    wake();
+    if (old) {                                             // fade the old cue, then tear it down in tick()
+      cue = null;
+      old.out.gain.setTargetAtTime(0, t, fade / 4); old.send.gain.setTargetAtTime(0, t, fade / 4);
+      old.out.gain.setTargetAtTime(0, t + fade * 0.8, 0.02); old.send.gain.setTargetAtTime(0, t + fade * 0.8, 0.02);
+      old.killAt = t + fade + 0.1;
+      dying.push(old);
+      if (dying.length > 3) dispose(dying.shift());
+    }
+    if (name) {
+      c = newCue(name);
+      try { CUES[name](c, t); } catch (e) { dispose(c); c = null; oops(e); }
+      if (c) {
+        c.out.gain.setTargetAtTime(1, t, fade / 3); c.send.gain.setTargetAtTime(1, t, fade / 3);
+        cue = c;
+      }
+    }
+    startTimer();
+    if (!held) tick();
+  }
+  function heartbeat(bpm) {
+    bpm = num(bpm, 0); bpm = bpm > 0 ? clamp(bpm, 20, 240) : 0;
+    if (!ready) { hbWant = bpm; return; }
+    if (bpm === hbBpm) return;
+    var was = hbBpm, t = now(), d = bpm >= 90;
+    hbBpm = bpm;
+    if (d !== duck) { duck = d; lpTo(d ? 700 : 18000, t, 0.2); }   // Deathblow: the music sinks under the pulse
+    if (!bpm) return;
+    hbNext = was ? Math.max(t + 0.02, hbLast + 60 / bpm) : t + 0.03;
+    wake(); startTimer();
+    if (!held) runHb(t);
+  }
+  function oops(e) { try { if (A.onerror) A.onerror(e); } catch (x) {} }   // dev hook; audio never throws into the game
+  function safe(f) { return function (a, b) { try { return f(a, b); } catch (e) { oops(e); } }; }
+
+  var A = R.Audio = {
     ready: false,
     muted: false,
-    init: function () { R.Audio.ready = true; },
-    setMuted: function (b) { R.Audio.muted = !!b; },
-    suspend: noop,
-    resume: noop,
-    sfx: noop,          // (name, opts?)  opts: { vol, pitch }
-    music: noop,        // (name|null, fadeSec = 1)
-    heartbeat: noop     // (bpm|0)
+    init: safe(init),
+    setMuted: safe(setMuted),
+    suspend: safe(suspend),
+    resume: safe(resume),
+    sfx: safe(sfx),            // (name, opts?)  opts: { vol, pitch }; boon / rival_draft also take { n: 1..3 } or { rarity }
+    music: safe(music),        // (name|null, fadeSec = 1)
+    heartbeat: safe(heartbeat),// (bpm|0)
+    _dbg: function () { return { live: live, type: liveType, cue: cue ? cue.name : null, dying: dying.length, timer: timer !== null, hb: hbBpm }; }
   };
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
@@ -4118,7 +4848,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   var MOVES = R.MOVES || ['S', 'G', 'F'];
   var BEATS = R.BEATS || { S: 'F', G: 'S', F: 'G' };
 
-  var HIT_CAP = 8;          // max damage of a single exchange hit
+  var HIT_CAP = 6;          // max damage of a single exchange hit
   var STATUS_CAP = 3;       // fortify / focus cap
   var TENSION_MAX = 3;
   var BREAK_VALUE = 0.86;   // payoff value of one turn of guard break
@@ -5829,6 +6559,1376 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   R.Engine = E;
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
+// ---- scenes/_common.js ----
+// SHOW ME MY RIVAL — R.SceneKit: helpers shared by every menu scene.
+// ("_common" sorts before the other scene files, so it is loaded first.)
+//   layout()            -> { top, bottom, h } from E.safe (one reused object)
+//   Button / press / release   rect + label + pressed state, drawn with R.UI.button
+//   typer(maxW, maxLines)      typewriter line / bubble text
+//   scroll()                   vertical drag-to-scroll with inertia and clamped bounds
+//   boonInfo / unlockInfo / card / icon / detail   boon + unlock cards
+//   reel(unlocks)              the "UNLOCKED" card carousel on the death and victory screens
+//   dither, ramp, wrap, fill, ui, taunt, sfx, music, hex, topBar
+(function (R) {
+  'use strict';
+
+  var RAR_COL = { common: 7, uncommon: 25, rare: 30 };
+  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA' };
+  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28 };
+  var ARENA_SWATCH = { cathedral: [26, 28], blood_moon: [16, 18], pale_dawn: [7, 22] };
+  var BAYER = [0, 2, 3, 1];
+  var RAMP = [3, 5, 7, 8];                        // fade-in ramp for text on black (then the real colour)
+
+  var L = { top: 0, bottom: 320, h: 320 };
+
+  var K = {
+    C: { align: 'center' },
+    CS: { align: 'center', shadow: 1 },
+    RT: { align: 'right' },
+    RS: { align: 'right', shadow: 1 },
+    LS: { shadow: 1 },
+    C2: { align: 'center', scale: 2 },
+    C2S: { align: 'center', scale: 2, shadow: 1 },
+    RAR_COL: RAR_COL
+  };
+
+  function hex(i) { return R.Pal.hex[i]; }
+  function sfx(n, o) { if (R.Audio && R.Audio.sfx) R.Audio.sfx(n, o); }
+  function music(n, f) { if (R.Audio && R.Audio.music) R.Audio.music(n, f); }
+  function ui(k, d) { var u = R.Text && R.Text.ui; return (u && typeof u[k] === 'string' && u[k]) || d; }
+
+  // Template fill that never returns null: unknown variables are dropped.
+  function fill(tpl, vars) {
+    var s = null;
+    if (R.Text && R.Text.fill) { try { s = R.Text.fill(tpl, vars); } catch (e) { s = null; } }
+    if (typeof s === 'string' && s) return s;
+    return String(tpl).replace(/\{(\w+)\}/g, function (all, k) {
+      return vars && vars[k] !== undefined && vars[k] !== null ? String(vars[k]) : '';
+    });
+  }
+
+  // One Rival line. Always the cosmetic rng, never the gameplay stream.
+  function taunt(cat, extra) {
+    var G = R.Game;
+    if (!R.Text || !R.Text.taunt) return null;
+    var v = G && G.vars ? G.vars(extra) : (extra || {});
+    try { return R.Text.taunt(cat, v, G ? G.crng : null); } catch (e) { return null; }
+  }
+
+  function wrap(text, maxPx, maxLines) {
+    if (text === null || text === undefined || text === '') return [];
+    var ls = R.Font.wrap(String(text), maxPx);
+    if (maxLines && ls.length > maxLines) ls.length = maxLines;
+    return ls;
+  }
+
+  K.hex = hex; K.sfx = sfx; K.music = music; K.ui = ui; K.fill = fill; K.taunt = taunt; K.wrap = wrap;
+
+  // ------------------------------------------------------------------ layout
+  K.layout = function () {
+    var E = R.Engine;
+    L.top = E.safe.top | 0;
+    L.bottom = E.H - (E.safe.bottom | 0);
+    L.h = L.bottom - L.top;
+    return L;
+  };
+
+  // Menu chrome: a title strip under the safe inset. `right` is an optional right-aligned note.
+  K.topBar = function (g, title, right) {
+    g.fillStyle = hex(2); g.fillRect(0, 0, 180, L.top + 18);
+    g.fillStyle = hex(5); g.fillRect(0, L.top + 18, 180, 1);
+    R.Font.draw(g, title, right ? 6 : 90, L.top + 6, 21, right ? null : K.C);
+    if (right) R.Font.draw(g, right, 174, L.top + 6, 7, K.RT);
+  };
+
+  // Text colour for a fade-in on black: k = 0..1.
+  K.ramp = function (k, col) {
+    if (k >= 1) return col;
+    var i = Math.floor((k < 0 ? 0 : k) * 5);
+    return i >= RAMP.length ? col : RAMP[i];
+  };
+
+  // Ordered dither cover. level 0 = solid cover ... 4 = nothing drawn; `cell` = dither pixel size.
+  K.dither = function (g, x, y, w, h, level, cell, pal) {
+    var cx, cy, i, j, cw, chh;
+    if (level >= 4) return;
+    g.fillStyle = hex(pal || 1);
+    if (level <= 0) { g.fillRect(x, y, w, h); return; }
+    cell = cell > 0 ? cell : 1;
+    for (j = 0, cy = y; cy < y + h; j++, cy += cell) {
+      chh = cy + cell > y + h ? y + h - cy : cell;
+      for (i = 0, cx = x; cx < x + w; i++, cx += cell) {
+        if (BAYER[(j & 1) * 2 + (i & 1)] < level) continue;
+        cw = cx + cell > x + w ? x + w - cx : cell;
+        g.fillRect(cx, cy, cw, chh);
+      }
+    }
+  };
+
+  // ------------------------------------------------------------------ buttons
+  function Button(x, y, w, h, label, opts) {
+    this.x = x; this.y = y; this.w = w; this.h = h;
+    this.label = label || '';
+    this.id = (opts && opts.id) || null;
+    this.hidden = false;
+    this.st = {
+      pressed: false, disabled: !!(opts && opts.disabled), glow: !!(opts && opts.glow),
+      accent: (opts && opts.accent) || 0, icon: (opts && opts.icon) || null
+    };
+  }
+  Button.prototype.set = function (x, y, w, h) { this.x = x; this.y = y; this.w = w; this.h = h; return this; };
+  // Hit rect is never less than 20 px tall.
+  Button.prototype.hit = function (px, py) {
+    if (this.hidden) return false;
+    var y = this.y, h = this.h;
+    if (h < 20) { y -= (20 - h) >> 1; h = 20; }
+    return px >= this.x && px < this.x + this.w && py >= y && py < y + h;
+  };
+  Button.prototype.draw = function (g) {
+    if (!this.hidden) R.UI.button(g, this.x, this.y, this.w, this.h, this.label, this.st);
+  };
+  K.Button = function (x, y, w, h, label, opts) { return new Button(x, y, w, h, label, opts); };
+
+  // down: returns the button that took the press (or null).
+  K.press = function (list, px, py) {
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i];
+      if (!b.hidden && !b.st.disabled && b.hit(px, py)) { b.st.pressed = true; sfx('tick'); return b; }
+    }
+    return null;
+  };
+  // up: clears every pressed state; returns the button that was activated (released inside) or null.
+  K.release = function (list, px, py) {
+    var got = null;
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i];
+      if (b.st.pressed) {
+        b.st.pressed = false;
+        if (!b.hidden && !b.st.disabled && b.hit(px, py)) got = b;
+      }
+    }
+    return got;
+  };
+
+  // ------------------------------------------------------------------ typewriter
+  function Typer(maxW, maxLines) {
+    this.maxW = maxW; this.maxLines = maxLines || 3;
+    this.lines = []; this.vis = [];
+    this.n = 0; this.shown = -1; this.total = 0; this.acc = 0;
+    this.active = false; this.done = true; this.sticky = false; this.hold = 0;
+    this.w = 0;                                   // px width of the widest full line
+    this.blip = true;
+  }
+  // hold = seconds the finished text stays (ignored when sticky).
+  Typer.prototype.set = function (text, hold, sticky) {
+    if (!text) { this.clear(); return false; }
+    var ls = wrap(text, this.maxW, this.maxLines), i, w;
+    this.lines = ls; this.vis.length = 0;
+    this.total = 0; this.w = 0;
+    for (i = 0; i < ls.length; i++) {
+      this.total += ls[i].length;
+      w = R.Font.width(ls[i]); if (w > this.w) this.w = w;
+    }
+    this.n = 0; this.shown = -1; this.acc = 0;
+    this.active = true; this.done = false;
+    this.sticky = !!sticky; this.hold = hold === undefined || hold === null ? 1.9 : hold;
+    return true;
+  };
+  Typer.prototype.clear = function () { this.active = false; this.done = true; this.vis.length = 0; this.n = 0; this.shown = -1; };
+  Typer.prototype.skip = function () { if (this.active && !this.done) { this.n = this.total; this.done = true; } };
+  Typer.prototype.release = function (hold) { this.sticky = false; this.hold = hold === undefined ? 1.5 : hold; };
+  Typer.prototype.update = function (dt) {
+    if (!this.active) return;
+    if (!this.done) {
+      this.acc += dt;
+      while (this.acc >= 0.028 && this.n < this.total) {
+        this.acc -= 0.028; this.n++;
+        if (this.blip && (this.n & 1) === 0) sfx('type');
+      }
+      if (this.n >= this.total) this.done = true;
+    } else if (!this.sticky) {
+      this.hold -= dt;
+      if (this.hold <= 0) this.active = false;
+    }
+  };
+  // The lines as typed so far (one reused array; substrings are only cut when a character is added).
+  Typer.prototype.view = function () {
+    if (this.shown === this.n) return this.vis;
+    var left = this.n, i, ln;
+    this.vis.length = 0;
+    for (i = 0; i < this.lines.length && left > 0; i++) {
+      ln = this.lines[i];
+      this.vis.push(left >= ln.length ? ln : ln.substring(0, left));
+      left -= ln.length;
+    }
+    this.shown = this.n;
+    return this.vis;
+  };
+  K.typer = function (maxW, maxLines) { return new Typer(maxW, maxLines); };
+
+  // ------------------------------------------------------------------ vertical scroll
+  function Scroll() {
+    this.y = 0; this.max = 0; this.v = 0;
+    this.top = 0; this.h = 0;
+    this.drag = false; this.moved = false;
+    this.lastY = 0; this.startY = 0; this.prevY = 0;
+  }
+  Scroll.prototype.setBounds = function (viewTop, viewH, contentH) {
+    this.top = viewTop; this.h = viewH;
+    this.max = contentH > viewH ? contentH - viewH : 0;
+    if (this.y > this.max) this.y = this.max;
+    if (this.y < 0) this.y = 0;
+  };
+  Scroll.prototype.inView = function (px, py) { return py >= this.top && py < this.top + this.h; };
+  Scroll.prototype.down = function (px, py) {
+    if (!this.inView(px, py)) return false;
+    this.drag = true; this.moved = false; this.v = 0;
+    this.lastY = this.startY = py; this.prevY = this.y;
+    return true;
+  };
+  Scroll.prototype.move = function (px, py) {
+    if (!this.drag) return;
+    if (!this.moved && Math.abs(py - this.startY) > 3) this.moved = true;
+    if (this.moved) {
+      this.y -= py - this.lastY;
+      if (this.y < 0) this.y = 0; else if (this.y > this.max) this.y = this.max;
+    }
+    this.lastY = py;
+  };
+  // Returns true when the gesture was a drag (so the caller should not treat it as a tap).
+  Scroll.prototype.up = function () {
+    var was = this.drag && this.moved;
+    this.drag = false;
+    if (!was) this.v = 0;
+    return was;
+  };
+  Scroll.prototype.update = function (dt) {
+    if (dt <= 0) return;
+    if (this.drag) {
+      var inst = (this.y - this.prevY) / dt;
+      this.v = this.v * 0.55 + inst * 0.45;
+      this.prevY = this.y;
+      return;
+    }
+    if (this.v !== 0) {
+      this.y += this.v * dt;
+      this.v *= Math.pow(0.04, dt);
+      if (this.y <= 0) { this.y = 0; this.v = 0; }
+      else if (this.y >= this.max) { this.y = this.max; this.v = 0; }
+      else if (this.v > -5 && this.v < 5) this.v = 0;
+    }
+  };
+  Scroll.prototype.off = function () { return Math.round(this.y); };
+  // Thin position bar on the right edge of the view (only when there is something to scroll).
+  Scroll.prototype.drawBar = function (g) {
+    if (this.max <= 0) return;
+    var th = Math.max(10, Math.round(this.h * this.h / (this.h + this.max)));
+    var ty = this.top + Math.round((this.h - th) * (this.y / this.max));
+    g.fillStyle = hex(3); g.fillRect(177, this.top, 2, this.h);
+    g.fillStyle = hex(this.drag ? 25 : 6); g.fillRect(177, ty, 2, th);
+  };
+  K.scroll = function () { return new Scroll(); };
+
+  // ------------------------------------------------------------------ boon / unlock info (build in enter, never per frame)
+  // nameW = px available for the name on a card tile; detailW = px for desc/flavor lines.
+  K.boonInfo = function (id, nameW, detailW) {
+    var b = R.Boons && R.Boons.byId ? R.Boons.byId[id] : null;
+    var t = R.Text && R.Text.boon ? R.Text.boon[id] : null;
+    var name = (t && t.name) || (b && b.name) || String(id);
+    var rar = b && RAR_COL[b.rarity] ? b.rarity : 'common';
+    var tags = b && b.tags ? b.tags : [];
+    var relic = !!(b && b.relic);
+    var tagLine = relic ? 'RELIC' : rar.toUpperCase();
+    for (var i = 0; i < tags.length; i++) tagLine += ' · ' + tags[i];
+    return {
+      id: id, name: name, desc: b ? b.desc : '', flavor: (t && t.flavor) || '',
+      rarity: rar, rarCol: RAR_COL[rar], rarSprite: 'rar_' + rar,
+      icon: relic || !tags.length ? 'tag_relic' : 'tag_' + tags[0],
+      relic: relic, rival: !!(b && b.who === 'rival'), swatch: null,
+      tagLine: tagLine,
+      nameLines: wrap(name, nameW || 48, 3),
+      descLines: wrap(b ? b.desc : '', detailW || 164, 3),
+      flavorLines: wrap((t && t.flavor) || '', detailW || 164, 2)
+    };
+  };
+
+  // u = an R.Run.UNLOCKS entry (or the plain { id, type, ref, name, how } copy in R.Game.last.unlocks).
+  K.unlockInfo = function (u, howW, detailW) {
+    var T = R.Text || {}, tu = T.unlock ? T.unlock[u.id] : null, x;
+    var o = {
+      id: u.id, type: u.type, ref: u.ref, name: u.name || String(u.ref),
+      title: (tu && tu.name) || '', how: (tu && tu.how) || u.how || '',
+      icon: null, swatch: null, desc: '', rival: false, rarCol: 25,
+      typeLabel: TYPE_LABEL[u.type] || 'ITEM', typeCol: TYPE_COL[u.type] || 10,
+      nameLines: null, howLines: null, descLines: null
+    };
+    if (u.type === 'boon' || u.type === 'relic') {
+      x = K.boonInfo(u.ref, 48, detailW || 164);
+      o.name = x.name; o.icon = x.icon; o.desc = x.desc; o.rival = x.rival; o.rarCol = x.rarCol;
+      if (x.rival) { o.typeLabel = 'ITS BOON'; o.typeCol = 19; }
+    } else if (u.type === 'mask') {
+      x = T.masks ? T.masks[u.ref] : null;
+      if (x && x.name) o.name = x.name;
+      o.desc = (x && x.line) || ''; o.icon = 'mask_' + u.ref;
+    } else if (u.type === 'arena') {
+      x = T.arenas ? T.arenas[u.ref] : null;
+      if (x && x.name) o.name = x.name;
+      o.desc = (x && x.line) || ''; o.swatch = ARENA_SWATCH[u.ref] || ARENA_SWATCH.cathedral;
+    }
+    o.nameLines = wrap(o.name, 48, 3);
+    o.howLines = wrap(o.how, howW || 138, 2);
+    o.descLines = wrap(o.desc, detailW || 164, 3);
+    return o;
+  };
+
+  // 12x12 icon of a boonInfo / unlockInfo (arenas have no sprite: a two-tone palette swatch).
+  K.icon = function (g, o, x, y) {
+    if (o.icon) R.Art.sprite(g, o.icon, x, y);
+    else if (o.swatch) {
+      g.fillStyle = hex(1); g.fillRect(x, y, 12, 12);
+      g.fillStyle = hex(o.swatch[0]); g.fillRect(x + 1, y + 1, 10, 10);
+      g.fillStyle = hex(o.swatch[1]); g.fillRect(x + 4, y + 3, 4, 4);
+      g.fillStyle = hex(1); g.fillRect(x + 1, y + 8, 10, 1);
+    }
+  };
+
+  // Boon card. Tall tiles (h >= 30): icon + rarity pips on top, name centred below (up to 3 lines).
+  // Wide tiles (h < 30): icon left, name to its right (up to 2 lines).
+  // st: { sel:bool, dim:bool, pressed:bool, label:string (drawn instead of info, e.g. "NONE") }
+  K.card = function (g, x, y, w, h, info, st) {
+    x |= 0; y |= 0;
+    var sel = !!(st && st.sel), dim = !!(st && st.dim), i, n, ty, ink;
+    var E = R.Engine, on = sel && (Math.floor((E ? E.time : 0) * 3) & 1) === 0;
+    var frame = dim ? 5 : (info ? info.rarCol : 7);
+    if (st && st.pressed) y += 1;
+    g.fillStyle = hex(1); g.fillRect(x + 1, y, w - 2, h); g.fillRect(x, y + 1, w, h - 2);
+    g.fillStyle = hex(on ? 23 : frame); g.fillRect(x + 1, y + 1, w - 2, h - 2);
+    g.fillStyle = hex(dim ? 2 : 3); g.fillRect(x + 3, y + 3, w - 6, h - 6);
+    g.fillStyle = hex(dim ? 3 : (sel ? 5 : 4)); g.fillRect(x + 3, y + 3, w - 6, 1);
+    ink = dim ? 6 : 10;
+    if (!info) {
+      if (st && st.label) R.Font.draw(g, st.label, x + (w >> 1), y + ((h - 7) >> 1), ink, K.C);
+      return;
+    }
+    n = info.nameLines.length;
+    if (h >= 30) {
+      K.icon(g, info, x + 5, y + 4);
+      R.Art.sprite(g, info.rarSprite, x + w - 16, y + 8);
+      ty = y + (n >= 3 ? 16 : n === 2 ? 20 : 24);
+      for (i = 0; i < n; i++) R.Font.draw(g, info.nameLines[i], x + (w >> 1), ty + i * 9, ink, K.C);
+    } else {
+      K.icon(g, info, x + 4, y + ((h - 12) >> 1) - 1);
+      if (n > 2) n = 2;
+      ty = y + ((h - (n * 9 - 2)) >> 1);
+      for (i = 0; i < n; i++) R.Font.draw(g, info.nameLines[i], x + 20, ty + i * 9, ink);
+      R.Art.sprite(g, info.rarSprite, x + w - 15, y + h - 6);
+    }
+  };
+
+  // Detail panel body for a boonInfo: name, kind note, rarity + tags, exact desc, flavor.
+  // Draws inside (x, y, w); the caller draws the panel. Returns nothing; needs about 62 px of height.
+  K.detail = function (g, x, y, w, info, note, noteCol) {
+    var i, ty = y;
+    R.Font.draw(g, info.name, x, ty, info.rival ? 19 : 10);
+    if (note) R.Font.draw(g, note, x + w, ty, noteCol || 7, K.RT);
+    ty += 9;
+    R.Font.draw(g, info.tagLine, x, ty, info.rarCol);
+    R.Art.sprite(g, info.rarSprite, x + w - 11, ty + 2);
+    ty += 10;
+    for (i = 0; i < info.descLines.length; i++) { R.Font.draw(g, info.descLines[i], x, ty, 10); ty += 9; }
+    ty += 2;
+    for (i = 0; i < info.flavorLines.length; i++) { R.Font.draw(g, info.flavorLines[i], x, ty, 12); ty += 9; }
+  };
+
+  // ------------------------------------------------------------------ unlock reel (death / victory)
+  function Reel(unlocks) {
+    var i;
+    this.items = [];
+    for (i = 0; unlocks && i < unlocks.length && i < 12; i++) this.items.push(K.unlockInfo(unlocks[i], 138));
+    this.n = this.items.length;
+    this.shown = 0; this.cur = -1; this.flip = 9; this.cycle = 0;
+    this.header = '';
+    this.h = this.n ? 62 : 0;
+    this.title = ui('unlocked', 'UNLOCKED');
+  }
+  Reel.prototype.label = function () { this.header = this.n > 1 ? this.title + ' ' + (this.cur + 1) + '/' + this.n : this.title; };
+  // Flip the next card in. Returns false when there is nothing left.
+  Reel.prototype.reveal = function (quiet) {
+    if (this.shown >= this.n) return false;
+    this.cur = this.shown; this.shown++;
+    this.flip = 0; this.cycle = 0; this.label();
+    if (!quiet) { sfx('unlock'); if (R.Engine) R.Engine.buzz([10, 30, 10]); }
+    return true;
+  };
+  Reel.prototype.revealAll = function () {
+    if (this.shown >= this.n) return;
+    this.shown = this.n;
+    if (this.cur < 0) this.cur = 0;
+    this.flip = 0; this.cycle = 0; this.label();
+    sfx('unlock');
+  };
+  Reel.prototype.update = function (dt) {
+    if (!this.n || this.shown === 0) return;
+    this.flip += dt;
+    if (this.shown >= this.n && this.n > 1) {      // everything revealed: keep cycling so each can be read
+      this.cycle += dt;
+      if (this.cycle >= 2.8) { this.cycle = 0; this.cur = (this.cur + 1) % this.n; this.flip = 0; this.label(); }
+    }
+  };
+  Reel.prototype.draw = function (g, x, y) {
+    if (!this.n || this.shown === 0) return;
+    var it = this.items[this.cur], H = 36, cy = y + 10, k, hh, i, cx;
+    R.Font.draw(g, this.header, x + 86, y, 21, K.C);
+    k = this.flip < 0.2 ? Math.floor(this.flip / 0.05) : 4;
+    if (k < 4) {                                    // the flip: a bright sliver opening to full height
+      hh = Math.max(2, (H * (k + 1) / 5) | 0);
+      g.fillStyle = hex(1); g.fillRect(x, cy + ((H - hh) >> 1), 172, hh);
+      g.fillStyle = hex(k < 2 ? 23 : 22); g.fillRect(x + 1, cy + ((H - hh) >> 1) + 1, 170, hh - 2);
+    } else {
+      R.UI.panel(g, x, cy, 172, H, 'card');
+      K.icon(g, it, x + 7, cy + (it.type === 'mask' ? 6 : 7));
+      R.Font.draw(g, it.name, x + 26, cy + 5, 10);
+      R.Font.draw(g, it.typeLabel, x + 166, cy + 5, it.typeCol, K.RT);
+      for (i = 0; i < it.howLines.length; i++) R.Font.draw(g, it.howLines[i], x + 26, cy + 15 + i * 9, 8);
+    }
+    if (this.n > 1) {
+      cx = x + 86 - ((this.n * 8 - 3) >> 1);
+      for (i = 0; i < this.n; i++) {
+        g.fillStyle = hex(i === this.cur ? 22 : i < this.shown ? 25 : 5);
+        g.fillRect(cx + i * 8, y + 10 + H + 5, 5, 3);
+      }
+    }
+  };
+  K.reel = function (unlocks) { return new Reel(unlocks); };
+
+  R.SceneKit = K;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/bonfire.js ----
+// SHOW ME MY RIVAL — the bonfire: rest, the Rival drafts first (and says why), then the player picks.
+// The Rival's pick and both boon lists stay on screen while the player chooses: that is the counter-draft.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var memo = { key: null, step: 0 };           // which bonfire has already played its intro (dossier round trip)
+  var L = { top: 0, bottom: 320, btnY: 0, detY: 0, cardsY: 0, stripY: 0, floorY: 0, panelY: 0, header: false };
+  var PX = 44, RX = 136;                       // seated figures (centre x)
+  var DET_H = 66, CARD_H = 46, STRIP_H = 20;
+  var NOTE = { choice: '', pick: 'ITS PICK', own: 'YOURS', its: 'ITS' };
+  var NOTE_COL = { choice: 7, pick: 19, own: 28, its: 19 };
+
+  function layout() {
+    var b = K.layout(), n = S.cards.length, i, c, x0;
+    L.top = b.top; L.bottom = b.bottom;
+    L.btnY = b.bottom - 40;
+    L.detY = L.btnY - 3 - DET_H;
+    L.cardsY = L.detY - 2 - CARD_H;
+    L.stripY = L.cardsY - 3 - STRIP_H;
+    L.floorY = L.stripY - 36;
+    L.panelY = Math.max(b.top + 2, L.floorY - 78);
+    L.header = L.panelY - 11 >= b.top + 1;
+    if (n <= 3) {
+      x0 = (180 - (n * 56 + (n - 1) * 2)) >> 1;
+      for (i = 0; i < n; i++) { c = S.cards[i]; c.x = x0 + i * 58; c.y = L.cardsY; c.w = 56; c.h = CARD_H; }
+    } else {
+      for (i = 0; i < n; i++) { c = S.cards[i]; c.x = 4 + (i & 1) * 87; c.y = L.cardsY + (i >> 1) * 24; c.w = 85; c.h = 22; }
+    }
+    S.bDos.set(4, L.btnY, 56, 38);
+    S.bOk.set(64, L.btnY, 112, 38);
+    S.emberArea.x = 80; S.emberArea.y = L.floorY - 36; S.emberArea.w = 20; S.emberArea.h = 26;
+  }
+
+  // ------------------------------------------------------------------ small helpers
+  function floatText(text, x, y, col) {
+    var f = null, i;
+    for (i = 0; i < S.floats.length; i++) if (S.floats[i].life <= 0) { f = S.floats[i]; break; }
+    if (!f) { if (S.floats.length >= 6) return; f = { text: '', x: 0, y: 0, col: 10, life: 0 }; S.floats.push(f); }
+    f.text = String(text); f.x = x; f.y = y; f.col = col; f.life = 1.3;
+  }
+  function hpText() {
+    var n = Math.round(S.hpShown);
+    if (n !== S.hpN) { S.hpN = n; S.hpStr = n + '/' + S.hpMax; }
+  }
+  function setView(info, kind) { S.view = info; S.kind = kind; S.note = NOTE[kind]; S.noteCol = NOTE_COL[kind]; }
+
+  function* wait(sec) {
+    var until = S.clock + sec;
+    S.tapped = false;
+    yield function () { return !S || S.clock >= until || S.tapped; };
+    if (S) S.tapped = false;
+  }
+  function* sayWait(text, hold) {
+    if (!S.typer.set(text, 0, true)) return;
+    S.tapped = false;
+    yield function () { return !S || S.typer.done || S.tapped; };
+    S.typer.skip();
+    yield* wait(hold);
+  }
+
+  function rivalLine() {
+    var o = S.offer, v = { rivalBoon: S.rv.info.name }, t = null;
+    if (o.rivalWhy) t = K.taunt('bonfire_rival_pick_' + o.rivalWhy, v);
+    return t || K.taunt('bonfire_rival_pick', v);
+  }
+
+  // ------------------------------------------------------------------ the sequence
+  function* flow(skipIntro) {
+    var o = S.offer, T = (R.Text && R.Text.tutorial) || {}, i, c, e, n = 0;
+    if (!skipIntro) {
+      yield* wait(0.5);
+      // (a) the rest
+      if (o.healed > 0) {
+        K.sfx('heal'); E.buzz(10);
+        S.fx.burst('heal', PX, L.floorY - 14, 12);
+        floatText(K.fill(K.ui('healed', '+{n}'), { n: o.healed }), PX, L.floorY - 40, 22);
+        E.tween(S, 'hpShown', S.hp, 0.6);
+      }
+      for (i = 0; o.events && i < o.events.length; i++) {
+        e = o.events[i];
+        if (e && e.t === 'boon' && e.id && n < 3) { floatText(K.boonInfo(e.id, 48).name.toUpperCase(), 62, L.floorY - 52 - n * 9, 21); n++; }
+        else if (e && e.t === 'forget') { floatText('IT FORGETS', RX - 14, L.floorY - 44, 28); S.fx.burst('ash', RX, L.floorY - 24, 10); }
+      }
+      yield* wait(1.1);
+      // (b) the Rival drafts first
+      if (S.rv.info) {
+        if (S.firstEver && T.bonfire_first) yield* sayWait(T.bonfire_first, 0.8);
+        S.rv.shown = true; S.rv.rise = 0;
+        E.tween(S.rv, 'rise', 1, 0.45, 'out');
+        K.sfx('rival_draft'); E.buzz(12);
+        S.fx.burst('ember', 90, L.floorY - 16, 8);
+        yield* wait(0.5);
+        S.rv.text = true;
+        yield* sayWait(rivalLine(), 1.3);
+      }
+    }
+    // (c) the player's cards
+    S.hpShown = S.hp; S.banner = 9;
+    S.rv.shown = S.rv.text = !!S.rv.info;
+    if (!(S.rv.rise < 1 && S.rv.rise > 0)) S.rv.rise = 1;
+    for (i = 0; i < S.cards.length; i++) {
+      c = S.cards[i];
+      c.shown = true;
+      if (!skipIntro) {
+        c.oy = 10; E.tween(c, 'oy', 0, 0.2, 'out');
+        K.sfx('boon', { pitch: 1 + i * 0.06 });
+        yield 0.14;
+      }
+    }
+    S.step = 1; S.tapped = false;
+    memo.key = S.key; memo.step = 1;
+    if (!o.seen) { o.seen = true; G.save(); }       // a reload resumes at the card choice
+    if (!skipIntro && S.firstEver && T.bonfire_cards) S.typer.set(T.bonfire_cards, 2.6, false);
+    else if (S.typer.active) S.typer.release(1.6);
+  }
+
+  function* leave(card) {
+    var line = G.crng.chance(0.7) ? K.taunt('bonfire_player_pick', { boon: card.info.name }) : null;
+    K.sfx('select'); E.buzz(15);
+    S.fx.burst('ember', card.x + (card.w >> 1), card.y + 8, 10);
+    S.typer.clear();
+    yield 0.3;
+    if (line) yield* sayWait(line, 1.2);
+    else yield 0.25;
+    G.draft(card.info.id);
+  }
+
+  function confirm() {
+    if (S.step !== 1 || S.sel < 0) return;
+    var card = S.cards[S.sel];
+    if (S.view !== card.info) return;
+    S.step = 2;
+    E.co(function* () { yield* leave(card); });
+  }
+  function toDossier() {
+    if (S.step !== 1) return;
+    S.step = 3;
+    K.sfx('select');
+    E.go('dossier', S.dosArgs);
+  }
+
+  // ------------------------------------------------------------------ hit tests
+  function cardAt(x, y) {
+    for (var i = 0; i < S.cards.length; i++) {
+      var c = S.cards[i];
+      if (c.shown && x >= c.x && x < c.x + c.w && y >= c.y - 3 && y < c.y + c.h) return i;
+    }
+    return -1;
+  }
+  function pickAt(x, y) { return S.rv.text && x >= 4 && x < 176 && y >= L.panelY && y < L.panelY + 44; }
+  // >= 0: the player's boon i; <= -2: the Rival's boon (-2 - j); -1: nothing.
+  function stripAt(x, y) {
+    if (y < L.stripY || y >= L.stripY + STRIP_H) return -1;
+    if (x >= 4 && x < 4 + S.pStrip.length * 13) return ((x - 4) / 13) | 0;
+    if (x < 176 && x >= 176 - S.rStrip.length * 13) return -2 - (((175 - x) / 13) | 0);
+    return -1;
+  }
+
+  // ------------------------------------------------------------------ drawing
+  function drawGround(g) {
+    var y = L.floorY + 9;
+    R.UI.bar(g, 6, y, 62, 7, S.hpShown / S.hpMax, S.hpShown / S.hpMax, 18, S.barOpts);
+    R.Font.draw(g, S.hpStr, 72, y, 10, K.LS);
+    R.Font.draw(g, S.nextA, 174, y, 8, K.RS);
+    if (S.nextB) R.Font.draw(g, S.nextB, 174, y + 10, 21, K.RS);
+  }
+
+  function drawPick(g) {
+    var rv = S.rv, k, x, y, i;
+    if (!rv.shown) return;
+    k = rv.rise;
+    x = Math.round(62 + (120 - 62) * k); y = Math.round(L.floorY - 48 + (L.panelY - (L.floorY - 48)) * k);
+    if (rv.text) {
+      if (L.header) R.Font.draw(g, S.pickHead, 90, L.panelY - 10, 19, K.CS);
+      R.UI.panel(g, 4, L.panelY, 114, 44, 'dark');
+      R.Font.draw(g, rv.info.name, 9, L.panelY + 4, 19);
+      for (i = 0; i < rv.desc.length; i++) R.Font.draw(g, rv.desc[i], 9, L.panelY + 14 + i * 9, 10);
+    }
+    S.cst.sel = S.view === rv.info; S.cst.dim = false; S.cst.pressed = S.pressPick;
+    K.card(g, x, y, 56, 44, rv.info, S.cst);
+  }
+
+  function drawStrip(g) {
+    var y = L.stripY, i, x, info, np = S.pStrip.length, nr = S.rStrip.length;
+    var blink = (Math.floor(S.clock * 2.5) & 1) === 0;
+    g.fillStyle = K.hex(2); g.fillRect(0, y, 180, E.H - y);
+    g.fillStyle = K.hex(5); g.fillRect(0, y, 180, 1);
+    g.fillStyle = K.hex(3); g.fillRect(0, y + STRIP_H - 1, 180, 1);
+    for (i = 0; i < np; i++) {
+      info = S.pStrip[i]; x = 4 + i * 13;
+      if (S.view === info) { g.fillStyle = K.hex(5); g.fillRect(x - 1, y + 2, 14, 16); }
+      K.icon(g, info, x, y + 3);
+      g.fillStyle = K.hex(28); g.fillRect(x + 1, y + 16, 10, 1);
+    }
+    for (i = 0; i < nr; i++) {
+      info = S.rStrip[i]; x = 164 - i * 13;
+      if (S.view === info) { g.fillStyle = K.hex(5); g.fillRect(x - 1, y + 2, 14, 16); }
+      K.icon(g, info, x, y + 3);
+      g.fillStyle = K.hex(i === nr - 1 && blink ? 23 : 18); g.fillRect(x + 1, y + 16, 10, 1);
+    }
+    if (np + nr <= 9) {
+      R.Font.draw(g, 'YOU', 6 + np * 13, y + 7, 6);
+      R.Font.draw(g, 'IT', 174 - nr * 13, y + 7, 6, K.RT);
+    }
+  }
+
+  function drawCards(g) {
+    var i, c, st = S.cst;
+    for (i = 0; i < S.cards.length; i++) {
+      c = S.cards[i];
+      if (!c.shown) continue;
+      st.sel = i === S.sel; st.pressed = i === S.pressCard;
+      st.dim = S.step === 2 && i !== S.sel;
+      K.card(g, c.x, c.y + Math.round(c.oy) - (st.sel ? (c.h >= 30 ? 3 : 1) : 0), c.w, c.h, c.info, st);
+    }
+  }
+
+  function drawDetail(g) {
+    var i;
+    R.UI.panel(g, 4, L.detY, 172, DET_H, 'dark');
+    if (S.view) { K.detail(g, 10, L.detY + 5, 160, S.view, S.note, S.noteCol); return; }
+    if (S.step < 1) return;
+    R.Font.draw(g, S.pickOne, 90, L.detY + 14, 21, K.C);
+    for (i = 0; i < S.hint.length; i++) R.Font.draw(g, S.hint[i], 90, L.detY + 28 + i * 9, 8, K.C);
+  }
+
+  var scene = {
+    enter: function () {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      var run = G.run, o = run && run.offer, mem = (G.meta && G.meta.memory) || {}, i, skip, key, next, names;
+      if (!run || !o) { S = null; E.go('title'); return; }
+      key = run.seed + ':' + (o.bonfire || run.duelN);
+      skip = (memo.key === key && memo.step >= 1) || !!o.seen;
+      next = (o.bonfire || run.duelN) + 1;
+      names = (R.Text && R.Text.duelNames) || [];
+      S = {
+        clock: 0, step: 0, tapped: false, key: key, offer: o,
+        firstEver: (mem.runs | 0) <= 1 && (mem.deaths | 0) === 0 && (mem.wins | 0) === 0 && (o.bonfire || run.duelN) === 1,
+        cards: [], sel: -1, view: null, kind: '', note: '', noteCol: 7,
+        pressCard: -1, pressPick: false, pressStrip: -1,
+        rv: { info: o.rivalPick ? K.boonInfo(o.rivalPick, 48, 160) : null, desc: null, shown: false, text: false, rise: 0 },
+        pStrip: [], rStrip: [],
+        hp: run.pHp, hpMax: Math.max(1, run.pMaxHp), hpShown: skip ? run.pHp : Math.max(0, run.pHp - (o.healed || 0)), hpN: -1, hpStr: '',
+        barOpts: { ticks: Math.max(1, run.pMaxHp) },
+        nextA: 'NEXT: DUEL ' + next, nextB: names[next - 1] ? String(names[next - 1]).toUpperCase() : '',
+        banner: skip ? 9 : 0, restText: K.ui('rest', 'REST'),
+        pickHead: K.ui('itChoosesFirst', 'IT CHOOSES FIRST'), pickOne: K.ui('pickOne', 'PICK ONE'),
+        hint: K.wrap('Tap a card to read it. Its pick is above.', 160, 2),
+        typer: K.typer(164, 3), fx: R.FX.create(160), floats: [],
+        emberArea: { x: 80, y: 0, w: 20, h: 26 }, bgOpts: { floorY: 0 }, dosArgs: { from: 'bonfire' },
+        cst: { sel: false, dim: false, pressed: false, label: null },
+        bDos: K.Button(4, 0, 56, 38, K.ui('dossier', 'DOSSIER')),
+        bOk: K.Button(64, 0, 112, 38, K.ui('confirm', 'CONFIRM')),
+        btns: null
+      };
+      S.btns = [S.bDos, S.bOk];
+      if (S.rv.info) S.rv.desc = K.wrap(S.rv.info.desc, 104, 3);
+      for (i = 0; o.choices && i < o.choices.length && i < 4; i++) {
+        S.cards.push({ info: K.boonInfo(o.choices[i], o.choices.length > 3 ? 60 : 48, 160), x: 0, y: 0, w: 56, h: CARD_H, oy: 0, shown: false });
+      }
+      for (i = 0; i < run.pBoons.length && i < 7; i++) S.pStrip.push(K.boonInfo(run.pBoons[i], 48, 160));
+      for (i = 0; i < run.rBoons.length && i < 6; i++) {
+        S.rStrip.push(run.rBoons[i] === o.rivalPick && S.rv.info ? S.rv.info : K.boonInfo(run.rBoons[i], 48, 160));
+      }
+      layout();
+      hpText();
+      S.fx.ambient('ember', 7, S.emberArea);
+      K.music('bonfire', 1.2);
+      E.co(function* () { yield* flow(skip); });
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      var i, f;
+      S.clock += dt;
+      if (S.banner < 9) S.banner += dt;
+      S.typer.update(dt);
+      S.fx.update(dt);
+      hpText();
+      for (i = 0; i < S.floats.length; i++) { f = S.floats[i]; if (f.life > 0) { f.life -= dt; f.y -= 12 * dt; } }
+      S.bOk.st.disabled = !(S.step === 1 && S.sel >= 0 && S.view === S.cards[S.sel].info);
+      S.bOk.st.glow = !S.bOk.st.disabled;
+      S.bDos.st.disabled = S.step !== 1;
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i, f;
+      S.bgOpts.floorY = L.floorY;
+      R.Art.bg(g, 'bonfire', S.clock, S.bgOpts);
+      R.Art.sprite(g, 'bonfire_player', PX - 16, L.floorY - 32);
+      R.Art.sprite(g, 'bonfire_rival', RX - 16, L.floorY - 32);
+      S.fx.draw(g);
+      drawGround(g);
+      drawPick(g);
+      drawStrip(g);
+      drawCards(g);
+      drawDetail(g);
+      S.bDos.draw(g); S.bOk.draw(g);
+      if (S.typer.active) R.UI.bubble(g, 4, L.floorY + 6, 172, S.typer.view(), RX - 2, 'up');
+      for (i = 0; i < S.floats.length; i++) {
+        f = S.floats[i];
+        if (f.life > 0 && (f.life > 0.3 || (Math.floor(f.life * 30) & 1))) R.Font.draw(g, f.text, Math.round(f.x), Math.round(f.y), f.col, K.CS);
+      }
+      if (S.banner < 1.5 && !S.rv.shown && (S.banner < 1.2 || (Math.floor(S.banner * 20) & 1))) {
+        R.Font.draw(g, S.restText, 90, L.top + 8, 22, K.C2S);
+      }
+    },
+    down: function (x, y) {
+      if (!S) return;
+      if (S.step !== 1) { S.tapped = true; return; }
+      if (K.press(S.btns, x, y)) return;
+      S.pressCard = cardAt(x, y);
+      if (S.pressCard >= 0) { K.sfx('tick'); return; }
+      if (pickAt(x, y)) { S.pressPick = true; return; }
+      S.pressStrip = stripAt(x, y);
+    },
+    up: function (x, y) {
+      if (!S) return;
+      var b = K.release(S.btns, x, y), c, s;
+      if (S.step === 1) {
+        if (b === S.bOk) confirm();
+        else if (b === S.bDos) toDossier();
+        else if (S.pressCard >= 0) {
+          c = cardAt(x, y);
+          if (c === S.pressCard) { S.sel = c; setView(S.cards[c].info, 'choice'); E.buzz(6); }
+        } else if (S.pressPick) {
+          if (pickAt(x, y)) { K.sfx('tick'); setView(S.rv.info, 'pick'); }
+        } else if (S.pressStrip !== -1) {
+          s = stripAt(x, y);
+          if (s === S.pressStrip) {
+            K.sfx('tick');
+            if (s >= 0) setView(S.pStrip[s], 'own');
+            else { c = S.rStrip[-2 - s]; setView(c, c === S.rv.info ? 'pick' : 'its'); }
+          }
+        }
+      }
+      S.pressCard = -1; S.pressPick = false; S.pressStrip = -1;
+    },
+    key: function (k) {
+      if (!S) return;
+      if (S.step !== 1) { S.tapped = true; return; }
+      var i = k === 'S' ? 0 : k === 'G' ? 1 : k === 'F' ? 2 : -1;
+      if (i >= 0 && i < S.cards.length) { S.sel = i; setView(S.cards[i].info, 'choice'); K.sfx('tick'); }
+      else if (k === 'OK') confirm();
+    },
+    pause: function () { if (S && G) G.save(); },
+    back: function () { if (S) S.tapped = true; }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.bonfire = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/credits.js ----
+// SHOW ME MY RIVAL — end credits. Earned on the first win; replayable from settings.
+// A slow roll over the dawn cathedral (22 s), then the one real credit alone on screen, then the
+// Rival's last word. Everything in the roll is in-fiction; the only real credit is R.Text.ui.credit.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var ROLL_T = 22;                               // seconds the roll takes, whatever the screen height
+
+  // ------------------------------------------------------------------ roll content (built once)
+  function add(it, gapAfter) { it.y = S.contentH; S.items.push(it); S.contentH += it.h + (gapAfter || 0); }
+  function text(str, col, gapAfter) {
+    var ls = K.wrap(str, 164, 4);
+    if (ls.length) add({ t: 'text', h: ls.length * 9, lines: ls, col: col }, gapAfter);
+  }
+  function cast(role, detail, foot) {
+    var fl = foot ? K.wrap('* ' + foot, 160, 3) : [];
+    add({ t: 'cast', h: 21 + (fl.length ? 4 + fl.length * 9 : 0), role: role, lines: K.wrap(detail, 164, 2), foot: fl }, 24);
+  }
+
+  function build() {
+    var mem = (G.meta && G.meta.memory) || {}, T = R.Text || {};
+    var deaths = mem.deaths | 0, runs = mem.runs | 0, wins = mem.wins | 0, turns = mem.totalTurns | 0;
+    var vars = G.vars ? G.vars() : {}, pool = (T.taunts && T.taunts.credits_footnotes) || [], notes = [], i, s, last;
+    if (vars.deaths === undefined) vars.deaths = deaths;
+    if (vars.runs === undefined) vars.runs = runs;
+    if (vars.wins === undefined) vars.wins = wins;
+    for (i = 0; i < pool.length; i++) {
+      s = null;
+      try { s = T.fill ? T.fill(pool[i], vars) : null; } catch (e) { s = null; }
+      if (s) notes.push(s);
+    }
+    last = notes.length ? notes.pop() : "You may go now. You won't.";
+    if (notes.length > 1 && G.crng && G.crng.shuffle) G.crng.shuffle(notes);
+    S.finalLine = last;
+
+    S.items.length = 0; S.contentH = 0;
+    add({ t: 'logo', h: 34 }, 30);
+    text('What burns here comes back as ash.', 11, 3);
+    text('What dies here comes back.', 11, 40);
+    text('IN ORDER OF DISAPPEARANCE', 21, 18);
+    cast('THE RIVAL', 'as itself', notes[0]);
+    cast('YOU', deaths + (deaths === 1 ? ' death, ' : ' deaths, ') + runs + (runs === 1 ? ' attempt' : ' attempts'), notes[1]);
+    cast('THE MASK', wins > 1 ? 'broken ' + wins + ' times' : wins === 1 ? 'broken once' : 'unbroken', notes[2]);
+    cast('YOUR HABITS', turns + (turns === 1 ? ' move, noted' : ' moves, every one noted'), notes[3]);
+    if (notes[4]) text(notes[4], 12, 0);
+  }
+
+  function layout() {
+    var L = K.layout();
+    S.top = L.top; S.bottom = L.bottom; S.h = L.h;
+    S.floorY = L.top + Math.round(L.h * 0.62);
+    S.speed = (L.h + S.contentH) / ROLL_T;
+  }
+
+  function leave() {
+    if (S.leaving) return;
+    S.leaving = true;
+    if (S.from === 'settings') E.go('settings', S.backArgs, 0.5);
+    else E.go('title', null, 0.8);
+  }
+
+  function* flow() {
+    yield function () { return !S || S.roll >= S.h + S.contentH; };
+    S.phase = 1; S.pt = 0;                       // the credit, alone
+    yield 4.8;
+    S.phase = 2; S.pt = 0;                       // the Rival's last word
+    S.typer.set(S.finalLine, 0, true);
+    yield function () { return !S || S.typer.done; };
+    yield 1.6;
+    S.phase = 3; S.pt = 0;                       // "It will remember."
+    K.sfx('bell', { pitch: 0.7 });
+    yield 3.0;
+    leave();
+  }
+
+  function tap() {
+    if (S.leaving) return;
+    if (S.hint > 0 && S.clock >= 3) { K.sfx('back'); leave(); return; }
+    S.hint = 2.5;
+  }
+
+  // fade k for a phase that ramps in over 0.6 s and (if out > 0) back out before `out`
+  function fade(t, out) {
+    var k = t / 0.6;
+    if (out > 0 && t > out - 0.6) k = (out - t) / 0.6;
+    return k < 0 ? 0 : k > 1 ? 1 : k;
+  }
+
+  function drawItem(g, it, y) {
+    var i;
+    if (it.t === 'logo') { R.Art.sprite(g, 'logo', 30, y); return; }
+    if (it.t === 'text') {
+      for (i = 0; i < it.lines.length; i++) R.Font.draw(g, it.lines[i], 90, y + i * 9, it.col, K.CS);
+      return;
+    }
+    R.Font.draw(g, it.role, 90, y, 10, K.CS);
+    for (i = 0; i < it.lines.length && i < 1; i++) R.Font.draw(g, it.lines[i], 90, y + 11, 8, K.CS);
+    for (i = 0; i < it.foot.length; i++) R.Font.draw(g, it.foot[i], 90, y + 25 + i * 9, 19, K.CS);
+  }
+
+  var scene = {
+    enter: function (args) {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      S = {
+        clock: 0, roll: 0, phase: 0, pt: 0, hint: 0, leaving: false,
+        from: (args && args.from) || 'victory', backArgs: { from: (args && args.back) || 'title' },
+        top: 0, bottom: 320, h: 320, floorY: 200, speed: 30,
+        items: [], contentH: 0, finalLine: '',
+        credit: K.ui('credit', 'Developed by tangoSHELL · 2026'),
+        remember: K.ui('willRemember', 'It will remember.'),
+        skipHint: K.ui('tapAgainSkip', 'tap again to skip'),
+        typer: K.typer(160, 3), fx: R.FX.create(120),
+        bgOpts: { arena: 'pale_dawn', floorY: 0, variant: 1, gutter: 0, phase2: false }
+      };
+      build();
+      layout();
+      if (G.meta) G.meta.seenCredits = true;
+      if (G.save) G.save();
+      S.fx.ambient('ash', 5);
+      K.music('credits', 1.5);
+      E.co(function* () { yield* flow(); });
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt; S.pt += dt;
+      if (S.phase === 0) S.roll += S.speed * dt;
+      if (S.hint > 0) S.hint -= dt;
+      S.typer.update(dt);
+      S.fx.update(dt);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i, it, y, y0, k, lines, x, mid = S.top + (S.h >> 1);
+      S.bgOpts.floorY = S.floorY;
+      R.Art.bg(g, 'cathedral', S.clock, S.bgOpts);
+      S.fx.draw(g);
+
+      if (S.phase === 0) {
+        y0 = S.bottom - Math.floor(S.roll);                       // pixel-snapped
+        for (i = 0; i < S.items.length; i++) {
+          it = S.items[i]; y = y0 + it.y;
+          if (y > S.bottom || y + it.h < S.top - 2) continue;
+          drawItem(g, it, y);
+        }
+      } else if (S.phase === 1) {
+        k = fade(S.pt, 4.8);
+        if (k > 0) {
+          g.fillStyle = K.hex(1); g.fillRect(0, mid - 14, 180, 27);
+          g.fillStyle = K.hex(K.ramp(k, 24)); g.fillRect(0, mid - 14, 180, 1); g.fillRect(0, mid + 12, 180, 1);
+          R.Font.draw(g, S.credit, 90, mid - 4, K.ramp(k, 10), K.C);
+        }
+      } else {
+        if (S.typer.active) {
+          lines = S.typer.view();
+          x = 90 - (S.typer.w >> 1);
+          for (i = 0; i < lines.length; i++) R.Font.draw(g, lines[i], x, mid - 24 + i * 9, 10, K.LS);
+        }
+        if (S.phase === 3) R.Font.draw(g, S.remember, 90, mid + 12, K.ramp(fade(S.pt, 0), 19), K.CS);
+      }
+
+      if (S.hint > 0) R.Font.draw(g, S.skipHint, 90, S.bottom - 12, 7, K.CS);
+    },
+    down: function () { if (S) tap(); },
+    key: function () { if (S) tap(); },
+    back: function () { if (S) tap(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.credits = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/death.js ----
+// SHOW ME MY RIVAL — YOU DIED. Entered on black, after the duel scene has played the death and faded.
+// Timeline (DESIGN 14): black -> "YOU DIED" dithers in, spacing widens -> the Rival's parting line ->
+// what it learned this run -> unlock cards -> TAP TO RISE. First tap fast-forwards; the exit tap is
+// only taken 1.2 s after the first text is on screen.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var SCALE3 = { scale: 3 };
+
+  function* wait(sec) {
+    var until = S.clock + sec;
+    yield function () { return !S || S.skip || S.clock >= until; };
+  }
+  function markText() { if (S.firstText < 0) S.firstText = S.clock; }
+
+  function* flow() {
+    var i;
+    yield* wait(0.5);
+    S.died = 0.0001;
+    K.sfx('you_died'); E.buzz(200);
+    yield* wait(2.5);
+    S.sub = true; markText();
+    if (S.typer.set(S.parting, 0, true)) {
+      yield function () { return !S || S.skip || S.typer.done; };
+      yield* wait(1.0);
+    }
+    for (i = 0; i < S.ins.length; i++) {
+      S.insN = i + 1; S.ins[i].t = 0;
+      if (!S.skip) K.sfx('tick', { pitch: 0.8 });
+      yield* wait(0.3);
+    }
+    if (S.ins.length) yield* wait(0.6);
+    while (!S.skip && S.reel.shown < S.reel.n) {
+      S.reel.reveal();
+      yield* wait(1.5);
+    }
+    finish();
+  }
+
+  // Everything on screen, final state.
+  function finish() {
+    var i;
+    if (S.died < 3) S.died = 3;
+    S.sub = true; markText();
+    if (S.parting && !S.typer.active) S.typer.set(S.parting, 0, true);
+    S.typer.skip();
+    S.insN = S.ins.length;
+    for (i = 0; i < S.ins.length; i++) if (S.ins[i].t < 0) S.ins[i].t = 1;
+    S.reel.revealAll();
+    S.done = true;
+  }
+
+  function canLeave() { return S.done && S.firstText >= 0 && S.clock >= S.firstText + 1.2; }
+
+  function tap() {
+    if (S.leaving) return;
+    if (!S.done) { S.skip = true; return; }             // the coroutine runs out on the next frame
+    if (!canLeave()) return;
+    S.leaving = true;
+    K.sfx('select');
+    E.go('title', null, 0.4);
+  }
+
+  function layout() {
+    var L = K.layout(), y, i;
+    S.top = L.top; S.bottom = L.bottom;
+    y = L.top + 58;
+    S.partY = y;
+    y += Math.max(1, S.partN) * 9 + 8;
+    S.insY = y;
+    if (S.ins.length) {
+      y += 11;
+      for (i = 0; i < S.ins.length; i++) { S.ins[i].y = y; y += S.ins[i].lines.length * 9 + 4; }
+      y += 4;
+    }
+    S.reelY = Math.min(y, L.bottom - 20 - S.reel.h);
+  }
+
+  var scene = {
+    enter: function () {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      var last = G.last || {}, T = R.Text || {}, i, st, s, text, chars = [], widths = [], total = 0, ex, cat;
+      var duel = last.duel | 0 || 1, score = Math.max(0, Math.min(100, Math.round(last.score || 0)));
+      ex = { duel: duel, rivalHp: last.rivalHp | 0, turns: last.turns | 0, score: score, hp: 0 };
+      cat = duel === 1 ? 'player_death_duel1' : duel === 7 ? 'player_death_final' : (last.rivalHp | 0) <= 2 ? 'player_death_close' : 'player_death';
+      text = K.ui('youDied', 'YOU DIED');
+      for (i = 0; i < text.length; i++) { chars.push(text.charAt(i)); widths.push(R.Font.width(text.charAt(i), 3)); total += widths[i]; }
+      S = {
+        clock: 0, skip: false, done: false, leaving: false, firstText: -1,
+        top: 0, bottom: 320, partY: 0, insY: 0, reelY: 0,
+        died: 0, chars: chars, widths: widths, wSum: total, sub: false,
+        subLine: 'DUEL ' + duel + ' / 7 · PREDICTABILITY ' + score,
+        parting: K.taunt(cat, ex) || K.taunt('player_death', ex) || '...',
+        partN: 0, typer: K.typer(164, 3),
+        ins: [], insN: 0, insHead: K.ui('learned', 'WHAT I LEARNED'),
+        reel: K.reel(last.unlocks || []),
+        rise: K.ui('tapToRise', 'TAP TO RISE'),
+        fx: R.FX.create(80)
+      };
+      S.partN = K.wrap(S.parting, 164, 3).length;
+      for (i = 0; last.insights && i < last.insights.length && i < 3; i++) {
+        st = last.insights[i]; s = null;
+        try { s = T.taunt && T.tauntVars ? T.taunt('learned_lines', T.tauntVars(st), G.crng) : null; } catch (e) { s = null; }
+        if (!s) { try { s = T.dossierLine ? T.dossierLine(st) : null; } catch (e2) { s = null; } }
+        if (s) S.ins.push({ lines: K.wrap(s, 156, 3), y: 0, t: -1 });
+      }
+      layout();
+      S.fx.ambient('ash', 2);
+      K.music('death', 1.5);
+      E.co(function* () { yield* flow(); });
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      var i;
+      S.clock += dt;
+      if (S.died > 0) S.died += dt;
+      S.typer.update(dt);
+      S.reel.update(dt);
+      S.fx.update(dt);
+      for (i = 0; i < S.insN; i++) if (S.ins[i].t >= 0 && S.ins[i].t < 1) S.ins[i].t = Math.min(1, S.ins[i].t + dt * 4);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i, j, x, y, it, lines, gap, w, level, dx;
+      g.fillStyle = K.hex(1); g.fillRect(0, 0, 180, E.H);
+      S.fx.draw(g);
+
+      // YOU DIED: dithers in over 4 steps while the letter spacing widens for 2 s
+      if (S.died > 0) {
+        gap = 3 + Math.min(4, Math.floor(S.died * 2));              // 3 -> 7 px between glyphs
+        w = S.wSum + (S.chars.length - 1) * gap;
+        x = 90 - (w >> 1); y = S.top + 16;
+        for (i = 0; i < S.chars.length; i++) {
+          if (S.chars[i] !== ' ') R.Font.draw(g, S.chars[i], x, y, 18, SCALE3);
+          x += S.widths[i] + gap;
+        }
+        level = Math.floor(S.died / 0.225) + 1;
+        if (level < 4) K.dither(g, 90 - (w >> 1), y, w, 24, level, 3, 1);
+        g.fillStyle = K.hex(16); g.fillRect(90 - (w >> 1), y + 27, level >= 4 ? w : 0, 1);
+      }
+      if (S.sub) R.Font.draw(g, S.subLine, 90, S.top + 46, 7, K.C);
+
+      // the parting line, typed on black
+      if (S.typer.active) {
+        lines = S.typer.view();
+        x = 90 - (S.typer.w >> 1);
+        for (i = 0; i < lines.length; i++) R.Font.draw(g, lines[i], x, S.partY + i * 9, 10);
+      }
+
+      // what it learned
+      if (S.insN > 0) {
+        R.Font.draw(g, S.insHead, 8, S.insY, 18);
+        for (i = 0; i < S.insN; i++) {
+          it = S.ins[i];
+          if (it.t < 0) continue;
+          dx = Math.round((1 - it.t) * 12);
+          g.fillStyle = K.hex(17); g.fillRect(8 + dx, it.y, 1, it.lines.length * 9 - 2);
+          for (j = 0; j < it.lines.length; j++) R.Font.draw(g, it.lines[j], 13 + dx, it.y + j * 9, K.ramp(it.t, 11));
+        }
+      }
+
+      S.reel.draw(g, 4, S.reelY);
+
+      if (S.done && canLeave() && (Math.floor(S.clock * 1.7) & 1) === 0) R.Font.draw(g, S.rise, 90, S.bottom - 14, 10, K.C);
+    },
+    down: function () { if (S) tap(); },
+    key: function () { if (S) tap(); },
+    back: function () { if (S) tap(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.death = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/dossier.js ----
+// SHOW ME MY RIVAL — the dossier: the Rival's notebook about the player. Scrolls; works from the title and mid-run.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var X0 = 8, TW = 164;                           // text column
+  var MINI = { S: 'mini_S', G: 'mini_G', F: 'mini_F' };
+
+  // ------------------------------------------------------------------ content (built once in enter)
+  function add(it) { it.y = S.contentH; S.items.push(it); S.contentH += it.h; return it; }
+  function head(text) { if (text) add({ t: 'head', h: 20, text: String(text) }); }
+  function para(text, col, center) {
+    var ls = K.wrap(text, TW, 6);
+    if (ls.length) add({ t: 'text', h: ls.length * 9 + 5, lines: ls, col: col, center: !!center });
+  }
+  function header(kind, n) {
+    var T = R.Text || {};
+    if (T.dossierHeader) return T.dossierHeader(kind, n);
+    if (T.dossierHeaders && T.dossierHeaders.length) return T.dossierHeaders[Math.abs(n | 0) % T.dossierHeaders.length];
+    return kind === 'record' ? 'FOR THE RECORD' : kind === 'tell' ? 'ON TRUSTING A MASK' : 'ON THE SUBJECT OF YOU';
+  }
+  function line(stat) {
+    var T = R.Text || {}, s = null;
+    try { s = T.dossierLine ? T.dossierLine(stat) : null; } catch (e) { s = null; }
+    return s || '';
+  }
+
+  function build() {
+    var T = R.Text || {}, dos = null, mem = (G.meta && G.meta.memory) || {}, i, st, ls, rows, topKind = 'habit', known = false, shown = 0;
+    try { dos = G.brain ? G.brain.dossier() : null; } catch (e) { dos = null; }
+    var stats = (dos && dos.stats) || [], samples = dos ? dos.samples | 0 : 0;
+    S.items.length = 0; S.contentH = 4;
+    S.note = samples > 0 ? samples + ' TURNS' : '';
+
+    for (i = 0; i < stats.length; i++) {
+      if (stats[i].id === 'predictability') known = true;
+      else if (stats[i].id !== 'broken_habit' && shown === 0) { topKind = stats[i].kind === 'tell' ? 'tell' : 'habit'; shown = 1; }
+    }
+
+    if (samples <= 0) {
+      head(header('habit', 0));
+      var empty = T.dossierEmpty && T.dossierEmpty.length ? T.dossierEmpty[G.crng ? G.crng.int(T.dossierEmpty.length) : 0] : "I don't know you yet. Give it time.";
+      add({ t: 'gap', h: 10 });
+      para(empty, 10, true);
+      add({ t: 'gap', h: 10 });
+    } else {
+      head(header(topKind, samples));
+      // predictability gauge
+      var score = Math.max(0, Math.min(100, Math.round(dos.predictability || 0)));
+      ls = K.wrap(T.predictabilityLine ? T.predictabilityLine(known ? score : NaN) : '', TW, 4);
+      add({ t: 'gauge', h: 24 + ls.length * 9 + 6, frac: known ? score / 100 : 0, num: known ? String(score) : '??',
+            col: !known ? 6 : score <= 25 ? 28 : score < 60 ? 21 : 18, lines: ls, label: 'PREDICTABILITY' });
+      // habits and tells, strongest first
+      shown = 0;
+      for (i = 0; i < stats.length && shown < 16; i++) {
+        st = stats[i];
+        if (st.id === 'predictability' || st.id === 'broken_habit' || st.id === 'record') continue;
+        ls = K.wrap(line(st), TW - 10, 4);
+        if (!ls.length) continue;
+        add({ t: 'stat', h: ls.length * 9 + 5, lines: ls, col: st.strength > 0 ? 10 : 7, icon: st.strength > 0 && st.move ? MINI[st.move] : null, hot: st.strength > 0 });
+        shown++;
+      }
+      if (!shown) para(T.dossierEmpty && T.dossierEmpty[1] ? T.dossierEmpty[1] : 'Blank pages. They will not stay blank.', 7, false);
+      // the tell-trust split
+      var tell = dos.tell;
+      if (tell && tell.n > 0) {
+        var c = Math.max(0, tell.counter | 0), m = Math.max(0, tell.mirror | 0), u = Math.max(0, tell.under | 0), sum = c + m + u || 1;
+        var wc = Math.round(TW * c / sum), wm = Math.round(TW * m / sum);
+        if (wc + wm > TW) wm = TW - wc;
+        head(header('tell', tell.n));
+        add({ t: 'tell', h: 36, wc: wc, wm: wm, wu: TW - wc - wm, sc: c + '%', sm: m + '%', su: u + '%' });
+      }
+      // the habit they broke
+      if (dos.broken) {
+        ls = K.wrap(line(dos.broken), TW, 4);
+        if (ls.length) { head('A HABIT YOU BROKE'); add({ t: 'text', h: ls.length * 9 + 5, lines: ls, col: 21, center: false }); }
+      }
+    }
+
+    // lifetime record
+    rows = [];
+    try { rows = T.recordLines ? T.recordLines(mem) || [] : []; } catch (e2) { rows = []; }
+    if (rows.length) {
+      head(header('record', mem.runs | 0));
+      for (i = 0; i < rows.length; i++) {
+        ls = K.wrap(rows[i].jab || '', TW, 3);
+        add({ t: 'rec', h: 10 + ls.length * 9 + 5, label: String(rows[i].label || ''), value: String(rows[i].value || ''), lines: ls });
+      }
+    }
+    S.contentH += 8;
+  }
+
+  function layout() {
+    var L = K.layout();
+    S.top = L.top; S.bottom = L.bottom;
+    S.viewTop = L.top + 19; S.viewH = L.bottom - 44 - S.viewTop;
+    S.scroll.setBounds(S.viewTop, S.viewH, S.contentH);
+    S.bBack.set(40, L.bottom - 40, 100, 36);
+  }
+
+  function goBack() {
+    if (S.leaving) return;
+    S.leaving = true;
+    K.sfx('back');
+    E.go(S.from);
+  }
+
+  // ------------------------------------------------------------------ drawing
+  function drawItem(g, it, y) {
+    var i, x;
+    switch (it.t) {
+      case 'head':
+        g.fillStyle = K.hex(5); g.fillRect(X0, y + 8, TW, 1);
+        g.fillStyle = K.hex(2); g.fillRect(90 - (it.w >> 1) - 4, y + 4, it.w + 8, 9);
+        R.Font.draw(g, it.text, 90, y + 5, 21, K.C);
+        break;
+      case 'text':
+        for (i = 0; i < it.lines.length; i++) R.Font.draw(g, it.lines[i], it.center ? 90 : X0, y + i * 9, it.col, it.center ? K.C : null);
+        break;
+      case 'gauge':
+        R.Font.draw(g, it.label, X0, y, 7);
+        R.Font.draw(g, it.num, X0 + TW, y, 10, K.RT);
+        R.UI.bar(g, X0, y + 10, TW, 8, it.frac, it.frac, it.col, null);
+        g.fillStyle = K.hex(1);
+        g.fillRect(X0 + Math.round(TW * 0.25), y + 10, 1, 8); g.fillRect(X0 + Math.round(TW * 0.6), y + 10, 1, 8);
+        for (i = 0; i < it.lines.length; i++) R.Font.draw(g, it.lines[i], X0, y + 23 + i * 9, 11);
+        break;
+      case 'stat':
+        if (it.icon) R.Art.sprite(g, it.icon, X0, y);
+        else { g.fillStyle = K.hex(it.hot ? 18 : 5); g.fillRect(X0 + 1, y + 2, 3, 3); }
+        for (i = 0; i < it.lines.length; i++) R.Font.draw(g, it.lines[i], X0 + 10, y + i * 9, it.col);
+        break;
+      case 'tell':
+        g.fillStyle = K.hex(1); g.fillRect(X0 - 1, y - 1, TW + 2, 11);
+        x = X0;
+        if (it.wc > 0) { g.fillStyle = K.hex(28); g.fillRect(x, y, it.wc, 9); x += it.wc; }
+        if (it.wm > 0) { g.fillStyle = K.hex(21); g.fillRect(x, y, it.wm, 9); x += it.wm; }
+        if (it.wu > 0) { g.fillStyle = K.hex(30); g.fillRect(x, y, it.wu, 9); }
+        g.fillStyle = K.hex(1);
+        if (it.wc > 0 && it.wc < TW) g.fillRect(X0 + it.wc, y, 1, 9);
+        if (it.wu > 0 && it.wc + it.wm < TW) g.fillRect(X0 + it.wc + it.wm, y, 1, 9);
+        R.Font.draw(g, 'BELIEVE', 35, y + 13, 28, K.C); R.Font.draw(g, it.sc, 35, y + 22, 10, K.C);
+        R.Font.draw(g, 'COPY', 90, y + 13, 21, K.C); R.Font.draw(g, it.sm, 90, y + 22, 10, K.C);
+        R.Font.draw(g, 'DEFY', 145, y + 13, 30, K.C); R.Font.draw(g, it.su, 145, y + 22, 10, K.C);
+        break;
+      case 'rec':
+        R.Font.draw(g, it.label, X0, y, 7);
+        R.Font.draw(g, it.value, X0 + TW, y, 10, K.RT);
+        for (i = 0; i < it.lines.length; i++) R.Font.draw(g, it.lines[i], X0, y + 10 + i * 9, 11);
+        break;
+    }
+  }
+
+  var scene = {
+    enter: function (args) {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      var i;
+      S = {
+        clock: 0, from: (args && args.from) || 'title', leaving: false,
+        top: 0, bottom: 320, viewTop: 0, viewH: 0, contentH: 0, items: [], note: '',
+        title: K.ui('dossier', 'DOSSIER'),
+        scroll: K.scroll(),
+        bBack: K.Button(40, 0, 100, 36, K.ui('back', 'BACK')),
+        btns: null
+      };
+      S.btns = [S.bBack];
+      build();
+      for (i = 0; i < S.items.length; i++) if (S.items[i].t === 'head') S.items[i].w = R.Font.width(S.items[i].text);
+      layout();
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt;
+      S.scroll.update(dt);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var y0 = S.viewTop - S.scroll.off(), i, it, y;
+      g.fillStyle = K.hex(2); g.fillRect(0, 0, 180, E.H);
+      g.save();
+      g.beginPath(); g.rect(0, S.viewTop, 180, S.viewH); g.clip();
+      for (i = 0; i < S.items.length; i++) {
+        it = S.items[i]; y = y0 + it.y;
+        if (y + it.h < S.viewTop || y > S.viewTop + S.viewH) continue;
+        drawItem(g, it, y);
+      }
+      g.restore();
+      S.scroll.drawBar(g);
+      K.topBar(g, S.title, S.note);
+      g.fillStyle = K.hex(2); g.fillRect(0, S.bottom - 44, 180, E.H - S.bottom + 44);
+      g.fillStyle = K.hex(5); g.fillRect(0, S.bottom - 44, 180, 1);
+      S.bBack.draw(g);
+    },
+    down: function (x, y) {
+      if (!S || S.leaving) return;
+      if (K.press(S.btns, x, y)) return;
+      S.scroll.down(x, y);
+    },
+    move: function (x, y) { if (S) S.scroll.move(x, y); },
+    up: function (x, y) {
+      if (!S || S.leaving) return;
+      var b = K.release(S.btns, x, y);
+      S.scroll.up();
+      if (b === S.bBack) goBack();
+    },
+    key: function (k) { if (S && k === 'OK') goBack(); },
+    back: function () { if (S) goBack(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.dossier = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
 // ---- scenes/duel.js ----
 // SHOW ME MY RIVAL — the duel scene: turn flow, reveal choreography, taunts, HUD.
 // Fairness: the Rival's commit lives in a local `sealed` inside the turn coroutine.
@@ -6246,7 +8346,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     var fin = !!res.over;
     var cx = 90, cy = L.floorY - 26;
 
-    // pre-reveal hold
+    // pre-reveal hold: the room goes quiet and dark around the two of them
+    S.hush = true;
     if (fin) {
       S.noSkip = true; E.timeScale = 1;
       if (R.Audio) R.Audio.heartbeat(0);
@@ -6263,7 +8364,10 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     S.fx.burst('shard', PX, L.floorY - 60, 6);
     yield 0.18;
     S.rSigil = 'open'; S.pSigil = 'open'; S.shownP = pm; S.shownR = rm;
-    yield 0.12;
+    S.hush = false;
+    floatText(mname(pm).toUpperCase(), PX, L.floorY - 80, MCOL[pm]);
+    floatText(mname(rm).toUpperCase(), RX, L.floorY - 82, MCOL[rm]);
+    yield 0.14;
 
     // exchange
     if (fin) E.timeScale = 0.35;
@@ -6452,6 +8556,15 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   }
 
   // ------------------------------------------------------------------ drawing
+  var HUSH = null;
+  function hushPattern(g) {                      // 50% checker of void, baked once
+    if (!HUSH) {
+      var c = document.createElement('canvas'); c.width = 2; c.height = 2;
+      var cg = c.getContext('2d'); cg.fillStyle = hex(1); cg.fillRect(0, 0, 1, 1); cg.fillRect(1, 1, 1, 1);
+      HUSH = g.createPattern(c, 'repeat');
+    }
+    return HUSH;
+  }
   function diamond(g, x, y, col) {
     g.fillStyle = hex(col);
     g.fillRect(x + 3, y, 1, 7); g.fillRect(x + 2, y + 1, 3, 5); g.fillRect(x + 1, y + 2, 5, 3); g.fillRect(x, y + 3, 7, 1);
@@ -6570,7 +8683,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         legal: { S: true, G: true, F: true }, input: false, choice: null, coin: false, press: null, pressA: -1,
         only: null, glow: null, reveal: null, hint: null, infoLine: null, called: null, tell: null,
         rSigil: 'gone', pSigil: 'gone', rSigilT: 0, pSigilT: 0, shownP: null, shownR: null, glass: null, stamp: null,
-        resolving: false, fast: false, noSkip: false, tapped: false, overlay: false, ledgerHot: false,
+        resolving: false, hush: false, fast: false, noSkip: false, tapped: false, overlay: false, ledgerHot: false,
         deathblow: false, bars: 0, gutter: 0, pipPop: 0, banner: null, card: null, dying: 0,
         cool: 0, silent: 0, nHabit: 0, nRead: 0, saidHabit: null, lowSaid: { p: low(duel.p), r: false }, forceLine: false,
         idleT: 0, idleSaid: false,
@@ -6630,6 +8743,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       var o = S.bgOpts, i;
       o.gutter = Math.max(S.gutter, S.deathblow ? 0.7 : 0); o.phase2 = S.phase2; o.floorY = L.floorY;
       R.Art.bg(g, 'cathedral', S.clock, o);
+      if (S.hush) { g.fillStyle = hushPattern(g); g.fillRect(0, L.arenaY, 180, L.arenaH); }
       // loser of the moment is drawn first so the winner's blade overlaps
       drawActor(g, S.rv); drawActor(g, S.pl);
       S.fx.draw(g);
@@ -6706,12 +8820,759 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       var m = k === '1' || k === 's' ? 'S' : k === '2' || k === 'g' ? 'G' : k === '3' || k === 'f' ? 'F' : null;
       if (m) pick(m); else S.tapped = true;
     },
+    // Test hook: public information only (what a player can see on screen).
+    peek: function () { return S ? { input: S.input, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
     pause: function () { if (S && G) G.save(); },
     back: function () { if (S) S.overlay = !S.overlay; }
   };
 
   R.Scenes = R.Scenes || {};
   R.Scenes.duel = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/relic.js ----
+// SHOW ME MY RIVAL — relic choice before duel 1 (only reached once a relic is unlocked).
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var CW = 56, CH = 44;
+
+  function layout() {
+    var L = K.layout(), n = S.items.length, rows = Math.ceil(n / 3), i, r, c, inRow, x0;
+    S.top = L.top; S.bottom = L.bottom;
+    S.btnY = L.bottom - 42;
+    for (i = 0; i < n; i++) {
+      r = (i / 3) | 0; c = i % 3;
+      inRow = Math.min(3, n - r * 3);
+      x0 = (180 - (inRow * CW + (inRow - 1) * 2)) >> 1;
+      S.items[i].x = x0 + c * (CW + 2);
+      S.items[i].y = L.top + 24 + r * (CH + 4);
+    }
+    S.detY = L.top + 24 + rows * (CH + 4);
+    S.detH = Math.max(40, S.btnY - 4 - S.detY);
+    S.bBack.set(4, S.btnY, 52, 38);
+    S.bOk.set(60, S.btnY, 116, 38);
+  }
+
+  function cardAt(x, y) {
+    for (var i = 0; i < S.items.length; i++) {
+      var it = S.items[i];
+      if (x >= it.x && x < it.x + CW && y >= it.y && y < it.y + CH) return i;
+    }
+    return -1;
+  }
+
+  function confirm() {
+    if (S.leaving) return;
+    S.leaving = true;
+    var it = S.items[S.sel];
+    K.sfx('select'); E.buzz(12);
+    G.newRun(it && it.info ? it.info.id : null);
+  }
+  function goBack() {
+    if (S.leaving) return;
+    S.leaving = true;
+    K.sfx('back');
+    E.go('title');
+  }
+
+  var scene = {
+    enter: function () {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      var list = R.Run.relics(G.meta) || [], i;
+      S = {
+        clock: 0, top: 0, bottom: 320, btnY: 0, detY: 0, detH: 0, leaving: false,
+        items: [], sel: 0, pressCard: -1,
+        cst: { sel: false, dim: false, pressed: false, label: null },
+        title: K.ui('chooseRelic', 'CHOOSE A RELIC'),
+        noneLabel: K.ui('none', 'NONE'),
+        noneLines: K.wrap('No relic. Just you, and what it already knows.', 160, 3),
+        fx: R.FX.create(64),
+        bBack: K.Button(4, 0, 52, 38, K.ui('back', 'BACK')),
+        bOk: K.Button(60, 0, 116, 38, K.ui('confirm', 'CONFIRM'), { glow: true }),
+        btns: null
+      };
+      S.btns = [S.bBack, S.bOk];
+      for (i = 0; i < list.length && i < 8; i++) S.items.push({ info: K.boonInfo(list[i].id, 48, 160), x: 0, y: 0 });
+      S.items.push({ info: null, x: 0, y: 0 });
+      layout();
+      S.fx.ambient('ash', 3);
+      K.music('title', 1);
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt;
+      S.fx.update(dt);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i, it, st = S.cst, ty;
+      g.fillStyle = K.hex(2); g.fillRect(0, 0, 180, E.H);
+      S.fx.draw(g);
+      K.topBar(g, S.title);
+      for (i = 0; i < S.items.length; i++) {
+        it = S.items[i];
+        st.sel = i === S.sel; st.pressed = i === S.pressCard; st.label = it.info ? null : S.noneLabel;
+        K.card(g, it.x, it.y - (st.sel ? 2 : 0), CW, CH, it.info, st);
+      }
+      R.UI.panel(g, 4, S.detY, 172, S.detH, 'dark');
+      it = S.items[S.sel];
+      if (it && it.info) K.detail(g, 10, S.detY + 5, 160, it.info, null, 0);
+      else {
+        R.Font.draw(g, S.noneLabel, 10, S.detY + 5, 10);
+        ty = S.detY + 16;
+        for (i = 0; i < S.noneLines.length; i++) R.Font.draw(g, S.noneLines[i], 10, ty + i * 9, 12);
+      }
+      S.bBack.draw(g); S.bOk.draw(g);
+    },
+    down: function (x, y) {
+      if (!S || S.leaving) return;
+      if (K.press(S.btns, x, y)) return;
+      S.pressCard = cardAt(x, y);
+      if (S.pressCard >= 0) K.sfx('tick');
+    },
+    up: function (x, y) {
+      if (!S || S.leaving) return;
+      var b = K.release(S.btns, x, y), c;
+      if (b === S.bOk) confirm();
+      else if (b === S.bBack) goBack();
+      else if (S.pressCard >= 0) {
+        c = cardAt(x, y);
+        if (c === S.pressCard) S.sel = c;
+      }
+      S.pressCard = -1;
+    },
+    key: function (k) { if (S && k === 'OK') confirm(); },
+    back: function () { if (S) goBack(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.relic = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/settings.js ----
+// SHOW ME MY RIVAL — settings: mute, haptics, mask, arena, replay credits, erase everything (hold).
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var HOLD = 1.5;
+
+  function st() { return R.Save.data.settings; }
+  function commit() { R.Save.commit(); }
+
+  // 'porcelain' / 'cathedral' are always there; the rest come from R.Run.UNLOCKS entries of that type.
+  function options(type, base) {
+    var out = [base], U = (R.Run && R.Run.UNLOCKS) || [], un = (G.meta && G.meta.unlocked) || {}, i;
+    for (i = 0; i < U.length; i++) if (U[i].type === type && un[U[i].id] && out.indexOf(U[i].ref) < 0) out.push(U[i].ref);
+    return out;
+  }
+  function total(type) {
+    var U = (R.Run && R.Run.UNLOCKS) || [], n = 1, i;
+    for (i = 0; i < U.length; i++) if (U[i].type === type) n++;
+    return n;
+  }
+
+  // Rebuilds every cached label after a change (never per frame).
+  function labels() {
+    var s = st(), T = R.Text || {}, m, a;
+    if (S.masks.indexOf(s.mask) < 0) s.mask = S.masks[0];
+    if (S.arenas.indexOf(s.arena) < 0) s.arena = S.arenas[0];
+    S.bMute.label = K.ui('mute', 'MUTE') + ': ' + (s.muted ? 'ON' : 'OFF');
+    S.bHap.label = K.ui('haptics', 'HAPTICS') + ': ' + (s.haptics === false ? 'OFF' : 'ON');
+    m = T.masks ? T.masks[s.mask] : null; a = T.arenas ? T.arenas[s.arena] : null;
+    S.maskName = (m && m.name) || s.mask; S.arenaName = (a && a.name) || s.arena;
+    S.maskLine = K.wrap((m && m.line) || '', 164, 2); S.arenaLine = K.wrap((a && a.line) || '', 164, 2);
+    S.maskIcon = 'mask_' + s.mask;
+    S.maskCount = S.masks.length + '/' + S.maskTotal; S.arenaCount = S.arenas.length + '/' + S.arenaTotal;
+    S.bReset.label = S.warn > 0 || S.hold > 0 ? K.ui('holdToErase', 'HOLD TO ERASE') : K.ui('resetSave', 'RESET SAVE');
+  }
+
+  function layout() {
+    var L = K.layout(), y = L.top + 24, tight = L.h < 300;
+    S.top = L.top; S.bottom = L.bottom;
+    S.bMute.set(4, y, 84, 24); S.bHap.set(92, y, 84, 24); y += 28;
+    S.bMask.set(4, y, 172, 24); S.maskY = y + 26; y += tight ? 46 : 48;
+    S.bArena.set(4, y, 172, 24); S.arenaY = y + 26; y += tight ? 46 : 48;
+    S.bCred.set(4, y, 172, 24); if (!S.bCred.hidden) y += 28;
+    S.bReset.set(4, y, 172, 26); S.warnY = y + 29;
+    S.bBack.set(40, L.bottom - 40, 100, 36);
+  }
+
+  function cycle(list, key) {
+    var s = st(), i = list.indexOf(s[key]);
+    if (list.length < 2) { K.sfx('back'); return; }
+    s[key] = list[(i + 1) % list.length];
+    K.sfx('select'); E.buzz(6);
+    labels(); commit();
+  }
+
+  function activate(b) {
+    var s = st();
+    if (b === S.bMute) {
+      s.muted = !s.muted;
+      if (R.Audio && R.Audio.setMuted) R.Audio.setMuted(s.muted);
+      K.sfx('select'); labels(); commit();
+    } else if (b === S.bHap) {
+      s.haptics = s.haptics === false;
+      K.sfx('select'); labels(); commit();
+      E.buzz(20);
+    } else if (b === S.bMask) cycle(S.masks, 'mask');
+    else if (b === S.bArena) cycle(S.arenas, 'arena');
+    else if (b === S.bCred) { S.leaving = true; K.sfx('select'); E.go('credits', S.credArgs, 0.5); }
+    else if (b === S.bBack) goBack();
+  }
+
+  function goBack() {
+    if (S.leaving) return;
+    S.leaving = true;
+    K.sfx('back');
+    E.go(S.from);
+  }
+
+  function drawPicker(g, b, name, count, icon) {
+    var off = b.st.pressed ? 2 : 0, x = b.x + 8;
+    b.draw(g);
+    R.Font.draw(g, b.id, x, b.y + 9 + off, 7);
+    x += S.keyW + 6;
+    if (icon) { R.Art.sprite(g, icon, x, b.y + 5 + off); x += 15; }
+    R.Font.draw(g, name, x, b.y + 9 + off, 10);
+    R.Font.draw(g, count, b.x + b.w - 8, b.y + 9 + off, 21, K.RT);
+  }
+
+  var scene = {
+    enter: function (args) {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      var from = (args && args.from) || 'title';
+      S = {
+        clock: 0, from: from, leaving: false, hold: 0, warn: 0, erased: false,
+        top: 0, bottom: 320, maskY: 0, arenaY: 0, warnY: 0,
+        masks: options('mask', 'porcelain'), arenas: options('arena', 'cathedral'),
+        maskTotal: total('mask'), arenaTotal: total('arena'),
+        maskName: '', arenaName: '', maskLine: [], arenaLine: [], maskIcon: '', maskCount: '', arenaCount: '',
+        title: K.ui('settings', 'SETTINGS'),
+        warnLines: K.wrap(K.ui('resetConfirm', 'ERASE EVERYTHING? It will forget you.'), 164, 2),
+        keyW: Math.max(R.Font.width(K.ui('mask', 'MASK')), R.Font.width(K.ui('arena', 'ARENA'))),
+        credArgs: { from: 'settings', back: from },
+        bMute: K.Button(4, 0, 84, 24, ''), bHap: K.Button(92, 0, 84, 24, ''),
+        bMask: K.Button(4, 0, 172, 24, '', { id: K.ui('mask', 'MASK') }),
+        bArena: K.Button(4, 0, 172, 24, '', { id: K.ui('arena', 'ARENA') }),
+        bCred: K.Button(4, 0, 172, 24, K.ui('replayCredits', 'REPLAY CREDITS')),
+        bReset: K.Button(4, 0, 172, 26, '', { accent: 18 }),
+        bBack: K.Button(40, 0, 100, 36, K.ui('back', 'BACK')),
+        btns: null
+      };
+      S.bCred.hidden = !(G.meta && G.meta.seenCredits);
+      S.btns = [S.bMute, S.bHap, S.bMask, S.bArena, S.bCred, S.bBack];
+      labels();
+      layout();
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt;
+      if (S.hold > 0 && !S.erased) {
+        S.hold += dt;
+        if (S.hold >= HOLD) {                          // held all the way: it forgets you
+          S.erased = true; S.leaving = true;
+          K.sfx('you_died', { vol: 0.6 }); E.buzz([40, 60, 120]);
+          G.resetAll();
+        }
+      } else if (S.warn > 0) {
+        S.warn -= dt;
+        if (S.warn <= 0) { S.warn = 0; labels(); }
+      }
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i, b, w;
+      g.fillStyle = K.hex(2); g.fillRect(0, 0, 180, E.H);
+      K.topBar(g, S.title);
+      S.bMute.draw(g); S.bHap.draw(g);
+      drawPicker(g, S.bMask, S.maskName, S.maskCount, S.maskIcon);
+      for (i = 0; i < S.maskLine.length; i++) R.Font.draw(g, S.maskLine[i], 8, S.maskY + i * 9, 12);
+      drawPicker(g, S.bArena, S.arenaName, S.arenaCount, null);
+      for (i = 0; i < S.arenaLine.length; i++) R.Font.draw(g, S.arenaLine[i], 8, S.arenaY + i * 9, 12);
+      S.bCred.draw(g);
+      b = S.bReset;
+      b.st.pressed = S.hold > 0;
+      b.draw(g);
+      if (S.hold > 0) {                                // the filling bar
+        w = Math.round((b.w - 12) * Math.min(1, S.hold / HOLD));
+        g.fillStyle = K.hex(1); g.fillRect(b.x + 5, b.y + b.h - 8, b.w - 10, 4);
+        g.fillStyle = K.hex(18); g.fillRect(b.x + 6, b.y + b.h - 7, w, 2);
+      }
+      if (S.hold > 0 || S.warn > 0) {
+        for (i = 0; i < S.warnLines.length; i++) R.Font.draw(g, S.warnLines[i], 90, S.warnY + i * 9, 19, K.C);
+      }
+      S.bBack.draw(g);
+    },
+    down: function (x, y) {
+      if (!S || S.leaving) return;
+      if (S.bReset.hit(x, y)) { S.hold = 0.0001; S.warn = 3; K.sfx('tick'); labels(); return; }
+      K.press(S.btns, x, y);
+    },
+    up: function (x, y) {
+      if (!S) return;
+      if (S.hold > 0 && !S.erased) { S.hold = 0; S.warn = 3; labels(); }   // let go early: nothing is erased
+      if (S.leaving) return;
+      var b = K.release(S.btns, x, y);
+      if (b) activate(b);
+    },
+    move: function (x, y) {
+      if (S && S.hold > 0 && !S.erased && !S.bReset.hit(x, y)) { S.hold = 0; S.warn = 3; labels(); }   // slid off the button
+    },
+    key: function (k) { if (S && k === 'OK') goBack(); },
+    back: function () { if (S) goBack(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.settings = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/title.js ----
+// SHOW ME MY RIVAL — title: the mask in the ash, the logo, one big button.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var CANDLE_X = 133;                       // where the title backdrop stands its candle (embers rise from it)
+
+  function memory() { return (G.meta && G.meta.memory) || {}; }
+
+  // (Re)reads the game state: which buttons exist and what they say.
+  function refresh() {
+    var L = K.layout(), runs = memory().runs | 0, has = !!G.hasRun(), by;
+    S.top = L.top; S.bottom = L.bottom;
+    S.floorY = L.top + Math.round(L.h * 0.56);
+    S.first = runs === 0 && !has;
+    S.has = has;
+    S.canNew = has && typeof G.abandon === 'function';
+    by = S.first ? L.bottom - 72 : L.bottom - 84;
+    if (S.canNew) { S.bMain.set(8, by, 108, 40); S.bNew.set(120, by, 52, 40); }
+    else S.bMain.set(14, by, 152, 40);
+    S.bMain.label = has ? K.ui('continue', K.ui('cont', 'CONTINUE'))
+      : S.first ? K.ui('tapToBegin', 'TAP TO BEGIN') : K.ui('begin', 'BEGIN');
+    S.bNew.hidden = !S.canNew;
+    S.bNew.label = S.arm > 0 ? K.ui('sure', 'SURE?') : K.ui('newRun', 'NEW RUN');
+    S.bNew.st.accent = S.arm > 0 ? 18 : 0;
+    S.bNew.st.glow = S.arm > 0;
+    S.bDos.set(4, L.bottom - 40, 56, 24); S.bUnl.set(62, L.bottom - 40, 56, 24); S.bSet.set(120, L.bottom - 40, 56, 24);
+    S.bDos.hidden = S.bUnl.hidden = S.bSet.hidden = S.first;
+    S.remember = runs >= 1 ? K.fill(K.ui('titleRemembers', 'It remembers {runs} of you.'), { runs: runs }) : null;
+  }
+
+  function begin() {
+    if (S.leaving) return;
+    S.leaving = true;
+    K.sfx('select'); E.buzz(10);
+    G.startFlow();
+  }
+
+  function activate(b) {
+    if (S.leaving) return;
+    if (b === S.bMain) { begin(); return; }
+    if (b === S.bNew) {
+      if (S.arm > 0) {                                  // second tap: the current run is abandoned
+        S.arm = 0;
+        K.sfx('select'); E.buzz(20);
+        G.abandon();
+        if (!G.hasRun()) { S.leaving = true; G.startFlow(); }
+        else refresh();
+      } else { S.arm = 3; refresh(); }
+      return;
+    }
+    K.sfx('select');
+    S.leaving = true;
+    E.go(b === S.bDos ? 'dossier' : b === S.bUnl ? 'unlocks' : 'settings', S.fromArgs);
+  }
+
+  var scene = {
+    enter: function () {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      S = {
+        clock: 0, top: 0, bottom: 320, floorY: 180, first: false, has: false, canNew: false, leaving: false,
+        arm: 0, emberT: 0, remember: null, anyDown: false,
+        credit: K.ui('credit', 'Developed by tangoSHELL · 2026'),
+        fx: R.FX.create(96), bgOpts: { floorY: 0 }, fromArgs: { from: 'title' },
+        bMain: K.Button(14, 0, 152, 40, '', { glow: true }),
+        bNew: K.Button(120, 0, 52, 40, ''),
+        bDos: K.Button(4, 0, 56, 24, K.ui('dossier', 'DOSSIER')),
+        bUnl: K.Button(62, 0, 56, 24, K.ui('unlocks', 'UNLOCKS')),
+        bSet: K.Button(120, 0, 56, 24, K.ui('settings', 'SETTINGS')),
+        btns: null
+      };
+      S.btns = [S.bMain, S.bNew, S.bDos, S.bUnl, S.bSet];
+      refresh();
+      S.fx.ambient('ash', 4);
+      K.music('title', 1.5);
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) refresh(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt;
+      if (S.arm > 0) { S.arm -= dt; if (S.arm <= 0) { S.arm = 0; refresh(); } }
+      S.emberT += dt;
+      if (S.emberT >= 0.7) { S.emberT -= 0.7; S.fx.burst('ember', CANDLE_X, S.floorY - 8, 1); }
+      S.fx.update(dt);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i;
+      S.bgOpts.floorY = S.floorY;
+      R.Art.bg(g, 'title', S.clock, S.bgOpts);
+      R.Art.sprite(g, 'title_mask', 58, S.floorY - 58);
+      S.fx.draw(g);
+      R.Art.sprite(g, 'logo', 30, S.top + 14);
+      if (S.remember) R.Font.draw(g, S.remember, 90, S.top + 54, 8, K.CS);
+      for (i = 0; i < S.btns.length; i++) S.btns[i].draw(g);
+      R.Font.draw(g, S.credit, 90, S.bottom - 11, 7, K.C);
+    },
+    down: function (x, y) {
+      if (!S || S.leaving) return;
+      S.anyDown = true;
+      K.press(S.btns, x, y);
+    },
+    up: function (x, y) {
+      if (!S || S.leaving) return;
+      var was = S.anyDown, b = K.release(S.btns, x, y);
+      S.anyDown = false;
+      if (b) activate(b);
+      else if (S.first && was && x > -999) begin();     // first launch: the whole screen is the button
+    },
+    key: function (k) { if (S && k === 'OK') begin(); },
+    back: function () { if (S && S.arm > 0) { S.arm = 0; refresh(); } }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.title = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/unlocks.js ----
+// SHOW ME MY RIVAL — unlocks: every R.Run.UNLOCKS entry, grouped by type. Locked ones show how to earn them.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+  var GROUPS = [['boon', 'BOONS'], ['relic', 'RELICS'], ['mask', 'MASKS'], ['arena', 'ARENAS']];
+  var ROW_H = 26, DET_H = 58;
+
+  function build() {
+    var U = (R.Run && R.Run.UNLOCKS) || [], un = (G.meta && G.meta.unlocked) || {}, gi, i, n, got, all = 0, have = 0, head, o;
+    S.rows.length = 0; S.contentH = 2;
+    for (gi = 0; gi < GROUPS.length; gi++) {
+      n = 0; got = 0;
+      head = { t: 'head', y: S.contentH, h: 18, text: GROUPS[gi][1], count: '' };
+      S.rows.push(head); S.contentH += 18;
+      for (i = 0; i < U.length; i++) {
+        if (U[i].type !== GROUPS[gi][0]) continue;
+        o = K.unlockInfo(U[i], 146, 160);
+        o.t = 'row'; o.y = S.contentH; o.h = ROW_H; o.open = !!un[U[i].id];
+        o.sub = o.title ? o.title.toUpperCase() : o.typeLabel;
+        o.note = o.open ? o.typeLabel : S.lockedText;
+        S.rows.push(o); S.contentH += ROW_H + 2;
+        n++; if (o.open) got++;
+      }
+      head.count = got + ' / ' + n;
+      all += n; have += got;
+      S.contentH += 4;
+    }
+    S.total = have + ' / ' + all;
+  }
+
+  function layout() {
+    var L = K.layout();
+    S.top = L.top; S.bottom = L.bottom;
+    S.detY = L.bottom - 44 - DET_H - 2;
+    S.viewTop = L.top + 19; S.viewH = S.detY - 2 - S.viewTop;
+    S.scroll.setBounds(S.viewTop, S.viewH, S.contentH);
+    S.bBack.set(40, L.bottom - 40, 100, 36);
+  }
+
+  function rowAt(x, y) {
+    if (!S.scroll.inView(x, y) || x < 4 || x >= 176) return -1;
+    var cy = y - S.viewTop + S.scroll.off(), i, r;
+    for (i = 0; i < S.rows.length; i++) {
+      r = S.rows[i];
+      if (r.t === 'row' && cy >= r.y && cy < r.y + r.h) return i;
+    }
+    return -1;
+  }
+
+  function goBack() {
+    if (S.leaving) return;
+    S.leaving = true;
+    K.sfx('back');
+    E.go(S.from);
+  }
+
+  function drawRow(g, r, y, sel) {
+    var i;
+    if (r.t === 'head') {
+      g.fillStyle = K.hex(5); g.fillRect(4, y + 14, 170, 1);
+      R.Font.draw(g, r.text, 6, y + 5, 21);
+      R.Font.draw(g, r.count, 172, y + 5, 10, K.RT);
+      return;
+    }
+    g.fillStyle = K.hex(1); g.fillRect(4, y, 170, r.h);
+    g.fillStyle = K.hex(sel ? 25 : r.open ? r.rarCol : 4); g.fillRect(5, y + 1, 168, r.h - 2);
+    g.fillStyle = K.hex(r.open ? 3 : 2); g.fillRect(6, y + 2, 166, r.h - 4);
+    if (r.open) {
+      K.icon(g, r, 10, y + (r.type === 'mask' ? 6 : 7));
+      R.Font.draw(g, r.name, 28, y + 5, 10);
+      R.Font.draw(g, r.sub, 28, y + 15, 7);
+    } else {
+      R.Art.sprite(g, 'lock', 12, y + 9);
+      for (i = 0; i < r.howLines.length; i++) R.Font.draw(g, r.howLines[i], 26, y + (r.howLines.length > 1 ? 4 : 9) + i * 9, 8);
+    }
+  }
+
+  function drawDetail(g) {
+    var r = S.sel >= 0 ? S.rows[S.sel] : null, i, y = S.detY + 5, lines;
+    R.UI.panel(g, 4, S.detY, 172, DET_H, 'dark');
+    if (!r) {
+      for (i = 0; i < S.hint.length; i++) R.Font.draw(g, S.hint[i], 90, S.detY + 20 + i * 9, 7, K.C);
+      return;
+    }
+    R.Font.draw(g, r.open ? r.name : '? ? ?', 10, y, r.open ? 10 : 6);
+    R.Font.draw(g, r.note, 170, y, r.open ? r.typeCol : 18, K.RT);
+    y += 11;
+    lines = r.open ? r.descLines : r.howLines;
+    for (i = 0; i < lines.length && i < 3; i++) { R.Font.draw(g, lines[i], 10, y, r.open ? 10 : 8); y += 9; }
+    if (r.open) {
+      y += 2;
+      for (i = 0; i < r.howLines.length && y < S.detY + DET_H - 10; i++) { R.Font.draw(g, r.howLines[i], 10, y, 7); y += 9; }
+    }
+  }
+
+  var scene = {
+    enter: function (args) {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      S = {
+        clock: 0, from: (args && args.from) || 'title', leaving: false,
+        top: 0, bottom: 320, viewTop: 0, viewH: 0, detY: 0, contentH: 0, rows: [], sel: -1, pressRow: -1, total: '',
+        title: K.ui('unlocks', 'UNLOCKS'), lockedText: K.ui('locked', 'LOCKED'),
+        hint: K.wrap('Tap an entry to read it.', 160, 2),
+        scroll: K.scroll(),
+        bBack: K.Button(40, 0, 100, 36, K.ui('back', 'BACK')),
+        btns: null
+      };
+      S.btns = [S.bBack];
+      build();
+      layout();
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt;
+      S.scroll.update(dt);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var y0 = S.viewTop - S.scroll.off(), i, r, y;
+      g.fillStyle = K.hex(2); g.fillRect(0, 0, 180, E.H);
+      g.save();
+      g.beginPath(); g.rect(0, S.viewTop, 180, S.viewH); g.clip();
+      for (i = 0; i < S.rows.length; i++) {
+        r = S.rows[i]; y = y0 + r.y;
+        if (y + r.h < S.viewTop || y > S.viewTop + S.viewH) continue;
+        drawRow(g, r, y, i === S.sel);
+      }
+      g.restore();
+      S.scroll.drawBar(g);
+      K.topBar(g, S.title, S.total);
+      g.fillStyle = K.hex(2); g.fillRect(0, S.detY - 2, 180, E.H - S.detY + 2);
+      g.fillStyle = K.hex(5); g.fillRect(0, S.detY - 2, 180, 1);
+      drawDetail(g);
+      S.bBack.draw(g);
+    },
+    down: function (x, y) {
+      if (!S || S.leaving) return;
+      if (K.press(S.btns, x, y)) return;
+      if (S.scroll.down(x, y)) S.pressRow = rowAt(x, y);
+    },
+    move: function (x, y) { if (S) S.scroll.move(x, y); },
+    up: function (x, y) {
+      if (!S || S.leaving) return;
+      var b = K.release(S.btns, x, y), dragged = S.scroll.up(), r;
+      if (b === S.bBack) goBack();
+      else if (!dragged && S.pressRow >= 0) {
+        r = rowAt(x, y);
+        if (r === S.pressRow) { S.sel = r; K.sfx('tick'); }
+      }
+      S.pressRow = -1;
+    },
+    key: function (k) { if (S && k === 'OK') goBack(); },
+    back: function () { if (S) goBack(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.unlocks = scene;
+})(globalThis.RIVAL = globalThis.RIVAL || {});
+;
+// ---- scenes/victory.js ----
+// SHOW ME MY RIVAL — victory: quiet. Dawn, ash, the fallen mask, what it cost.
+(function (R) {
+  'use strict';
+
+  var E, G, K, S = null;
+
+  function* wait(sec) {
+    var until = S.clock + sec;
+    yield function () { return !S || S.skip || S.clock >= until; };
+  }
+  function markText() { if (S.firstText < 0) S.firstText = S.clock; }
+
+  function* flow() {
+    var i;
+    yield* wait(1.0);
+    S.head = 0.0001; markText();
+    if (!S.skip) K.sfx('bell', { pitch: 0.8 });
+    yield* wait(1.4);
+    S.panel = true;
+    if (S.typer.set(S.line, 0, true)) {
+      yield function () { return !S || S.skip || S.typer.done; };
+      yield* wait(0.7);
+    }
+    for (i = 0; i < S.rows.length; i++) {
+      S.rowN = i + 1;
+      if (!S.skip) K.sfx('tick', { pitch: 1 + i * 0.05 });
+      yield* wait(0.28);
+    }
+    yield* wait(0.5);
+    while (!S.skip && S.reel.shown < S.reel.n) {
+      S.reel.reveal();
+      yield* wait(1.5);
+    }
+    finish();
+  }
+
+  function finish() {
+    if (S.head < 2) S.head = 2;
+    markText();
+    S.panel = true;
+    if (S.line && !S.typer.active) S.typer.set(S.line, 0, true);
+    S.typer.skip();
+    S.rowN = S.rows.length;
+    S.reel.revealAll();
+    S.done = true;
+  }
+
+  function canLeave() { return S.done && S.firstText >= 0 && S.clock >= S.firstText + 1.2; }
+
+  function tap() {
+    if (S.leaving) return;
+    if (!S.done) { S.skip = true; return; }
+    if (!canLeave()) return;
+    S.leaving = true;
+    K.sfx('select');
+    if (S.firstWin) E.go('credits', S.credArgs, 0.6);
+    else E.go('title', null, 0.4);
+  }
+
+  function layout() {
+    var L = K.layout(), spare;
+    S.top = L.top; S.bottom = L.bottom;
+    S.panelH = 10 + Math.max(1, S.lineN) * 9 + 5 + S.rows.length * 10 + (S.boons.length ? 16 : 0) + 4;
+    // bottom-up: prompt, unlock reel, summary panel; the scene takes what is left
+    S.reelY = L.bottom - 20 - S.reel.h;
+    S.panelY = S.reelY - 4 - S.panelH;
+    spare = S.panelY - (L.top + 30);
+    S.floorY = S.panelY - 10 - Math.max(0, Math.min(30, (spare - 76) >> 1));
+    S.maskY = Math.max(L.top + 28, S.floorY - 54);
+  }
+
+  var scene = {
+    enter: function () {
+      E = R.Engine; G = R.Game; K = R.SceneKit;
+      var last = G.last || {}, T = R.Text || {}, i, fm;
+      var score = Math.max(0, Math.min(100, Math.round(last.score || 0)));
+      fm = last.finishingMove && T.move ? T.move(last.finishingMove) : '';
+      S = {
+        clock: 0, skip: false, done: false, leaving: false, firstText: -1, firstWin: !!last.firstWin,
+        top: 0, bottom: 320, floorY: 100, maskY: 40, panelY: 0, panelH: 0, reelY: 0,
+        head: 0, title: K.ui('victory', 'THE MASK FALLS'),
+        line: K.taunt('victory_summary', { hp: last.hp | 0, turns: last.turns | 0, score: score, duel: 7 }) || '',
+        lineN: 0, typer: K.typer(160, 3), panel: false,
+        rows: [], rowN: 0, boons: [], boonLabel: 'BOONS',
+        reel: K.reel(last.unlocks || []),
+        prompt: last.firstWin ? K.ui('tapToContinue', 'TAP TO CONTINUE') : K.ui('tapToRise', 'TAP TO RISE'),
+        fx: R.FX.create(120), bgOpts: { arena: 'pale_dawn', floorY: 0, variant: 7, gutter: 1, phase2: false },
+        credArgs: { from: 'victory' }
+      };
+      S.lineN = K.wrap(S.line, 160, 3).length;
+      S.rows.push({ label: 'TURNS', value: String(last.turns | 0) });
+      S.rows.push({ label: 'PREDICTABILITY', value: String(score) });
+      if (fm) S.rows.push({ label: 'FINISHING MOVE', value: fm.toUpperCase() });
+      S.rows.push({ label: 'HP LEFT', value: String(last.hp | 0) });
+      for (i = 0; last.boons && i < last.boons.length && i < 8; i++) S.boons.push(K.boonInfo(last.boons[i], 48));
+      if (!S.boons.length) S.rows.push({ label: 'BOONS', value: 'NONE' });
+      layout();
+      S.fx.ambient('ash', 5);
+      K.music(null, 1.5);
+      E.co(function* () { yield* flow(); });
+    },
+    exit: function () { S = null; },
+    resize: function () { if (S) layout(); },
+    update: function (dt) {
+      if (!S) return;
+      S.clock += dt;
+      if (S.head > 0) S.head += dt;
+      S.typer.update(dt);
+      S.reel.update(dt);
+      S.fx.update(dt);
+    },
+    draw: function (g) {
+      if (!S) return;
+      var i, y, lines, level;
+      S.bgOpts.floorY = S.floorY;
+      R.Art.bg(g, 'cathedral', S.clock, S.bgOpts);
+      R.Art.sprite(g, 'title_mask', 58, S.maskY);
+      S.fx.draw(g);
+
+      if (S.head > 0) {
+        R.Font.draw(g, S.title, 90, S.top + 8, 10, K.C2S);
+        level = Math.floor(S.head / 0.2) + 1;
+        if (level < 4) K.dither(g, 10, S.top + 8, 160, 18, level, 2, 1);
+      }
+
+      if (S.panel) {
+        R.UI.panel(g, 4, S.panelY, 172, S.panelH, 'dark');
+        y = S.panelY + 6;
+        if (S.typer.active) {
+          lines = S.typer.view();
+          for (i = 0; i < lines.length; i++) R.Font.draw(g, lines[i], 10, y + i * 9, 10);
+        }
+        y += Math.max(1, S.lineN) * 9 + 3;
+        g.fillStyle = K.hex(5); g.fillRect(10, y, 160, 1);
+        y += 4;
+        for (i = 0; i < S.rowN; i++) {
+          R.Font.draw(g, S.rows[i].label, 10, y, 7);
+          R.Font.draw(g, S.rows[i].value, 170, y, i === 1 ? 21 : 10, K.RT);
+          y += 10;
+        }
+        if (S.boons.length && S.rowN >= S.rows.length) {
+          R.Font.draw(g, S.boonLabel, 10, y + 3, 7);
+          for (i = 0; i < S.boons.length; i++) K.icon(g, S.boons[i], 170 - (S.boons.length - i) * 13, y);
+        }
+      }
+
+      S.reel.draw(g, 4, S.reelY);
+      if (S.done && canLeave() && (Math.floor(S.clock * 1.7) & 1) === 0) R.Font.draw(g, S.prompt, 90, S.bottom - 14, 10, K.CS);
+    },
+    down: function () { if (S) tap(); },
+    key: function () { if (S) tap(); },
+    back: function () { if (S) tap(); }
+  };
+
+  R.Scenes = R.Scenes || {};
+  R.Scenes.victory = scene;
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- scenes/zz_enginetest.js ----

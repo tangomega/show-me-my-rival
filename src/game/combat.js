@@ -9,7 +9,7 @@
   var MOVES = R.MOVES || ['S', 'G', 'F'];
   var BEATS = R.BEATS || { S: 'F', G: 'S', F: 'G' };
 
-  var HIT_CAP = 8;          // max damage of a single exchange hit
+  var HIT_CAP = 6;          // max damage of a single exchange hit
   var STATUS_CAP = 3;       // fortify / focus cap
   var TENSION_MAX = 3;
   var BREAK_VALUE = 0.86;   // payoff value of one turn of guard break

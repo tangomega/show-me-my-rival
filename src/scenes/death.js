@@ -55,7 +55,7 @@
 
   function tap() {
     if (S.leaving) return;
-    if (!S.done) { if (!S.skip) { S.skip = true; if (S.died <= 0) { K.sfx('you_died'); E.buzz(200); } } return; }
+    if (!S.done) { S.skip = true; return; }             // the coroutine runs out on the next frame
     if (!canLeave()) return;
     S.leaving = true;
     K.sfx('select');

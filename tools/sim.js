@@ -92,13 +92,14 @@ const BOON_MOVE = {
   paper_cuts: 'F', vampires_curtsy: 'F', long_con: 'F', turtle_cracker: 'F', debt_collector: 'S', headsman: 'S'
 };
 // Value of a boon to a player with no strong move preference (hand prior, 0..1).
+// Started as a guess; nudged once toward what the first sweeps measured (a person learns this too).
 const GENERIC = {
-  last_candle: 0.85, ember_hoard: 0.7, first_blood: 0.6, vampires_curtsy: 0.6, thorned_guard: 0.55,
-  coiled_riposte: 0.5, stone_patience: 0.5, iron_oath: 0.5, paper_cuts: 0.5, long_con: 0.5, three_faces: 0.5,
-  headsman: 0.5, serrated_edge: 0.45, ash_veil: 0.45, ash_of_forgetting: 0.45, cornered: 0.4, spite: 0.4,
-  mirror_etiquette: 0.4, turtle_cracker: 0.4, debt_collector: 0.4, deathblow_creed: 0.35, resonance: 0.3,
-  salt_the_wound: 0.25, carrion_comfort: 0.25, broken_pattern: 0.5,
-  keyhole: 0.8, truth_candle: 0.7, liars_tally: 0.6, stolen_ledger: 0.4, coin_of_fools: 0.45
+  last_candle: 0.85, first_blood: 0.75, ash_veil: 0.65, thorned_guard: 0.55, paper_cuts: 0.5, iron_oath: 0.5,
+  three_faces: 0.45, mirror_etiquette: 0.45, serrated_edge: 0.45, vampires_curtsy: 0.45, coiled_riposte: 0.4,
+  stone_patience: 0.4, ash_of_forgetting: 0.4, cornered: 0.4, spite: 0.4, turtle_cracker: 0.4,
+  ember_hoard: 0.35, long_con: 0.35, headsman: 0.35, deathblow_creed: 0.35, debt_collector: 0.3, resonance: 0.25,
+  salt_the_wound: 0.25, carrion_comfort: 0.25, broken_pattern: 0.4,
+  keyhole: 0.85, truth_candle: 0.7, liars_tally: 0.5, stolen_ledger: 0.5, coin_of_fools: 0.6
 };
 const BLEED_SOURCES = ['serrated_edge', 'paper_cuts', 'relic_rusty_nail'];
 // Counter-drafting: the Rival's visible pick -> what a thoughtful player reaches for (id or tag: bonus).
@@ -166,8 +167,11 @@ const NO_ACTIVES = {};
 const COIN_ONLY = { coin_of_fools: true };
 const ALL_ACTIVES = { coin_of_fools: true, keyhole: true, truth_candle: true };
 
-function preferRelic(prefs, rng) {
+// A person settles on a favourite relic; `explore` is the share of runs that try another one
+// (it keeps the per-relic table populated).
+function preferRelic(prefs, rng, explore) {
   return function (owned) {
+    if (explore && owned.length && rng.chance(explore)) return rng.pick(owned);
     for (let i = 0; i < prefs.length; i++) if (has(owned, prefs[i])) return prefs[i];
     return owned.length ? rng.pick(owned) : null;
   };
@@ -184,7 +188,7 @@ const BORED_AFTER = 9;
 function bored(v) { return v.tension >= 3 && v.clashRun >= BORED_AFTER; }
 function basicBot(rng, pick, relicPrefs, usable) {
   return {
-    relic: relicPrefs ? preferRelic(relicPrefs, rng) : randomRelic(rng),
+    relic: relicPrefs ? preferRelic(relicPrefs, rng, usable ? 0.15 : 0) : randomRelic(rng),
     pick: pick, after: function () {}, runStart: function () {}, duelStart: function () {},
     draft: function (o) { return draftSimple(o, sharesOf(o), usable || NO_ACTIVES, false, usable ? 0.3 : 0.15, rng); }
   };
@@ -250,7 +254,7 @@ function makeBot(name, rng) {
     return basicBot(rng, function (v) {
       if (v.charges.coin_of_fools > 0 && rng.chance(0.5)) { const m = v.use('coin_of_fools'); if (m) return m; }
       return rng.pick(v.legalP);
-    }, null, COIN_ONLY);
+    }, ['relic_rusty_nail', 'relic_dented_buckler', 'relic_ashen_flask'], COIN_ONLY);
   }
   if (name === 'mixer') {
     return basicBot(rng, function (v) {
@@ -258,7 +262,7 @@ function makeBot(name, rng) {
       if (v.charges.coin_of_fools > 0 && v.legalP.length === 3) { const m = v.use('coin_of_fools'); if (m) return m; }
       const eq = R.Brain.equilibrium(v.payoff, v.legalR, v.legalP);
       return sampleDist(eq.p, v.legalP, rng);
-    }, null, COIN_ONLY);
+    }, ['relic_rusty_nail', 'relic_dented_buckler', 'relic_ashen_flask'], COIN_ONLY);
   }
   if (name === 'adaptive') return makeAdaptive(rng);
   throw new Error('unknown bot ' + name);
@@ -357,7 +361,7 @@ function makeAdaptive(rng) {
   }
 
   return {
-    relic: randomRelic(rng), pick: pick, after: after, runStart: function () {}, duelStart: function () {},
+    relic: preferRelic(['relic_liars_coin', 'relic_dented_buckler', 'relic_rusty_nail', 'relic_ashen_flask'], rng, 0.15), pick: pick, after: after, runStart: function () {}, duelStart: function () {},
     draft: function (o) { return draftAdaptive(o, rng); }
   };
 }
