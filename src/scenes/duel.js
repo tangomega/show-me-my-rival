@@ -223,6 +223,7 @@
       t = taunt('habit_broken', R.Text.tauntVars ? R.Text.tauntVars(dos.broken) : dos.broken.vars);
       if (t) return t;
     }
+    if (n === 1) return G.crng.chance(0.7) ? taunt('milestone_runs') : null;   // duel-intro lines assume a rest came first
     if (G.crng.chance(0.8)) {
       var open = null;
       for (var i = 0; i < dos.stats.length; i++) if (dos.stats[i].id === 'opening' && dos.stats[i].strength > 0) open = dos.stats[i];
@@ -738,7 +739,8 @@
     R.Font.draw(g, its ? 'TAP: YOURS' : 'TAP: CLOSE', 170, y, 7, OPT_R);
     y += 12;
     if (!list.length) R.Font.draw(g, '(none yet)', 10, y, 7);
-    for (i = 0; i < list.length && y + 9 + list[i].lines.length * 8 <= bot - 3; i++) {
+    R.UI.button(g, 10, bot - 26, 160, 22, S.muteText, null);
+    for (i = 0; i < list.length && y + 9 + list[i].lines.length * 8 <= bot - 30; i++) {
       R.Font.draw(g, list[i].name, 10, y, 10); y += 9;
       for (k = 0; k < list[i].lines.length; k++) { R.Font.draw(g, list[i].lines[k], 14, y, 8); y += 8; }
       y += 2;
@@ -763,6 +765,7 @@
         legal: { S: true, G: true, F: true }, input: false, choice: null, coin: false, press: null, pressA: -1,
         only: null, glow: null, reveal: null, hint: null, infoLine: null, called: null, tell: null,
         rSigil: 'gone', pSigil: 'gone', rSigilT: 0, pSigilT: 0, shownP: null, shownR: null, glass: null, stamp: null,
+        muteText: st.muted ? 'SOUND: OFF' : 'SOUND: ON', stanceText: '',
         resolving: false, hush: false, fast: false, noSkip: false, tapped: false, overlay: false, ledgerHot: false,
         deathblow: false, bars: 0, gutter: 0, pipPop: 0, banner: null, card: null, dying: 0,
         cool: 0, silent: 0, nHabit: 0, nRead: 0, saidHabit: null, lowSaid: { p: low(duel.p), r: false }, forceLine: false,
@@ -882,7 +885,17 @@
     },
     down: function (x, y) {
       if (!S) return;
-      if (S.overlay) { S.overlay = S.overlay === 1 ? 2 : 0; sfx(S.overlay ? 'tick' : 'back'); return; }
+      if (S.overlay) {
+        if (y >= L.btnY + L.btnH - 28) {                 // sound toggle, reachable mid-duel
+          var st = R.Save.data.settings;
+          st.muted = !st.muted;
+          if (R.Audio) R.Audio.setMuted(st.muted);
+          S.muteText = st.muted ? 'SOUND: OFF' : 'SOUND: ON';
+          R.Save.commit(); sfx('tick');
+          return;
+        }
+        S.overlay = S.overlay === 1 ? 2 : 0; sfx(S.overlay ? 'tick' : 'back'); return;
+      }
       S.tapped = true;
       if (y >= L.hudY + 14 && y < L.hudY + 34 && x >= 74 && x < 106) { openLedger(); return; }
       var a = activeAt(x, y);
