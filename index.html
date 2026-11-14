@@ -9641,7 +9641,10 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   E.buzz = function (pattern) {
     try {
       if (R.Save && R.Save.data && R.Save.data.settings && R.Save.data.settings.haptics === false) return false;
-      if (typeof navigator !== 'undefined' && navigator.vibrate) return !!navigator.vibrate(pattern);
+      if (typeof navigator === 'undefined' || !navigator.vibrate) return false;
+      // Browsers block (and log) vibration before the first real tap; skip the call until there has been one.
+      if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return false;
+      return !!navigator.vibrate(pattern);
     } catch (e) { /* ignore */ }
     return false;
   };
