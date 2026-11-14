@@ -292,6 +292,7 @@
 
     // 3. stance (the tell) — public information
     S.tell = sealed.tell;
+    S.stanceText = 'STANCE: ' + mname(sealed.tell).toUpperCase();
     play(S.rv, 'tell_' + sealed.tell, 'tell');
     yield 0.35;
 
@@ -516,7 +517,7 @@
       if (tensionBefore > 0) S.pipPop = 0.3;
       play(loser, broke ? 'stagger' : 'hit', (fin || broke) ? 'stay' : 'once');
       slide(loser, loser.ox + dir * 6, 0.08);
-      if (broke) floatText(ui('guardBroken', 'GUARD BROKEN'), lx, headY() - 12, 28, true);
+      if (broke) floatText(ui('guardBroken', 'GUARD BROKEN'), 90, L.floorY - 100, 28, true);
       if (fin) { S.fx.burst('ash', lx, cy, 12); yield 0.5; }
       yield broke ? 0.45 : 0.25;
       slide(win, 0, 0.25);
@@ -842,6 +843,8 @@
         R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, OPT_CS);
       }
       if (S.called && S.input) R.Font.draw(g, S.calledText, PX, L.floorY - 84, 31, OPT_CS);
+      // the stance is public: name it, so a loss is never a misread sprite
+      if (S.input && S.tell) R.Font.draw(g, S.stanceText, 136, L.floorY - 96, MCOL[S.tell], OPT_CS);
       // floating numbers / labels
       for (i = 0; i < S.floats.length; i++) {
         var f = S.floats[i];

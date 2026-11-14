@@ -10952,7 +10952,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function layout() {
     var L = K.layout(), y, i;
     S.top = L.top; S.bottom = L.bottom;
-    y = L.top + 58;
+    y = L.top + (S.sub2 ? 68 : 58);
     S.partY = y;
     y += Math.max(1, S.partN) * 9 + 8;
     S.insY = y;
@@ -10961,7 +10961,10 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       for (i = 0; i < S.ins.length; i++) { S.ins[i].y = y; y += S.ins[i].lines.length * 9 + 4; }
       y += 4;
     }
-    S.reelY = Math.min(y, L.bottom - 20 - S.reel.h);
+    S.reelY = Math.min(y, L.bottom - 22 - S.teaseLines.length * 9 - S.reel.h);
+    // the mask watches from whatever darkness is left
+    var free = (L.bottom - 26 - S.teaseLines.length * 9) - (S.reelY + S.reel.h);
+    S.maskY = free >= 74 ? S.reelY + S.reel.h + ((free - 64) >> 1) : -1;
   }
 
   var scene = {
@@ -10983,6 +10986,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         ins: [], insN: 0, insHead: K.ui('learned', 'WHAT I LEARNED'),
         reel: K.reel(last.unlocks || []),
         rise: K.ui('tapToRise', 'TAP TO RISE'),
+        sub2: (last.turns | 0) > 0 ? 'READ YOU: ' + (last.reads | 0) + ' · SURPRISED IT: ' + (last.surprises | 0) : '',
+        teaseLines: last.tease && last.tease.how ? K.wrap('Next: ' + last.tease.how, 164, 2) : [], maskY: -1,
         fx: R.FX.create(80)
       };
       S.partN = K.wrap(S.parting, 164, 3).length;
@@ -11028,7 +11033,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         if (level < 4) K.dither(g, 90 - (w >> 1), y, w, 24, level, 3, 1);
         g.fillStyle = K.hex(16); g.fillRect(90 - (w >> 1), y + 27, level >= 4 ? w : 0, 1);
       }
-      if (S.sub) R.Font.draw(g, S.subLine, 90, S.top + 46, 7, K.C);
+      if (S.sub) {
+        R.Font.draw(g, S.subLine, 90, S.top + 46, 7, K.C);
+        if (S.sub2) R.Font.draw(g, S.sub2, 90, S.top + 56, 5, K.C);
+      }
+      if (S.done && S.maskY >= 0) R.Art.sprite(g, 'title_mask', 58, S.maskY);
 
       // the parting line, typed on black
       if (S.typer.active) {
@@ -11051,6 +11060,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
       S.reel.draw(g, 4, S.reelY);
 
+      if (S.done) for (i = 0; i < S.teaseLines.length; i++) R.Font.draw(g, S.teaseLines[i], 90, S.bottom - 18 - (S.teaseLines.length - i) * 9, 7, K.C);
       if (S.done && canLeave() && (Math.floor(S.clock * 1.7) & 1) === 0) R.Font.draw(g, S.rise, 90, S.bottom - 14, 10, K.C);
     },
     down: function () { if (S) tap(); },
@@ -11573,6 +11583,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
     // 3. stance (the tell) — public information
     S.tell = sealed.tell;
+    S.stanceText = 'STANCE: ' + mname(sealed.tell).toUpperCase();
     play(S.rv, 'tell_' + sealed.tell, 'tell');
     yield 0.35;
 
@@ -11797,7 +11808,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (tensionBefore > 0) S.pipPop = 0.3;
       play(loser, broke ? 'stagger' : 'hit', (fin || broke) ? 'stay' : 'once');
       slide(loser, loser.ox + dir * 6, 0.08);
-      if (broke) floatText(ui('guardBroken', 'GUARD BROKEN'), lx, headY() - 12, 28, true);
+      if (broke) floatText(ui('guardBroken', 'GUARD BROKEN'), 90, L.floorY - 100, 28, true);
       if (fin) { S.fx.burst('ash', lx, cy, 12); yield 0.5; }
       yield broke ? 0.45 : 0.25;
       slide(win, 0, 0.25);
@@ -12123,6 +12134,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, OPT_CS);
       }
       if (S.called && S.input) R.Font.draw(g, S.calledText, PX, L.floorY - 84, 31, OPT_CS);
+      // the stance is public: name it, so a loss is never a misread sprite
+      if (S.input && S.tell) R.Font.draw(g, S.stanceText, 136, L.floorY - 96, MCOL[S.tell], OPT_CS);
       // floating numbers / labels
       for (i = 0; i < S.floats.length; i++) {
         var f = S.floats[i];
@@ -13202,6 +13215,17 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     return true;
   }
 
+  // The nearest thing still locked: shown on the death screen as a reason to go again.
+  function nextGoal() {
+    var U = R.Run.UNLOCKS || [], un = (G.meta && G.meta.unlocked) || {}, i, t;
+    for (i = 0; i < U.length; i++) {
+      if (un[U[i].id]) continue;
+      t = R.Text && R.Text.unlock && R.Text.unlock[U[i].id];
+      return { id: U[i].id, name: U[i].name, how: (t && t.how) || U[i].how };
+    }
+    return null;
+  }
+
   var G = R.Game = {
     brain: null, meta: null, run: null, rng: null, crng: null, days: 0, last: null,
 
@@ -13291,7 +13315,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         turns: run.stats.turns || 0, score: run.stats.score || 0,
         finishingMove: run.stats.lastMove || null, hp: Math.max(0, run.pHp || 0),
         unlocks: unlocks, firstWin: !!fin.firstWin, insights: insights,
-        boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice()
+        boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice(),
+        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal()
       };
       G.run = null;
       G.save();
@@ -13326,6 +13351,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         turns: run ? run.stats.turns : (L ? L.turns : 0),
         score: run ? G.brain.runScore() : (L ? L.score : 0)
       };
+      if (v.score < 45) delete v.score;          // lines that quote the score are jabs at predictable play
       if (G.days > 0) v.days = G.days;
       if (d) { v.hp = d.p.hp; v.rivalHp = d.r.hp; }
       else if (L) { v.hp = L.hp; v.rivalHp = L.rivalHp; }

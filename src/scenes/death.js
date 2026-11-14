@@ -67,7 +67,7 @@
   function layout() {
     var L = K.layout(), y, i;
     S.top = L.top; S.bottom = L.bottom;
-    y = L.top + 58;
+    y = L.top + (S.sub2 ? 68 : 58);
     S.partY = y;
     y += Math.max(1, S.partN) * 9 + 8;
     S.insY = y;
@@ -76,7 +76,10 @@
       for (i = 0; i < S.ins.length; i++) { S.ins[i].y = y; y += S.ins[i].lines.length * 9 + 4; }
       y += 4;
     }
-    S.reelY = Math.min(y, L.bottom - 20 - S.reel.h);
+    S.reelY = Math.min(y, L.bottom - 22 - S.teaseLines.length * 9 - S.reel.h);
+    // the mask watches from whatever darkness is left
+    var free = (L.bottom - 26 - S.teaseLines.length * 9) - (S.reelY + S.reel.h);
+    S.maskY = free >= 74 ? S.reelY + S.reel.h + ((free - 64) >> 1) : -1;
   }
 
   var scene = {
@@ -98,6 +101,8 @@
         ins: [], insN: 0, insHead: K.ui('learned', 'WHAT I LEARNED'),
         reel: K.reel(last.unlocks || []),
         rise: K.ui('tapToRise', 'TAP TO RISE'),
+        sub2: (last.turns | 0) > 0 ? 'READ YOU: ' + (last.reads | 0) + ' · SURPRISED IT: ' + (last.surprises | 0) : '',
+        teaseLines: last.tease && last.tease.how ? K.wrap('Next: ' + last.tease.how, 164, 2) : [], maskY: -1,
         fx: R.FX.create(80)
       };
       S.partN = K.wrap(S.parting, 164, 3).length;
@@ -143,7 +148,11 @@
         if (level < 4) K.dither(g, 90 - (w >> 1), y, w, 24, level, 3, 1);
         g.fillStyle = K.hex(16); g.fillRect(90 - (w >> 1), y + 27, level >= 4 ? w : 0, 1);
       }
-      if (S.sub) R.Font.draw(g, S.subLine, 90, S.top + 46, 7, K.C);
+      if (S.sub) {
+        R.Font.draw(g, S.subLine, 90, S.top + 46, 7, K.C);
+        if (S.sub2) R.Font.draw(g, S.sub2, 90, S.top + 56, 5, K.C);
+      }
+      if (S.done && S.maskY >= 0) R.Art.sprite(g, 'title_mask', 58, S.maskY);
 
       // the parting line, typed on black
       if (S.typer.active) {
@@ -166,6 +175,7 @@
 
       S.reel.draw(g, 4, S.reelY);
 
+      if (S.done) for (i = 0; i < S.teaseLines.length; i++) R.Font.draw(g, S.teaseLines[i], 90, S.bottom - 18 - (S.teaseLines.length - i) * 9, 7, K.C);
       if (S.done && canLeave() && (Math.floor(S.clock * 1.7) & 1) === 0) R.Font.draw(g, S.rise, 90, S.bottom - 14, 10, K.C);
     },
     down: function () { if (S) tap(); },

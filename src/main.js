@@ -24,6 +24,17 @@
     return true;
   }
 
+  // The nearest thing still locked: shown on the death screen as a reason to go again.
+  function nextGoal() {
+    var U = R.Run.UNLOCKS || [], un = (G.meta && G.meta.unlocked) || {}, i, t;
+    for (i = 0; i < U.length; i++) {
+      if (un[U[i].id]) continue;
+      t = R.Text && R.Text.unlock && R.Text.unlock[U[i].id];
+      return { id: U[i].id, name: U[i].name, how: (t && t.how) || U[i].how };
+    }
+    return null;
+  }
+
   var G = R.Game = {
     brain: null, meta: null, run: null, rng: null, crng: null, days: 0, last: null,
 
@@ -113,7 +124,8 @@
         turns: run.stats.turns || 0, score: run.stats.score || 0,
         finishingMove: run.stats.lastMove || null, hp: Math.max(0, run.pHp || 0),
         unlocks: unlocks, firstWin: !!fin.firstWin, insights: insights,
-        boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice()
+        boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice(),
+        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal()
       };
       G.run = null;
       G.save();
@@ -148,6 +160,7 @@
         turns: run ? run.stats.turns : (L ? L.turns : 0),
         score: run ? G.brain.runScore() : (L ? L.score : 0)
       };
+      if (v.score < 45) delete v.score;          // lines that quote the score are jabs at predictable play
       if (G.days > 0) v.days = G.days;
       if (d) { v.hp = d.p.hp; v.rivalHp = d.r.hp; }
       else if (L) { v.hp = L.hp; v.rivalHp = L.rivalHp; }
