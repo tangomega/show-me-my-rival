@@ -15,16 +15,17 @@ A new session can continue from this file plus `DESIGN.md` (what the game is) an
 
 | Phase | State |
 |---|---|
-| 1. Design (`DESIGN.md`, `INTERFACES.md`) | in progress |
-| 2. Core (engine, Rival AI, combat/run) | not started |
-| 3. Content and art (sprites, writing, audio, menus) | not started |
-| 4. Balance sim and QA | not started |
+| 1. Design (`DESIGN.md`, `INTERFACES.md`) | done |
+| 2. Core (engine, Rival AI, combat/run, duel scene, flow controller) | done, grey-box duel plays in the browser |
+| 3. Content and art | writing done; audio, menus, fighter sprites in progress; world/UI art not started |
+| 4. Balance sim and QA | balance sim in progress; QA not started |
 | 5. Polish passes (two) | not started |
 | 6. README, final build, deploy | not started |
 
 ## Next up
 
-- Review `DESIGN.md`, reconcile it with `INTERFACES.md`, commit Phase 1.
+- Integrate menus + audio + art as they land, play a full run in the browser, then QA and two polish passes.
+- Remaining old-title header comments in src/game, src/ai, src/text (cosmetic) get fixed at ship time.
 
 ## Decisions log
 

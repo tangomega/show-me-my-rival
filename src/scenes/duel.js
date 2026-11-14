@@ -224,7 +224,7 @@
   }
 
   function* intro() {
-    var n = G.run.duelN;
+    var n = S.duelN;
     S.banner = { t: 0, a: 'DUEL ' + n, b: (R.Text.duelNames && R.Text.duelNames[n - 1]) || '' };
     S.rv.ox = 50; play(S.rv, 'idle', 'loop');
     slide(S.rv, 0, 0.5);
@@ -634,7 +634,7 @@
     R.Font.draw(g, S.txtP, 4, y + 13, 10);
     R.Font.draw(g, S.txtR, 176, y + 13, 10, { align: 'right' });
     // duel pips
-    var n = G.run.duelN;
+    var n = S.duelN;
     for (i = 1; i <= 7; i++) {
       var c = i < n ? 21 : i === n ? ((Math.floor(S.clock * 2) & 1) ? 10 : 7) : 5;
       if (i === 7 && i > n) c = 18;
@@ -729,7 +729,7 @@
       var duel = resumed ? run.duel : R.Run.startDuel(run);
       var st = R.Save.data.settings;
       S = {
-        duel: duel, clock: 0, phase2: duel.phase === 2, tutorial: run.duelN === 1 && !meta.seenTutorial,
+        duel: duel, duelN: run.duelN, clock: 0, phase2: duel.phase === 2, tutorial: run.duelN === 1 && !meta.seenTutorial,
         pl: mkActor('player', PX, false), rv: mkActor(duel.phase === 2 ? 'rival2' : 'rival', RX, true),
         plOpts: [{ flip: false, white: false }, { flip: false, white: true }],
         rvOpts: [{ flip: true, white: false, mask: st.mask }, { flip: true, white: true, mask: st.mask }],
