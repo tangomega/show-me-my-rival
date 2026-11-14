@@ -855,7 +855,7 @@ function playRun(S, seed, o) {
       if (f.hp < 0) bad('hp below 0');
       if (st.fortify > 3 || st.focus > 3) bad('status above cap');
     }
-    if (d.tension < (d.phase === 2 ? 1 : 0) || d.tension > 3) bad('tension out of range');
+    if (d.tension < C.floorOf(d) || d.tension > 3) bad('tension out of range');
   }
 
   function fight() {
@@ -869,7 +869,7 @@ function playRun(S, seed, o) {
       info.minLegal = Math.min(info.minLegal, lp.length, lr.length);
       if (lp.length < 2 || lr.length < 2) bad('fewer than 2 legal moves');
       if (o.onLegal) o.onLegal(d, lp, lr);
-      if (d.phase === 2 && d.turn % 3 === 2) d.intel.called = rng.pick(lp);     // Called Shot turns 2, 5, 8...
+      if (C.callsOf(d) && d.turn % 3 === 2) d.intel.called = rng.pick(lp);      // Called Shot turns 2, 5, 8...
       C.ctx(d);
       const pay = C.payoff(d);
       for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) {
@@ -908,15 +908,17 @@ function playRun(S, seed, o) {
       let winner = S.run.duel.over;
       const n = S.run.duelN;
       info.duels.push({ n: n, phase: 1, won: winner === 'p', turns: turns });
-      if (n === 7 && winner === 'p') {
+      while (n === 7 && winner === 'p' && S.run.phase < RUN.phaseCount(S.run)) {   // every face: two to four phases
         if (seed % 2 === 0) RUN.endDuel(S.run, S.meta, 'p', null);         // both call orders are legal
-        if (S.run.stage !== 'duel') bad('stage after phase 1 should stay duel');
-        RUN.startPhase2(S.run);
+        if (S.run.stage !== 'duel') bad('stage after a phase that is not the last should stay duel');
+        const was = S.run.phase;
+        RUN.nextPhase(S.run);
+        if (S.run.phase !== was + 1 || S.run.duel.phase !== was + 1) bad('the phase did not advance by one');
         hop();
         info.phase2 = true;
         turns = fight();
         winner = S.run.duel.over;
-        info.duels.push({ n: 8, phase: 2, won: winner === 'p', turns: turns });
+        info.duels.push({ n: 8, phase: S.run.phase, won: winner === 'p', turns: turns });
       }
       RUN.endDuel(S.run, S.meta, winner, null);
       hop();
@@ -1167,7 +1169,7 @@ section('4c. The Vigil: each light adds exactly its rule');
     const d2 = RUN.startPhase2(r2);
     eq(d2.p.hp, 9 + (s >= 5 ? 0 : RUN.PHASE2_HEAL), 'stake ' + s + ' hp after the transformation');
     eq(d2.r.hp, D.phase2.rivalHp + (s >= 6 ? 1 : 0), 'stake ' + s + ' Unmasked hp');
-    ok(d2.calls && d2.embers && d2.tension === 1, 'phase 2 keeps Embers and Called Shot at stake ' + s);
+    ok(d2.calls && d2.floor === 1 && d2.tension === 1, 'phase 2 keeps Embers and Called Shot at stake ' + s);
     // a Called Shot only counts where it is allowed
     const r3 = mk(s).run; r3.duelN = 3; const d3 = RUN.startDuel(r3);
     d3.intel.called = 'S';
@@ -1195,6 +1197,112 @@ section('4c. The Vigil: each light adds exactly its rule');
   const rt = JSON.parse(JSON.stringify(mk(6).run));
   eq(RUN.stakeOf(rt), 6, 'stake survives a save');
   eq(RUN.stakeOf({}), 0, 'a run saved before the Vigil existed has nothing out');
+}
+
+// ================================================================== 4d. the faces of the final duel
+section('4d. Faces: every boss walks its phases with the rules its table gives');
+{
+  const BO = RUN.BOSSES, D = RUN.DUELS;
+  eq(BO.map(b => b.id).join(','), 'unmasked,three_faced,hours,reflection', 'the four faces, in unlock order');
+  eq(BO.map(b => b.phases.length).join(','), '2,3,4,3', 'phase counts');
+  eq(RUN.repairMeta({}).bosses.max, 1, 'an old save has only The Unmasked');
+  eq(RUN.repairMeta({ bosses: { max: 99, wins: 7, last: 'nobody' } }).bosses.max, 4, 'a hand-edited boss record is clamped');
+  eq(RUN.bossOf({}).id, 'unmasked', 'a run saved before the faces existed fights The Unmasked');
+  eq(RUN.phaseCount({ boss: 'hours' }), 4, 'phaseCount reads the table');
+  BO.forEach(b => b.phases.forEach((ph, i) => {
+    (ph.innate || []).forEach(id => ok(B.byId[id] && B.byId[id].who !== 'player' && !B.byId[id].relic, b.id + ' phase ' + (i + 1) + ' lends a boon the Rival can hold: ' + id));
+    ok(i === 0 ? !ph.change : ['shatter', 'swap', 'bell'].indexOf(ph.change) >= 0, b.id + ' phase ' + (i + 1) + ' has a known way of arriving');
+    ok(ph.floor === undefined || (ph.floor >= 0 && ph.floor <= 3), b.id + ' phase ' + (i + 1) + ' floor in range');
+  }));
+
+  // which face a run draws
+  const m1 = allMeta();
+  eq(RUN.create(m1, { seed: 1, now: 1 }).boss, 'unmasked', 'with one face earned every run is The Unmasked');
+  eq(RUN.create(m1, { seed: 1, now: 1, boss: 'hours' }).boss, 'unmasked', 'an unearned face cannot be asked for');
+  eq(RUN.create(m1, { seed: 1, now: 1, boss: 'hours', anyBoss: true }).boss, 'hours', 'anyBoss (the sim) can');
+  const m4 = allMeta(); m4.bosses.max = 4;
+  const seen = {}; let prev = null, repeats = 0;
+  for (let i = 0; i < 400; i++) { const r = RUN.create(m4, { seed: 9000 + i, now: 1 }); seen[r.boss] = (seen[r.boss] || 0) + 1; if (r.boss === prev) repeats++; prev = r.boss; }
+  eq(Object.keys(seen).length, 4, 'all four faces appear once earned');
+  eq(repeats, 0, 'the same face never comes twice in a row');
+  ok(Object.keys(seen).every(k => seen[k] > 60), 'the draw is roughly even: ' + JSON.stringify(seen));
+  const m2 = allMeta(); m2.bosses.max = 2; let alt = 0, last2 = null;
+  for (let i = 0; i < 20; i++) { const r = RUN.create(m2, { seed: 70 + i, now: 1 }); if (r.boss !== last2) alt++; last2 = r.boss; }
+  eq(alt, 20, 'with two faces earned they alternate');
+  const ma = allMeta(), mb = allMeta(); ma.bosses.max = mb.bosses.max = 4; ma.bosses.last = mb.bosses.last = 'hours';
+  eq(RUN.create(ma, { seed: 5, now: 1 }).boss, RUN.create(mb, { seed: 5, now: 1 }).boss, 'the draw depends only on the seed and the record');
+
+  // walk every face
+  BO.forEach(b => {
+    for (const stake of [0, 7]) {
+      const meta = allMeta(); meta.vigil.max = 7; meta.bosses.max = 4;
+      const run = RUN.create(meta, { seed: 31, now: 1.7e12, boss: b.id, stake });
+      run.pBoons.push('resonance', 'cornered', 'truth_candle');            // two it can copy, one active it cannot
+      run.duelN = 7;
+      let d = RUN.startDuel(run), hp = 12;
+      const n = b.phases.length, tag = b.id + ' (stake ' + stake + ') ';
+      for (let k = 1; k <= n; k++) {
+        const ph = b.phases[k - 1], row = RUN.cfg(run, d);
+        eq(d.phase, k, tag + 'duel phase ' + k);
+        eq(run.phase, k, tag + 'run phase ' + k);
+        eq(d.r.hp, (ph.hp !== undefined ? ph.hp : (k === 1 ? D[7].rivalHp : D.phase2.rivalHp)) + (stake >= 6 ? 1 : 0), tag + 'phase ' + k + ' health');
+        eq(d.floor, ph.floor || 0, tag + 'phase ' + k + ' tension floor');
+        eq(d.tension, ph.floor || 0, tag + 'phase ' + k + ' starts at its floor');
+        eq(d.calls, !!ph.calls || stake >= 7, tag + 'phase ' + k + ' Called Shot');
+        eq(d.stance, ph.stance || null, tag + 'phase ' + k + ' stance rule');
+        eq(d.mimic, !!ph.mimic, tag + 'phase ' + k + ' mimic');
+        eq(row.phases, n, tag + 'cfg knows the phase count');
+        eq(row.last, k === n, tag + 'cfg knows the last phase');
+        (ph.innate || []).forEach(id => ok(d.r.boons.indexOf(id) >= 0 && (run.rBoons.indexOf(id) < 0 || run.rivalHead === id), tag + 'phase ' + k + ' lends ' + id + ' to the fighter, not to the run'));
+        eq(d.r.status.fortify, ph.fortify || 0, tag + 'phase ' + k + ' fortify');
+        eq(d.r.boons.indexOf('resonance') >= 0 && d.r.boons.indexOf('cornered') >= 0, !!ph.copyBoons, tag + 'phase ' + k + ' boon copy');
+        ok(d.r.boons.indexOf('truth_candle') < 0 && d.r.boons.every(id => B.byId[id].who !== 'player'), tag + 'phase ' + k + ' holds nothing it may not');
+        eq(new Set(d.r.boons).size, d.r.boons.length, tag + 'phase ' + k + ' no boon twice');
+        // tension returns to the floor after a hit, and never below it
+        d.tension = 3; C.resolve(d, 'S', 'F');
+        eq(d.tension, ph.floor || 0, tag + 'phase ' + k + ' tension falls back to the floor');
+        // the phase is won
+        d.p.hp = hp; run.pHp = hp; d.over = 'p';
+        RUN.endDuel(run, meta, 'p', null);
+        if (k < n) {
+          eq(run.stage, 'duel', tag + 'phase ' + k + ' won: the run goes on');
+          const next = b.phases[k], heal = stake >= 5 ? 0 : (next.heal !== undefined ? next.heal : RUN.PHASE2_HEAL);
+          d = RUN.nextPhase(run);
+          eq(d.p.hp, hp + heal, tag + 'heal entering phase ' + (k + 1));
+          eq(d.pendingEvents.filter(e => e.t === 'heal').length, heal > 0 ? 1 : 0, tag + 'heal event entering phase ' + (k + 1));
+          eq(d.p.moves.length, 0, tag + 'the player starts phase ' + (k + 1) + ' with a clean record');
+        } else eq(run.stage, 'won', tag + 'the last phase wins the run');
+      }
+      ok(RUN.finish(run, meta, 1.7e12).light >= 0, tag + 'finish');
+      eq(meta.bosses.wins[b.id], 1, tag + 'the win is counted for this face');
+      // a save in the middle of a phase survives a round trip and resumes in the same phase
+      const again = RUN.create(meta, { seed: 32, now: 1.7e12, boss: b.id, stake });
+      again.duelN = 7; RUN.startDuel(again); again.duel.over = 'p'; RUN.endDuel(again, meta, 'p', null); RUN.nextPhase(again);
+      const copy = JSON.parse(JSON.stringify(again));
+      eq(copy.duel.phase, 2, tag + 'phase survives a save');
+      eq(RUN.cfg(copy, copy.duel).floor, b.phases[1].floor || 0, tag + 'rules are read back from the save');
+      eq(C.floorOf(copy.duel), b.phases[1].floor || 0, tag + 'floor survives a save');
+    }
+  });
+
+  // earning faces: only beating the newest earned face earns the next
+  const me = allMeta();
+  const beat = (id) => { const run = RUN.create(me, { seed: 3, now: 1.7e12, boss: id, anyBoss: true }); run.stage = 'won'; run.duelN = 7; run.phase = RUN.phaseCount(run); return RUN.finish(run, me, 1.7e12); };
+  eq(beat('unmasked').face, 'three_faced', 'beating The Unmasked earns The Three-Faced');
+  eq(beat('unmasked').face, null, 'beating an older face again earns nothing');
+  eq(beat('three_faced').face, 'hours', 'then The Hours');
+  eq(beat('hours').face, 'reflection', 'then The Reflection');
+  eq(beat('reflection').face, null, 'there is no fifth face');
+  eq(me.bosses.max, 4, 'all four earned');
+  eq(me.bosses.wins.unmasked, 2, 'wins are counted per face');
+  // an older fight shape still works: a duel object with no rules on it behaves as it used to
+  const legacy = mk([], [], { n: 7, phase: 2 }); delete legacy.floor; delete legacy.calls;
+  eq(C.floorOf(legacy), 1, 'a phase-2 duel saved before the faces keeps its floor');
+  eq(C.callsOf(legacy), true, 'and its Called Shot');
+  // the Rival's seat: ctx(duel, "r") is ctx(duel) with the fighters swapped
+  const cd = mk([], [], { n: 3 }); C.resolve(cd, 'S', 'G'); C.resolve(cd, 'F', 'F');
+  const cp = C.ctx(cd), cr = C.ctx(cd, 'r');
+  ok(cr.prev1 === 'F' && cr.prev2 === 'G' && cr.prevR === 'F' && cr.last === 'C' && cp.prev2 === 'S' && cr.pHp === cd.r.hp && cr.rHp === cd.p.hp, 'ctx from the Rival seat mirrors the fighters');
 }
 
 // ================================================================== 5. smoke sim

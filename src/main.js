@@ -77,9 +77,9 @@
       if (run.stage === 'duel') {
         var d = run.duel;
         if (d && d.over) {                       // the page closed between the last blow and the next screen
-          if (d.over === 'p' && run.duelN === 7 && d.phase === 1) {
+          if (d.over === 'p' && run.duelN === 7 && d.phase < R.Run.phaseCount(run)) {
             R.Run.endDuel(run, G.meta, 'p', null);
-            R.Run.startPhase2(run);
+            R.Run.nextPhase(run);
             G.save();
             E.go('duel', null, 0.4);
           } else G.duelOver(d.over);
@@ -106,8 +106,8 @@
         E.go('bonfire', null, 0.6);
         return;
       }
-      if (run.stage === 'duel') {                // duel 7, phase 1 won (normally handled inside the duel scene)
-        R.Run.startPhase2(run);
+      if (run.stage === 'duel') {                // duel 7, a phase won (normally handled inside the duel scene)
+        R.Run.nextPhase(run);
         G.save();
         E.go('duel', null, 0.4);
         return;
@@ -125,7 +125,12 @@
       if (fin.light > 0) {                       // a light of the Vigil was earned: it leads the reel
         var li = R.SceneKit && R.SceneKit.light ? R.SceneKit.light(fin.light) : null;
         if (li) unlocks.unshift({ id: 'vigil_' + li.id, type: 'vigil', ref: fin.light, name: li.name, how: R.Text.fill(TV.earned || '{rule}', { rule: li.rule }) });
-      } else if (won && stake >= R.Run.VIGIL.length && meta.vigil.wins[stake] === 1 && TV.lightlessWon) {
+      }
+      if (fin.face) {                            // a new face was earned: it leads everything
+        var TB = (R.Text && R.Text.bosses) || {}, tf = TB[fin.face] || {};
+        unlocks.unshift({ id: 'face_' + fin.face, type: 'face', ref: fin.face, name: tf.name || fin.face, how: tf.line || TB.earned || '' });
+      }
+      if (!fin.light && won && stake >= R.Run.VIGIL.length && meta.vigil.wins[stake] === 1 && TV.lightlessWon) {
         unlocks.unshift({ id: 'vigil_lightless', type: 'vigil', ref: stake, name: TV.lightlessWon.name, how: TV.lightlessWon.how });
       }
       G.last = {
@@ -134,7 +139,7 @@
         finishingMove: run.stats.lastMove || null, hp: Math.max(0, run.pHp || 0),
         unlocks: unlocks, firstWin: !!fin.firstWin, insights: insights,
         boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice(),
-        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal(), stake: stake
+        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal(), stake: stake, boss: R.Run.bossOf(run).id
       };
       G.run = null;
       G.save();

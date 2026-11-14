@@ -598,7 +598,32 @@
 
   var RULES = {
     embers: { name: "EMBERS", line: "Tension never falls below one pip." },
-    called_shot: { name: "CALLED SHOT", line: "Obey, lose: +2. Defy, win: its guard breaks." }
+    called_shot: { name: "CALLED SHOT", line: "Obey, lose: +2. Defy, win: its guard breaks." },
+    // the other faces (R.Run.BOSSES phase `cards`)
+    jester: { name: "THE JESTER", line: "It lies often. A lying stance: winner deals +1." },
+    mourner: { name: "THE MOURNER", line: "Its ripostes deal +1. Its first wound is dulled." },
+    blank: { name: "THE BLANK", line: "It shows no stance. Read it anyway." },
+    hours: { name: "THE HOURS", line: "Four short fights. Each bell raises the tension." },
+    bell_1: { name: "COMPLINE", line: "Tension never falls below one pip." },
+    bell_2: { name: "MATINS", line: "Tension never falls below two pips." },
+    bell_3: { name: "LAUDS", line: "Every exchange is a Deathblow." },
+    borrower: { name: "THE BORROWER", line: "It holds a copy of your boons." },
+    likeness: { name: "THE LIKENESS", line: "It plays as you would in its place." },
+    reflection: { name: "THE REFLECTION", line: "Your boons. Your habits. One pip of tension." }
+  };
+
+  // The faces it can wear in the final duel (keys are R.Run.BOSSES ids).
+  var BOSSES = {
+    omen: "waits at the altar tonight.",
+    atAltar: "AT THE ALTAR",
+    earned: "A new face waits at the altar.",
+    winsLabel: "BEATEN {n}",
+    unbeaten: "UNBEATEN",
+    unseen: "Beat the face before it to meet this one.",
+    unmasked: { name: "The Unmasked", icon: "mask_porcelain", line: "The mask breaks. What is under it calls your moves." },
+    three_faced: { name: "The Three-Faced", icon: "mask_jester", line: "Three masks, three moods: the liar, the mourner, the blank." },
+    hours: { name: "The Hours", icon: "mask_mourner", line: "Four short fights. Each bell raises the tension." },
+    reflection: { name: "The Reflection", icon: "mask_blank", line: "It stops predicting you and starts being you." }
   };
 
   // The Vigil (stakes). Seven lights; each one the player puts out hands the Rival what it guarded.
@@ -624,9 +649,9 @@
         line: "I wore an honest face for you. It never fit." },
       empty_hand: { name: "The Empty Hand", rule: "It arrives with a boon already drafted.",
         line: "I used to arrive with nothing. Manners. I am past them." },
-      moments_peace: { name: "A Moment's Peace", rule: "No healing when the mask breaks.",
+      moments_peace: { name: "A Moment's Peace", rule: "No healing between the phases of the last duel.",
         line: "You caught your breath while I changed. Not tonight." },
-      glass_jaw: { name: "The Glass Jaw", rule: "It has +{hp} health in every duel.",
+      glass_jaw: { name: "The Glass Jaw", rule: "It has +{hp} health in every fight.",
         line: "You thought my jaw was glass. I let you think it." },
       unsaid: { name: "The Unsaid", rule: "It calls your move out loud in every duel.",
         line: "Some things I was too polite to say. I am cured." }
@@ -701,6 +726,7 @@
   T.duelNames = DUEL_NAMES;
   T.rules = RULES;
   T.vigil = VIGIL;
+  T.bosses = BOSSES;
   T.ui = Object.assign({}, T.ui || {}, UI);
   if (T.taunts) T.taunts.dossier_headers = flatHeaders;   // the section-16 category name
 

@@ -28,7 +28,8 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 ## After ship
 
 - **The Vigil (stakes)**: seven lights, set on the relic screen; rules in `R.Run.cfg / healOf / lightsOut`, text in `R.Text.vigil`, numbers and sim table in `BALANCE.md` §8b, ruling 12 in `DESIGN.md`. Checked on screen at 375×812 and 360×640.
-- **Final-boss roster**: planned in four stages (data-driven final fight, The Three-Faced, The Hours, The Reflection). See "Bosses" below for what is built.
+- **Final-boss roster ("the faces at the altar")**: all four stages built. Duel 7 reads `R.Run.BOSSES`; The Unmasked (2 phases), The Three-Faced (3), The Hours (4) and The Reflection (3) are earned in order and then drawn per run. Rules in `src/game/run.js` (`cfg`, `startPhase`, `rivalFighter`) and `src/game/combat.js` (`floor`, `calls`, `stance`, `mimic` on the duel); AI modes `noTell` and `mimic` in `src/ai/brain.js`; staging in `transform()` in `src/scenes/duel.js`; text in `R.Text.bosses`, `R.Text.rules` and the `boss_*` taunt categories; numbers in `BALANCE.md` §8c; ruling 13 in `DESIGN.md`. Each face was played through on screen at 375×812.
+- Changed from the plan: The Three-Faced was planned as "always lies / always true / no stance". The first two are degenerate in a three-move game (one move can never lose), so the Jester and Mourner use lent boons instead. The mask change is a flash cut, not a new hand-to-face animation, and the boss music reuses the two existing cues rather than four levels.
 
 ## Polish passes
 
@@ -40,8 +41,13 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 - Nothing has run on a real phone: iOS audio unlock, haptics, safe-area insets, Safari zoom suppression and frame rate are unchecked.
 - The audio mix has only been tested against a mock audio graph; nobody has listened to it.
 - Motion and timing were judged from still frames and code, not from watching the game at speed.
+- The three newer faces were tuned against bots only. Whether a person finds The Hours' last phase tense or a coin flip, and whether The Reflection's "it plays as you" reads clearly, is untested.
+- The phase changes for the newer faces (mask swap, bell) were checked as still frames; their pacing and sound were not.
 
 ## Ideas for another session
+
+- Faces: a drawn mask-swap animation and distinct music per face; soften the newer faces at seven lights for unpredictable players (see `BALANCE.md` §8c).
+- Small extensions that keep the game simple: share your Rival as a code (the model is a few kilobytes), a date-seeded daily duel, letting the player show a stance too, a three-duel sprint run, titles the Rival gives you for how you play.
 
 - Listen to the audio and remix; the clang, the boss lead and the phase-two theme were flagged as most in need of an ear.
 - Art second pass: the Rival's Strike stance could be taller, its kneel is cramped, the bonfire bell and seated figures are serviceable rather than characterful.

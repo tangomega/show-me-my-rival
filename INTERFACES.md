@@ -169,6 +169,26 @@ R.Run.pick(run, boonId)                               // player drafts; run.duel
 R.Run.finish(run, meta, now) -> { unlocks:[unlock], firstWin:bool }   // updates memory + unlocks
 ```
 
+Added after ship (the Vigil and the faces of the final duel):
+
+```
+meta.vigil  = { max, sel, wins:[8] }                  // lights earned, lights chosen, wins per number out
+meta.bosses = { max, wins:{id:n}, last:id|null }      // faces earned (BOSSES order), wins per face, last run's face
+run.stake, run.rivalHead, run.boss                    // lights out, The Empty Hand's boon, the face in duel 7
+R.Run.create(meta, { ..., stake, anyStake, boss, anyBoss, dossier })
+R.Run.VIGIL            // [{ id, name }] x7             R.Run.VIGIL_TUNE   { healCut, hp, callsFrom }
+R.Run.BOSSES           // [{ id, name, phases:[{ name, hp, exploit, honesty, heal, floor, calls, stance, mimic, innate,
+                       //    fortify, copyBoons, who, mask, arena, witch, music, change, cards }] }]
+R.Run.cfg(run, duel) -> row                           // numbers after the Vigil + this phase's rules and look; use instead of DUELS
+R.Run.bossOf(run) / phaseCount(run) / stakeOf(run) / lightsOut(run) / healOf(run)
+R.Run.startPhase(run, k) / nextPhase(run) -> duel     // startPhase2(run) is startPhase(run, 2)
+R.Run.finish(...) also returns { light: 0..7, face: id|null }
+duel.floor, duel.calls, duel.stance, duel.mimic       // set by R.Run; read with R.Combat.floorOf(duel) / callsOf(duel)
+R.Combat.ctx(duel, 'r')                               // the same picture from the Rival's seat
+brain.commit({ ..., noTell:true })                    // no stance is shown
+brain.commit({ ..., mimic: ctxFromRivalSeat })        // it plays as the player would
+```
+
 ## R.Engine — `src/core/engine.js` (DOM)
 
 ```

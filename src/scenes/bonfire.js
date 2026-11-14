@@ -243,7 +243,11 @@
         pStrip: [], rStrip: [],
         hp: run.pHp, hpMax: Math.max(1, run.pMaxHp), hpShown: skip ? run.pHp : Math.max(0, run.pHp - (o.healed || 0)), hpN: -1, hpStr: '',
         barOpts: { ticks: Math.max(1, run.pMaxHp) },
-        nextA: 'NEXT: DUEL ' + next, nextB: names[next - 1] ? String(names[next - 1]).toUpperCase() : '',
+        // once more than one face has been earned, the last fire names the one that waits at the altar
+        nextA: 'NEXT: DUEL ' + next,
+        nextB: next === 7 && R.Run.repairMeta(G.meta).bosses.max > 1
+          ? String((((R.Text || {}).bosses || {})[R.Run.bossOf(run).id] || {}).name || R.Run.bossOf(run).name).toUpperCase()
+          : (names[next - 1] ? String(names[next - 1]).toUpperCase() : ''),
         banner: skip ? 9 : 0, restText: K.ui('rest', 'REST'),
         pickHead: K.ui('itChoosesFirst', 'IT CHOOSES FIRST'), pickOne: K.ui('pickOne', 'PICK ONE'),
         hint: K.wrap('Tap a card to read it. Its pick is above.', 160, 2),
@@ -260,7 +264,7 @@
         S.cards.push({ info: K.boonInfo(o.choices[i], o.choices.length > 3 ? 60 : 48, 160), x: 0, y: 0, w: 56, h: CARD_H, oy: 0, shown: false });
       }
       for (i = 0; i < run.pBoons.length && i < 7; i++) S.pStrip.push(K.boonInfo(run.pBoons[i], 48, 160));
-      for (i = 0; i < run.rBoons.length && i < 6; i++) {
+      for (i = 0; i < run.rBoons.length && i < 7; i++) {      // 7: six drafts plus The Empty Hand's head start
         S.rStrip.push(run.rBoons[i] === o.rivalPick && S.rv.info ? S.rv.info : K.boonInfo(run.rBoons[i], 48, 160));
       }
       layout();

@@ -20,7 +20,7 @@ Each turn you and the Rival secretly pick one of three moves.
 - **The Rival always commits first.** Its sealed sigil drops before your buttons light up, and both sigils crack open at the same instant. Nothing you tap can change or read its choice.
 - **Read the stance.** Before you pick, the Rival takes a stance that hints at its move, and the game names it for you. Early in a run the stance is honest. Later it lies, and it lies more the more you believe it.
 - **A run is seven duels** with a bonfire between each. Your health is one pool for the whole run (26, with a small heal at each fire). At the bonfire the Rival drafts a boon *first*, you see what it took, then you pick one of three.
-- **The seventh duel has a second phase.** In it the Rival calls your move out loud on some turns. Prove it wrong.
+- **The seventh duel has more than one phase.** At first it is The Unmasked: the mask breaks and the Rival calls your move out loud on some turns. Beat that and other faces start to appear, with up to four phases (see below).
 - Tap the small ledger button under the tension pips to read both fighters' boons mid-duel, and to toggle sound.
 
 The first duel teaches all of this in under 30 seconds, with the Rival doing the teaching.
@@ -61,8 +61,8 @@ Seven lights keep watch over you. Each win with every earned light out earns the
 | 2. The Kinder Fire | Bonfires heal 4, not 6 |
 | 3. The Honest Face | Its stances start lying one duel sooner |
 | 4. The Empty Hand | It arrives with a boon already drafted (shown to you) |
-| 5. A Moment's Peace | No healing when the mask breaks |
-| 6. The Glass Jaw | It has +1 health in every duel |
+| 5. A Moment's Peace | No healing between the phases of the last duel |
+| 6. The Glass Jaw | It has +1 health in every fight |
 | 7. The Unsaid | It calls your move out loud in every duel |
 
 Run win rate by lights out (8 chains of 300 runs per bot):
@@ -74,6 +74,28 @@ Run win rate by lights out (8 chains of 300 runs per bot):
 | Creature of habit | 10 | 8 | 7 | 4 | 2 | 2 | 1 | 0.5 |
 
 Lights 1, 3 and 7 make the Rival sharper rather than tougher, so they cost a predictable player far more than an unpredictable one.
+
+## The faces at the altar (final bosses)
+
+It is always the same duelist, but the seventh duel has four possible faces. Beating one for the first time earns the next; after that each run draws one of those you have earned (never the same twice running) and names it at the start of the run and again at the last bonfire, so you can draft for it.
+
+| Face | Phases | What changes |
+|---|---|---|
+| **The Unmasked** | 2 | The mask breaks. Tension never drops below one pip, and it calls your move aloud. |
+| **The Three-Faced** | 3 | *The Jester* lies often, and a lying stance makes the winner's hit +1. *The Mourner* ripostes harder and shrugs off its first wound. *The Blank* shows no stance at all. |
+| **The Hours** | 4 | Four short fights as the night passes. Each bell raises the tension floor by one, so the last phase is all Deathblows. The arena turns from night to blood moon to dawn. |
+| **The Reflection** | 3 | *The Borrower* holds a copy of your boons. *The Likeness* takes your shape and picks its moves the way its model says you would. The last phase does both. |
+
+Chance of winning the final duel once you reach it (8 chains of 300 runs per bot, no lights out):
+
+| | Unmasked | Three-Faced | Hours | Reflection |
+|---|---|---|---|---|
+| Adaptive stance-reader | 70% | 72% | 71% | 75% |
+| Equilibrium mixer | 64% | 64% | 61% | 61% |
+| Uniform random | 51% | 54% | 50% | 55% |
+| Creature of habit | 23% | 24% | 16% | 32% |
+
+Every face still seals its move before your buttons light up. With all seven lights out the three newer faces are harder on an unpredictable player than The Unmasked is (about 31% against 39%), because the extra health and the missing heals apply once per phase.
 
 ## Design highlights
 

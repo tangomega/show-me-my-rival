@@ -663,7 +663,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     if (who === 'rival') t.transform = A(rep(10, 100));
     return t;
   }
-  var ANIMS = { player: table('player'), rival: table('rival'), rival2: table('rival2') };
+  // 'mirror' = The Reflection: the player's own poses and timings, redrawn in the Rival's colours (see MIRROR_MAP).
+  var ANIMS = { player: table('player'), rival: table('rival'), rival2: table('rival2'), mirror: table('player') };
+  // umber cloak -> the Rival's reds; bandages -> porcelain. Steel is left alone.
+  var MIRROR_MAP = {};
+  MIRROR_MAP[13] = 18; MIRROR_MAP[14] = 17; MIRROR_MAP[15] = 16; MIRROR_MAP[12] = 9; MIRROR_MAP[11] = 10;
 
   function anim(who, name) { var t = ANIMS[who]; return (t && t[name]) || null; }
 
@@ -2168,13 +2172,16 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   // Frames, caches, public API
   // =============================================================================================
   function poseOf(who, name, f) {
-    var list = FR[who][name] || (who === 'rival2' && FR.rival[name]) || FR[who].idle || FR.rival.idle;
+    var src = who === 'mirror' ? 'player' : who;
+    var list = FR[src][name] || (who === 'rival2' && FR.rival[name]) || FR[src].idle || FR.rival.idle;
     return list[f < list.length ? f : list.length - 1];
   }
 
   function rawImg(who, name, f, mi) {
     var a = ANIMS[who][name], row = a.raw[mi] || (a.raw[mi] = []);
-    return row[f] || (row[f] = compose(who, poseOf(who, name, f), MASKS[mi], f));
+    if (row[f]) return row[f];
+    if (who === 'mirror') return (row[f] = Pix.remapped(compose('player', poseOf(who, name, f), MASKS[0], f), MIRROR_MAP));
+    return (row[f] = compose(who, poseOf(who, name, f), MASKS[mi], f));
   }
   // rival2 afterimage: the silhouette of a frame in bruise violet, checkerboarded unless solid
   function trail(img, solid) {
@@ -2189,7 +2196,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     if (!t) { who = 'player'; t = ANIMS.player; }
     a = t[name]; if (!a) { name = 'idle'; a = t.idle; }
     f = f | 0; if (f < 0) f = 0; else if (f >= a.n) f = a.n - 1;
-    mi = who === 'player' ? 0 : (MASK_IX[mask] || 0);
+    mi = who === 'player' || who === 'mirror' ? 0 : (MASK_IX[mask] || 0);
     row = a.im[mi] || (a.im[mi] = []);
     img = row[f];
     if (img) return img;
@@ -2212,7 +2219,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     if (!t) { who = 'player'; t = ANIMS.player; }
     a = t[name]; if (!a) { name = 'idle'; a = t.idle; }
     frame = frame | 0; if (frame < 0) frame = 0; else if (frame >= a.n) frame = a.n - 1;
-    if (opts && opts.mask && who !== 'player') mi = MASK_IX[opts.mask] || 0;
+    if (opts && opts.mask && who !== 'player' && who !== 'mirror') mi = MASK_IX[opts.mask] || 0;
     k = frame * 4 + (opts && opts.flip ? 2 : 0) + (opts && opts.white ? 1 : 0);
     row = a.cv[mi] || (a.cv[mi] = []);
     cv = row[k];
@@ -5973,6 +5980,51 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       "You snuffed the last one yourself. I only watched."
     ],
 
+    // The other faces of the final duel: boss_<id>_intro when duel 7 begins, boss_<id>_p<k> as phase k begins.
+    boss_three_faced_intro: [
+      "Three faces tonight. You will dislike each one differently.",
+      "I brought three masks. One of them is honest. Briefly.",
+      "Tonight I am several people. All of them know you."
+    ],
+    boss_three_faced_p2: [
+      "The Jester is done laughing. The Mourner does not tire.",
+      "A sadder face. It hits back harder when you strike."
+    ],
+    boss_three_faced_p3: [
+      "No face now. Nothing to read. Only what I know of you.",
+      "The last mask is no mask. Guess. I will not be guessing."
+    ],
+    boss_hours_intro: [
+      "Vespers. The night is long and I mean to use all of it.",
+      "Four hours until dawn. You will not like the last one.",
+      "Listen for the bell. Each time, the air gets sharper."
+    ],
+    boss_hours_p2: [
+      "Compline. The air has an edge now. It stays.",
+      "One bell. The tension keeps a pip in reserve."
+    ],
+    boss_hours_p3: [
+      "Matins. The dead of night. Two pips, always.",
+      "Two bells. Every touch cuts deeper now."
+    ],
+    boss_hours_p4: [
+      "Lauds. Dawn is close and every blow is the last one.",
+      "The last bell. No small wounds from here."
+    ],
+    boss_reflection_intro: [
+      "I kept a copy of everything you drafted. It suits me.",
+      "Recognise these? You chose them. I only borrowed.",
+      "Tonight I fight with your tools. Then with your habits."
+    ],
+    boss_reflection_p2: [
+      "Look closer. This is how you move. I have been watching.",
+      "I stopped predicting you. It is easier to be you."
+    ],
+    boss_reflection_p3: [
+      "Your boons, your habits, your shape. Beat yourself.",
+      "Everything you are, facing you. Prove you are more."
+    ],
+
     final_duel_intro: [
       "Seven. The altar. You know every stone by now; you've died on most of them.",
       "No more lessons. I know you by heart. Come and be known.",
@@ -6798,7 +6850,32 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
   var RULES = {
     embers: { name: "EMBERS", line: "Tension never falls below one pip." },
-    called_shot: { name: "CALLED SHOT", line: "Obey, lose: +2. Defy, win: its guard breaks." }
+    called_shot: { name: "CALLED SHOT", line: "Obey, lose: +2. Defy, win: its guard breaks." },
+    // the other faces (R.Run.BOSSES phase `cards`)
+    jester: { name: "THE JESTER", line: "It lies often. A lying stance: winner deals +1." },
+    mourner: { name: "THE MOURNER", line: "Its ripostes deal +1. Its first wound is dulled." },
+    blank: { name: "THE BLANK", line: "It shows no stance. Read it anyway." },
+    hours: { name: "THE HOURS", line: "Four short fights. Each bell raises the tension." },
+    bell_1: { name: "COMPLINE", line: "Tension never falls below one pip." },
+    bell_2: { name: "MATINS", line: "Tension never falls below two pips." },
+    bell_3: { name: "LAUDS", line: "Every exchange is a Deathblow." },
+    borrower: { name: "THE BORROWER", line: "It holds a copy of your boons." },
+    likeness: { name: "THE LIKENESS", line: "It plays as you would in its place." },
+    reflection: { name: "THE REFLECTION", line: "Your boons. Your habits. One pip of tension." }
+  };
+
+  // The faces it can wear in the final duel (keys are R.Run.BOSSES ids).
+  var BOSSES = {
+    omen: "waits at the altar tonight.",
+    atAltar: "AT THE ALTAR",
+    earned: "A new face waits at the altar.",
+    winsLabel: "BEATEN {n}",
+    unbeaten: "UNBEATEN",
+    unseen: "Beat the face before it to meet this one.",
+    unmasked: { name: "The Unmasked", icon: "mask_porcelain", line: "The mask breaks. What is under it calls your moves." },
+    three_faced: { name: "The Three-Faced", icon: "mask_jester", line: "Three masks, three moods: the liar, the mourner, the blank." },
+    hours: { name: "The Hours", icon: "mask_mourner", line: "Four short fights. Each bell raises the tension." },
+    reflection: { name: "The Reflection", icon: "mask_blank", line: "It stops predicting you and starts being you." }
   };
 
   // The Vigil (stakes). Seven lights; each one the player puts out hands the Rival what it guarded.
@@ -6824,9 +6901,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         line: "I wore an honest face for you. It never fit." },
       empty_hand: { name: "The Empty Hand", rule: "It arrives with a boon already drafted.",
         line: "I used to arrive with nothing. Manners. I am past them." },
-      moments_peace: { name: "A Moment's Peace", rule: "No healing when the mask breaks.",
+      moments_peace: { name: "A Moment's Peace", rule: "No healing between the phases of the last duel.",
         line: "You caught your breath while I changed. Not tonight." },
-      glass_jaw: { name: "The Glass Jaw", rule: "It has +{hp} health in every duel.",
+      glass_jaw: { name: "The Glass Jaw", rule: "It has +{hp} health in every fight.",
         line: "You thought my jaw was glass. I let you think it." },
       unsaid: { name: "The Unsaid", rule: "It calls your move out loud in every duel.",
         line: "Some things I was too polite to say. I am cured." }
@@ -6901,6 +6978,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   T.duelNames = DUEL_NAMES;
   T.rules = RULES;
   T.vigil = VIGIL;
+  T.bosses = BOSSES;
   T.ui = Object.assign({}, T.ui || {}, UI);
   if (T.taunts) T.taunts.dossier_headers = flatHeaders;   // the section-16 category name
 
@@ -7330,6 +7408,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         t = lr[i];
         var acc = [base[0], base[1], base[2]], tw = bw;
         for (e = NH; e < NE; e++) {
+          if (q.noTell) break;                           // no stance is shown: nothing for the player to respond to
           if (!expertP(e, tellKey(e, t, ctx), t, legalP, tmp)) continue;
           var w = s.w[e];
           acc[0] += w * tmp[0]; acc[1] += w * tmp[1]; acc[2] += w * tmp[2];
@@ -7361,7 +7440,22 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         var exploit = num(q.exploit, 0, 1, 0.5);
         var h = honesty(q.honestyBase);
         var honest = rng.next() < h;
-        if (!(rng.next() < exploit)) {
+        if (q.noTell) honest = true;                     // the stance is never seen, so it carries nothing
+        if (q.mimic && typeof q.mimic === 'object') {
+          // 'mimic': it plays the move the player would most likely play in its seat (q.mimic = that context),
+          // sampled from the same model it uses to predict them. The stance is honest with probability h.
+          mode = 'mimic';
+          rng.next();                                    // keeps the dice count the same as the other branches
+          var mp = predictIdx(q.mimic, lr), wm = [];
+          for (i = 0; i < lr.length; i++) wm.push(mp[lr[i]]);
+          move = lr[sampleIdx(wm, wm.length, rng.next())];
+          tell = move;
+          if (!honest) {
+            var lies2 = [];
+            for (i = 0; i < lr.length; i++) if (lr[i] !== move) lies2.push(lr[i]);
+            if (lies2.length) tell = lies2[Math.min(lies2.length - 1, Math.floor(rng.next() * lies2.length))];
+          }
+        } else if (!(rng.next() < exploit)) {
           // 'mix': equilibrium move, tell honest with probability h, otherwise either lie shape
           var wr = [];
           for (i = 0; i < lr.length; i++) wr.push(eq.r[lr[i]]);
@@ -8469,13 +8563,19 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
   function newDuel(o) {
     o = o || {};
+    var phase = o.phase >= 2 ? Math.floor(o.phase) : 1;
+    // Rules of this fight (R.Run sets them from the boss table). Callers that pass only a phase get the
+    // classic second phase: a tension floor of 1 (Embers) and Called Shot.
+    var floor = typeof o.floor === 'number' ? Math.max(0, Math.min(TENSION_MAX, Math.floor(o.floor))) : (phase >= 2 ? 1 : 0);
     var duel = {
       n: o.n || 1,
-      phase: o.phase === 2 ? 2 : 1,
+      phase: phase,
       turn: 1,
-      tension: o.phase === 2 || o.embers ? 1 : 0,   // Embers: the duel starts at (and never drops below) 1 pip
-      embers: o.phase === 2 || !!o.embers,     // phase 2 always; earlier duels when the Vigil says so
-      calls: o.phase === 2 || !!o.calls,       // Called Shot may be used in this duel
+      tension: floor,                          // the duel starts at (and never drops below) its floor
+      floor: floor,
+      calls: o.calls !== undefined ? !!o.calls : phase >= 2,   // Called Shot may be used in this duel
+      stance: o.stance || null,                // 'none': the Rival shows no stance
+      mimic: !!o.mimic,                        // the Rival picks its move the way the player would
       p: o.p || newFighter(12, 12, []),
       r: o.r || newFighter(6, 6, []),
       over: null,
@@ -8503,8 +8603,13 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     return out;
   }
 
-  function ctx(duel) {
-    var p = duel.p, r = duel.r, pm = p.moves, n = pm.length;
+  function floorOf(duel) { return typeof duel.floor === 'number' ? duel.floor : (duel.phase === 2 ? 1 : 0); }
+  function callsOf(duel) { return duel.calls !== undefined ? !!duel.calls : duel.phase === 2; }
+
+  // The player's situation, as the brain keys its habits. side 'r' gives the same picture from the Rival's seat
+  // (used when it plays as the player would).
+  function ctx(duel, side) {
+    var p = side === 'r' ? duel.r : duel.p, r = side === 'r' ? duel.p : duel.r, pm = p.moves, n = pm.length;
     return {
       duel: duel.n, phase: duel.phase, turn: duel.turn,
       prev1: n >= 1 ? pm[n - 1] : null,
@@ -8608,7 +8713,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       var W = duel[w], L = duel[l];
       var xw = w === 'p' ? xp : xr, xl = w === 'p' ? xr : xp;
       var wm = xw.my;
-      var called = (duel.phase === 2 || duel.calls) && intel.called ? intel.called : null;
+      var called = callsOf(duel) && intel.called ? intel.called : null;
       res.winner = w;
       xw.won = true;
       xl.lost = true;
@@ -8624,7 +8729,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       }
 
       dmg += T;                                               // tension pips
-      duel.tension = duel.phase === 2 || duel.embers ? 1 : 0; // Embers: floor of 1
+      duel.tension = floorOf(duel);                           // Embers: back to the floor, not to 0
       if (T > 0) ev.push({ t: 'tension', n: duel.tension, from: T, spent: T });
       if (T >= TENSION_MAX) { res.deathblow = true; ev.push({ t: 'deathblow', side: w }); }
 
@@ -8781,6 +8886,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     newDuel: newDuel,
     legal: legal,
     ctx: ctx,
+    floorOf: floorOf,
+    callsOf: callsOf,
     payoff: payoff,
     beginTurn: beginTurn,
     resolve: resolve,
@@ -8860,6 +8967,44 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     };
   })();
 
+  // ---------------------------------------------------------------- the final duel: the Faces at the Altar
+  // Order = unlock order: beating a face once earns the next; a run then draws one from those earned.
+  // Phase 1 of every face starts from the duel-7 row of DUELS, later phases from DUELS.phase2, unless the
+  // phase gives its own hp / exploit / honesty. Per phase:
+  //   name, hp, exploit, honesty   numbers (optional)
+  //   heal        player heal on entering this phase (default PHASE2_HEAL; phases 2+ only)
+  //   floor       tension floor 0..3          calls   Called Shot is live
+  //   stance      'none' = it shows no stance  mimic   it picks its move the way the player would
+  //   innate      [boon ids] it holds for this phase only      fortify  it starts the phase with this much
+  //   copyBoons   it also holds every boon of the player's that it is able to hold
+  //   who, mask, arena, witch, music   how it looks and sounds (scene)
+  //   change      how the previous phase ends: 'shatter' | 'swap' | 'bell'      cards  [R.Text.rules ids] shown after
+  var BOSSES = [
+    { id: 'unmasked', name: 'The Unmasked', phases: [
+      { name: 'The Altar' },
+      { name: 'The Unmasked', floor: 1, calls: true, who: 'rival2', witch: true, music: 'boss2', change: 'shatter', cards: ['embers', 'called_shot'] }
+    ] },
+    // Three masks, three moods. Each face leans on one thing: the lie, the guard, and finally nothing to read at all.
+    { id: 'three_faced', name: 'The Three-Faced', phases: [
+      { name: 'The Jester', hp: 5, honesty: 0.30, mask: 'jester', innate: ['painted_smile'], cards: ['jester'] },
+      { name: 'The Mourner', hp: 4, heal: 3, mask: 'mourner', innate: ['thorned_guard'], fortify: 1, change: 'swap', cards: ['mourner'] },
+      { name: 'The Blank', hp: 5, heal: 3, mask: 'blank', stance: 'none', music: 'boss2', change: 'swap', cards: ['blank'] }
+    ] },
+    // The night passes in four short fights; every bell raises the tension floor by one.
+    { id: 'hours', name: 'The Hours', phases: [
+      { name: 'Vespers', hp: 4, cards: ['hours'] },
+      { name: 'Compline', hp: 4, heal: 3, floor: 1, change: 'bell', cards: ['bell_1'] },
+      { name: 'Matins', hp: 4, heal: 3, floor: 2, arena: 'blood_moon', music: 'boss2', change: 'bell', cards: ['bell_2'] },
+      { name: 'Lauds', hp: 4, heal: 3, floor: 3, arena: 'pale_dawn', music: 'boss2', change: 'bell', cards: ['bell_3'] }
+    ] },
+    // It stops predicting the player and starts being the player: first their boons, then their habits, then both.
+    { id: 'reflection', name: 'The Reflection', phases: [
+      { name: 'The Borrower', hp: 5, copyBoons: true, cards: ['borrower'] },
+      { name: 'The Likeness', hp: 5, heal: 3, who: 'mirror', mimic: true, change: 'shatter', cards: ['likeness'] },
+      { name: 'The Reflection', hp: 5, heal: 3, who: 'mirror', mimic: true, copyBoons: true, floor: 1, witch: true, music: 'boss2', change: 'swap', cards: ['reflection'] }
+    ] }
+  ];
+
   // ---------------------------------------------------------------- helpers
 
   function byId(id) { return R.Boons.byId[id]; }
@@ -8884,9 +9029,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         lastPlayed: 0, firstPlayed: 0, lastFavorite: null, favorites: [], totalTurns: 0
       },
       // max: lights the player has earned the right to put out. sel: how many they choose to. wins[s]: wins with s out.
-      vigil: { max: 0, sel: 0, wins: [0, 0, 0, 0, 0, 0, 0, 0] }
+      vigil: { max: 0, sel: 0, wins: [0, 0, 0, 0, 0, 0, 0, 0] },
+      // max: how many faces (BOSSES, in order) have been earned. wins: { id: n }. last: the face of the previous run.
+      bosses: { max: 1, wins: {}, last: null }
     };
   }
+  function bossIndex(id) { for (var i = 0; i < BOSSES.length; i++) if (BOSSES[i].id === id) return i; return -1; }
+  function bossOf(run) { var i = run ? bossIndex(run.boss) : -1; return BOSSES[i < 0 ? 0 : i]; }
+  function phaseCount(run) { return bossOf(run).phases.length; }
   function clampStake(v) { v = Math.floor(num(v, 0)); return v < 0 ? 0 : v > VIGIL_MAX ? VIGIL_MAX : v; }
   function stakeOf(run) { return run ? clampStake(run.stake) : 0; }
 
@@ -8915,6 +9065,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     if (!Array.isArray(vg.wins)) vg.wins = [];
     for (k = 0; k <= VIGIL_MAX; k++) vg.wins[k] = Math.max(0, Math.floor(num(vg.wins[k], 0)));
     vg.wins.length = VIGIL_MAX + 1;
+    var bs = meta.bosses;
+    if (!bs || typeof bs !== 'object') bs = meta.bosses = d.bosses;
+    bs.max = Math.max(1, Math.min(BOSSES.length, Math.floor(num(bs.max, 1))));
+    if (!bs.wins || typeof bs.wins !== 'object') bs.wins = {};
+    if (bossIndex(bs.last) < 0) bs.last = null;
     return meta;
   }
 
@@ -8987,8 +9142,18 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       daysAway: days,                          // extra: days since the previous visit (for brain.beginRun)
       finished: null,
       stake: stake,                            // the Vigil: how many lights are out for this run
-      rivalHead: null                          // The Empty Hand: the boon the Rival walked in with
+      rivalHead: null,                         // The Empty Hand: the boon the Rival walked in with
+      boss: BOSSES[0].id                       // the face it will wear in duel 7
     };
+    // Which face: any earned one, but not the one from the previous run (its own stream: the run's rng is untouched).
+    var bs = meta.bosses, bi = bossIndex(o.boss);
+    if (bi >= 0 && (o.anyBoss || bi < bs.max)) run.boss = BOSSES[bi].id;
+    else if (bs.max >= 2) {
+      var faces = [], fi;
+      for (fi = 0; fi < bs.max; fi++) if (BOSSES[fi].id !== bs.last) faces.push(BOSSES[fi].id);
+      run.boss = faces[R.RNG.create((seed ^ 0x7f4a7c15) >>> 0).int(faces.length)];
+    }
+    bs.last = run.boss;
     if (stake >= 4) {                          // The Empty Hand: it drafts once before duel 1 (bonfire-1 odds)
       var rng = rngOf(run);
       var head = rivalDraft(run, meta, o.dossier || null, rng);
@@ -9001,18 +9166,58 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   // ---------------------------------------------------------------- the Vigil
 
   // Effective duel table row for this run (see VIGIL for which light does what).
+  // Phase k of this run's face before the Vigil touches it: { def, base, k, hp, exploit, honesty }.
+  function finalRow(run, k) {
+    var D = R.Run.DUELS, b = bossOf(run);
+    k = Math.max(1, Math.min(b.phases.length, Math.floor(num(k, 1))));
+    var def = b.phases[k - 1], base = k === 1 ? D[7] : D.phase2;
+    return { def: def, base: base, k: k, hp: num(def.hp, base.rivalHp), exploit: num(def.exploit, base.exploit), honesty: num(def.honesty, base.honesty) };
+  }
+  // Everything a fight needs to know about itself: the numbers (after the Vigil) and, in duel 7, the phase's rules and look.
   function cfg(run, duel) {
     var D = R.Run.DUELS, s = stakeOf(run);
-    var n = duel ? duel.n : run.duelN, p2 = !!(duel ? duel.phase === 2 : run.phase === 2);
-    var base = p2 ? D.phase2 : D[n];
-    if (s < 1) return base;
-    var next = p2 ? null : (n < 7 ? D[n + 1] : D.phase2);
-    var ex = next ? next.exploit : base.exploit;
-    var ho = s >= 3 && next ? (n < 7 ? next.honesty : (base.honesty + next.honesty) / 2) : base.honesty;
-    return { n: base.n, name: base.name, rivalHp: base.rivalHp + (s >= 6 ? VT.hp : 0), exploit: ex, honesty: ho, tau: tau(ex), rivalBoons: base.rivalBoons, variant: base.variant };
+    var n = duel ? duel.n : run.duelN, fin = n >= 7;
+    var row = fin ? finalRow(run, duel ? duel.phase : run.phase) : null;
+    var base = fin ? row.base : D[n], def = fin ? row.def : null, count = fin ? phaseCount(run) : 1, k = fin ? row.k : 1;
+    var hp = fin ? row.hp : base.rivalHp, ex = fin ? row.exploit : base.exploit, ho = fin ? row.honesty : base.honesty;
+    if (s >= 1) {                                // one step early: the next duel's (or phase's) numbers
+      var next = !fin ? (n < 6 ? D[n + 1] : finalRow(run, 1)) : (k < count ? finalRow(run, k + 1) : null);
+      if (next) {
+        ex = next.exploit;
+        if (s >= 3) ho = fin ? (ho + next.honesty) / 2 : next.honesty;
+      }
+    }
+    if (s >= 6) hp += VT.hp;
+    return {
+      n: base.n, name: (def && def.name) || base.name, rivalHp: hp, exploit: ex, honesty: ho, tau: tau(ex),
+      rivalBoons: base.rivalBoons, variant: base.variant,
+      phase: k, phases: count, last: !fin || k >= count,
+      floor: def ? num(def.floor, 0) : 0, calls: !!(def && def.calls), stance: (def && def.stance) || null, mimic: !!(def && def.mimic),
+      innate: (def && def.innate) || null, fortify: def ? num(def.fortify, 0) : 0, copyBoons: !!(def && def.copyBoons),
+      heal: def && typeof def.heal === 'number' ? def.heal : null,
+      who: (def && def.who) || 'rival', mask: (def && def.mask) || null, arena: (def && def.arena) || null, witch: !!(def && def.witch),
+      music: (def && def.music) || (fin ? 'boss' : 'drone'), change: (def && def.change) || null, cards: (def && def.cards) || null
+    };
+  }
+  // The Rival's fighter for a fight: its drafted boons plus whatever this phase lends it.
+  function rivalFighter(run, D) {
+    var ids = run.rBoons.slice(), i, b, inn = D.innate || [];
+    for (i = 0; i < inn.length; i++) if (ids.indexOf(inn[i]) < 0 && byId(inn[i])) ids.push(inn[i]);
+    if (D.copyBoons) {
+      for (i = 0; i < run.pBoons.length; i++) {
+        b = byId(run.pBoons[i]);
+        if (b && !b.relic && b.who === 'both' && !b.active && ids.indexOf(b.id) < 0) ids.push(b.id);
+      }
+    }
+    var r = R.Combat.newFighter(D.rivalHp, D.rivalHp, ids);
+    if (D.fortify > 0) r.status.fortify = D.fortify;
+    return r;
+  }
+  function duelOpts(run, D, n, k, p, r) {
+    return { n: n, phase: k, p: p, r: r, floor: D.floor, calls: D.calls || callsOn(run, n), stance: D.stance, mimic: D.mimic };
   }
   function healOf(run) { return Math.max(0, R.Run.HEAL - (stakeOf(run) >= 2 ? VT.healCut : 0)); }
-  function phase2HealOf(run) { return stakeOf(run) >= 5 ? 0 : R.Run.PHASE2_HEAL; }
+  function phaseHealOf(run, D) { return stakeOf(run) >= 5 ? 0 : (D && D.heal !== null && D.heal !== undefined ? D.heal : R.Run.PHASE2_HEAL); }
   function callsOn(run, n) { return stakeOf(run) >= 7 && n >= VT.callsFrom; }
   // The lights that are out for this run, in order: [{ k, id, name }].
   function lightsOut(run) {
@@ -9049,14 +9254,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     if (run.duelN > 7) run.duelN = 7;
     var D = cfg(run, { n: run.duelN, phase: 1 });
     var p = R.Combat.newFighter(run.pMaxHp, run.pHp, run.pBoons);
-    var r = R.Combat.newFighter(D.rivalHp, D.rivalHp, run.rBoons);
+    var r = rivalFighter(run, D);
     applySpent(p, s.spent.p);
     applySpent(r, s.spent.r);
     run.phase = 1;
     run.stage = 'duel';
     run.pending = null;
     run.offer = null;
-    run.duel = R.Combat.newDuel({ n: run.duelN, phase: 1, p: p, r: r, calls: callsOn(run, run.duelN) });
+    run.duel = R.Combat.newDuel(duelOpts(run, D, run.duelN, 1, p, r));
     return run.duel;
   }
 
@@ -9078,13 +9283,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     }
   }
 
-  // Final duel only: the Rival transforms. Keeps the player fighter (boons, counters, charges).
-  function startPhase2(run) {
+  // Final duel only: the Rival changes into phase k of its face. Keeps the player fighter (boons, counters, charges).
+  function startPhase(run, k) {
     var s = statsOf(run);
     var old = run.duel;
-    var D = cfg(run, { n: 7, phase: 2 });
-    var p, r;
     run.duelN = 7;
+    k = Math.max(2, Math.min(phaseCount(run), Math.floor(num(k, 2))));
+    var D = cfg(run, { n: 7, phase: k });
+    var p, r;
     if (old) {
       closeSegment(run, 'p');
       p = old.p;
@@ -9096,23 +9302,25 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     p.status = { guardBroken: 0, bleed: 0, fortify: 0, focus: 0, sealed: { S: 0, G: 0, F: 0 } };
     p.moves = [];
     p.results = [];
-    var healed = Math.max(0, Math.min(phase2HealOf(run), p.maxHp - p.hp));
+    var healed = Math.max(0, Math.min(phaseHealOf(run, D), p.maxHp - p.hp));
     p.hp += healed;
-    r = R.Combat.newFighter(D.rivalHp, D.rivalHp, run.rBoons);
+    r = rivalFighter(run, D);
     if (old) {                                   // same duel: per-duel caps and charges carry over
-      var k;
-      for (k in old.r.counters) r.counters[k] = old.r.counters[k];
-      for (k in old.r.charges) r.charges[k] = old.r.charges[k];
+      var key;                                   // (not k: that is the phase number)
+      for (key in old.r.counters) r.counters[key] = old.r.counters[key];
+      for (key in old.r.charges) r.charges[key] = old.r.charges[key];
     }
     applySpent(r, s.spent.r);
-    run.phase = 2;
+    run.phase = k;
     run.stage = 'duel';
     run.pending = null;
     run.pHp = p.hp;
-    run.duel = R.Combat.newDuel({ n: 7, phase: 2, p: p, r: r });
+    run.duel = R.Combat.newDuel(duelOpts(run, D, 7, k, p, r));
     if (healed > 0) run.duel.pendingEvents.push({ t: 'heal', side: 'p', n: healed });
     return run.duel;
   }
+  function startPhase2(run) { return startPhase(run, 2); }
+  function nextPhase(run) { return startPhase(run, (run.phase || 1) + 1); }
 
   // Per-turn bookkeeping. `sealed` (the Rival's commit) may be null. Returns the §6.6 signals.
   function record(run, meta, result, sealed) {
@@ -9327,7 +9535,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     run.pending = null;
     if (winner !== 'p') { run.stage = 'dead'; run.offer = null; return null; }
     if (run.duelN >= 7) {
-      if (run.phase === 2) run.stage = 'won';
+      if (run.phase >= phaseCount(run)) run.stage = 'won';
       else { run.stage = 'duel'; s.flags.phase1Won = true; }
       run.offer = null;
       return null;
@@ -9456,14 +9664,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function finish(run, meta, now) {
     meta = repair(meta);
     var s = statsOf(run), m = meta.memory, i, u;
-    if (run.finished) return { unlocks: entriesFor(run.finished.unlocks || []), firstWin: !!run.finished.firstWin, light: run.finished.light || 0 };
+    if (run.finished) return { unlocks: entriesFor(run.finished.unlocks || []), firstWin: !!run.finished.firstWin, light: run.finished.light || 0, face: run.finished.face || null };
     now = num(now, m.lastPlayed);
 
     closeSegment(run, run.stage === 'won' ? 'p' : (run.stage === 'dead' ? 'r' : null));
     syncCounters(run, meta);
 
     var won = run.stage === 'won', died = run.stage === 'dead';
-    var reached = Math.min(8, Math.max(1, run.duelN + (run.duelN >= 7 && run.phase === 2 ? 1 : 0)));
+    var reached = Math.min(8, Math.max(1, run.duelN + (run.duelN >= 7 && run.phase >= 2 ? 1 : 0)));
     var score = typeof s.score === 'number' && s.score === s.score ? s.score : undefined;
     var outcome = { won: won, died: died, duel: reached, score: score };
 
@@ -9512,9 +9720,16 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; }
     }
 
+    // The faces: beating the newest earned face earns the next. face = its id, or null.
+    var face = null, bs = meta.bosses, bx = bossIndex(bossOf(run).id);
+    if (won) {
+      bs.wins[BOSSES[bx].id] = num(bs.wins[BOSSES[bx].id], 0) + 1;
+      if (bx === bs.max - 1 && bs.max < BOSSES.length) { bs.max++; face = BOSSES[bs.max - 1].id; }
+    }
+
     var firstWin = won && m.wins === 1;
-    run.finished = { unlocks: ids, firstWin: firstWin, outcome: outcome, light: light };
-    return { unlocks: entriesFor(ids), firstWin: firstWin, light: light };
+    run.finished = { unlocks: ids, firstWin: firstWin, outcome: outcome, light: light, face: face };
+    return { unlocks: entriesFor(ids), firstWin: firstWin, light: light, face: face };
   }
 
   R.Run = {
@@ -9524,6 +9739,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     DUELS: DUELS,
     UNLOCKS: UNLOCKS,
     VIGIL: VIGIL,
+    BOSSES: BOSSES,
+    bossOf: bossOf,
+    phaseCount: phaseCount,
+    startPhase: startPhase,
+    nextPhase: nextPhase,
     VIGIL_TUNE: VT,
     cfg: cfg,
     healOf: healOf,
@@ -10072,8 +10292,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   'use strict';
 
   var RAR_COL = { common: 7, uncommon: 25, rare: 30 };
-  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA', vigil: 'LIGHT' };
-  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28, vigil: 22 };
+  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA', vigil: 'LIGHT', face: 'FACE' };
+  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28, vigil: 22, face: 19 };
   var ARENA_SWATCH = { cathedral: [26, 28], blood_moon: [16, 18], pale_dawn: [7, 22] };
   var BAYER = [0, 2, 3, 1];
   var RAMP = [3, 5, 7, 8];                        // fade-in ramp for text on black (then the real colour)
@@ -10373,6 +10593,10 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       x = T.arenas ? T.arenas[u.ref] : null;
       if (x && x.name) o.name = x.name;
       o.desc = (x && x.line) || ''; o.swatch = ARENA_SWATCH[u.ref] || ARENA_SWATCH.cathedral;
+    } else if (u.type === 'face') {
+      x = T.bosses ? T.bosses[u.ref] : null;
+      if (x && x.name) o.name = x.name;
+      o.desc = (x && x.line) || ''; o.icon = (x && x.icon) || 'mask_porcelain';
     }
     o.nameLines = wrap(o.name, 48, 3);
     o.howLines = wrap(o.how, howW || 138, 2);
@@ -10789,7 +11013,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         pStrip: [], rStrip: [],
         hp: run.pHp, hpMax: Math.max(1, run.pMaxHp), hpShown: skip ? run.pHp : Math.max(0, run.pHp - (o.healed || 0)), hpN: -1, hpStr: '',
         barOpts: { ticks: Math.max(1, run.pMaxHp) },
-        nextA: 'NEXT: DUEL ' + next, nextB: names[next - 1] ? String(names[next - 1]).toUpperCase() : '',
+        // once more than one face has been earned, the last fire names the one that waits at the altar
+        nextA: 'NEXT: DUEL ' + next,
+        nextB: next === 7 && R.Run.repairMeta(G.meta).bosses.max > 1
+          ? String((((R.Text || {}).bosses || {})[R.Run.bossOf(run).id] || {}).name || R.Run.bossOf(run).name).toUpperCase()
+          : (names[next - 1] ? String(names[next - 1]).toUpperCase() : ''),
         banner: skip ? 9 : 0, restText: K.ui('rest', 'REST'),
         pickHead: K.ui('itChoosesFirst', 'IT CHOOSES FIRST'), pickOne: K.ui('pickOne', 'PICK ONE'),
         hint: K.wrap('Tap a card to read it. Its pick is above.', 160, 2),
@@ -10806,7 +11034,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         S.cards.push({ info: K.boonInfo(o.choices[i], o.choices.length > 3 ? 60 : 48, 160), x: 0, y: 0, w: 56, h: CARD_H, oy: 0, shown: false });
       }
       for (i = 0; i < run.pBoons.length && i < 7; i++) S.pStrip.push(K.boonInfo(run.pBoons[i], 48, 160));
-      for (i = 0; i < run.rBoons.length && i < 6; i++) {
+      for (i = 0; i < run.rBoons.length && i < 7; i++) {      // 7: six drafts plus The Empty Hand's head start
         S.rStrip.push(run.rBoons[i] === o.rivalPick && S.rv.info ? S.rv.info : K.boonInfo(run.rBoons[i], 48, 160));
       }
       layout();
@@ -11537,7 +11765,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     return { who: who, x: x, ox: 0, oy: 0, anim: 'idle', def: null, t: 0, mode: 'loop', white: 0, flip: flip, hidden: false };
   }
   function play(a, name, mode) {
-    var def = R.Art.anim(a.who, name) || R.Art.anim(a.who, 'idle');
+    // an unknown sprite set or animation must never leave an actor without a clip (a null def would stop the frame)
+    var def = R.Art.anim(a.who, name) || R.Art.anim(a.who, 'idle') || R.Art.anim('rival', name) || R.Art.anim('rival', 'idle');
     a.anim = name; a.def = def; a.t = 0;
     a.mode = mode || (def.loop ? 'loop' : 'once');
   }
@@ -11616,6 +11845,16 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
   // ------------------------------------------------------------------ helpers
   function cfgOf(duel) { return R.Run.cfg(G.run, duel); }
+  // The look of the fight in front of you: sprite set, mask, arena, witchfire. Set on entry and at every phase change.
+  function setForm(duel) {
+    var D = cfgOf(duel), st = R.Save.data.settings, mask = D.mask || st.mask;
+    S.form = D;
+    S.phase2 = D.witch;
+    S.rv.who = D.who;
+    S.rvOpts[0].mask = mask; S.rvOpts[1].mask = mask;
+    S.bgOpts.arena = D.arena || st.arena;
+    S.noStance = D.stance === 'none';
+  }
   function argmaxMove(pred, legal) {
     var best = legal[0], i;
     for (i = 1; i < legal.length; i++) if (pred[legal[i]] > pred[best]) best = legal[i];
@@ -11679,7 +11918,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     for (;;) {
       while (!S.duel.over) yield* turn();
       var winner = S.duel.over;
-      if (winner === 'p' && run.duelN === 7 && S.duel.phase === 1) {
+      if (winner === 'p' && run.duelN === 7 && S.duel.phase < R.Run.phaseCount(run)) {
         yield* transform();
         continue;
       }
@@ -11691,7 +11930,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function introLine() {
     var m = G.meta.memory, run = G.run, n = run.duelN, t = null;
     if (S.tutorial) return (R.Text.tutorial && R.Text.tutorial.intro) || null;
-    if (n === 7) return taunt('final_duel_intro');
+    if (n === 7) return bossTaunt('intro', 'final_duel_intro');
     if (n === 1 && S.lights.length) {             // lights of the Vigil are out: it remarks on the newest
       t = taunt('vigil_' + S.lights[S.lights.length - 1].id);
       if (t) return t;
@@ -11721,8 +11960,10 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   }
 
   function* intro() {
-    var n = S.duelN;
-    S.banner = { t: 0, a: 'DUEL ' + n, b: String((R.Text.duelNames && R.Text.duelNames[n - 1]) || '').toUpperCase() };
+    var n = S.duelN, faces = R.Run.repairMeta(G.meta).bosses.max > 1, boss = R.Run.bossOf(G.run);
+    var bname = ((R.Text.bosses || {})[boss.id] || {}).name || boss.name;
+    // once more than one face has been earned, duel 7 is announced by the face that waits there
+    S.banner = { t: 0, a: 'DUEL ' + n, b: String(n === 7 && faces ? bname : (R.Text.duelNames && R.Text.duelNames[n - 1]) || '').toUpperCase() };
     S.rv.ox = 50; play(S.rv, 'idle', 'loop');
     slide(S.rv, 0, 0.5);
     sfx('step');
@@ -11742,6 +11983,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       yield function () { return S.clock >= until || S.tapped; };
       S.card = null; S.tapped = false;
     }
+    if (n === 1 && faces) {                      // which face waits at the altar: said up front, so you can draft for it
+      S.card = { name: bname.toUpperCase(), line: ((R.Text.bosses || {}).omen) || 'waits at the altar tonight.' };
+      sfx('bell', { pitch: 0.8 }); S.tapped = false;
+      var until2 = S.clock + 2.6;
+      yield function () { return S.clock >= until2 || S.tapped; };
+      S.card = null; S.tapped = false;
+    }
+    if (n === 7) yield* showCards(S.form.cards);  // the first phase's rule, if this face has one
   }
 
   function* turn() {
@@ -11772,11 +12021,13 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       sealed = pend.sealed; called = pend.called || null;
       duel.intel.called = called;
     } else {
-      if ((duel.phase === 2 || duel.calls) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
+      if (R.Combat.callsOf(duel) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       var q = { ctx: ctx, payoff: R.Combat.payoff(duel), legalR: legalR, legalP: legalP,
                 exploit: cfg.exploit, honestyBase: cfg.honesty, rng: G.rng };
       if (tut && tut.force) q.force = tut.force;
+      if (duel.stance === 'none') q.noTell = true;                 // The Blank: no stance to respond to
+      if (duel.mimic) q.mimic = R.Combat.ctx(duel, 'r');           // The Reflection: it plays as you would in its seat
       sealed = brain.commit(q);
       run.pending = { sealed: sealed, turn: duel.turn, n: duel.n, phase: duel.phase, called: called };
       G.save();
@@ -11787,9 +12038,12 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     yield 0.3;
 
     // 3. stance (the tell) — public information
-    S.tell = sealed.tell;
-    S.stanceText = 'STANCE: ' + mname(sealed.tell).toUpperCase();
-    play(S.rv, 'tell_' + sealed.tell, 'tell');
+    if (S.noStance) { S.tell = null; S.stanceText = ''; }
+    else {
+      S.tell = sealed.tell;
+      S.stanceText = 'STANCE: ' + mname(sealed.tell).toUpperCase();
+      play(S.rv, 'tell_' + sealed.tell, 'tell');
+    }
     yield 0.35;
 
     var info = R.Combat.info ? R.Combat.info(duel) : null;
@@ -11840,7 +12094,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     duel.intel.honest = sealed.honest; duel.intel.pred = sealed.pred; duel.intel.coin = S.coin;
     var tensionBefore = duel.tension;
     var res = R.Combat.resolve(duel, pm, sealed.move);
-    if (!tut || tut.observe) brain.observe(ctx, sealed.tell, pm, sealed.move);
+    if (!tut || tut.observe) brain.observe(ctx, S.noStance ? null : sealed.tell, pm, sealed.move);   // no stance shown: nothing learned about stances
     R.Run.record(run, G.meta, res, sealed);
     run.pending = null;
     if (tut && tut.last) G.meta.seenTutorial = true;
@@ -12030,7 +12284,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   }
 
   function* outro(winner) {
-    var duel = S.duel, run = G.run, fin2 = run.duelN === 7 && duel.phase === 2;
+    var duel = S.duel, run = G.run, fin2 = run.duelN === 7 && duel.phase >= R.Run.phaseCount(run);
     E.timeScale = 1; S.resolving = false; S.input = false;
     if (R.Audio) R.Audio.heartbeat(0);
     if (winner === 'p') {
@@ -12055,51 +12309,80 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     }
   }
 
-  // The mask breaks. Duel 7, phase 1 -> phase 2.
+  // One Rival line for this boss and phase, falling back to the classic category.
+  function bossTaunt(kind, fallback) {
+    var id = R.Run.bossOf(G.run).id;
+    return taunt('boss_' + id + '_' + kind) || (fallback ? taunt(fallback) : null);
+  }
+  function* showCards(ids) {
+    var rules = (R.Text && R.Text.rules) || {}, k, until;
+    for (k = 0; ids && k < ids.length; k++) {
+      if (!rules[ids[k]]) continue;
+      S.card = rules[ids[k]]; sfx('boon'); S.tapped = false;
+      until = S.clock + 2.4;
+      yield function () { return S.clock >= until || S.tapped; };
+    }
+    S.card = null; S.tapped = false;
+  }
+
+  // Duel 7: one phase of its face ends and the next begins. How it looks depends on the next phase's `change`:
+  // 'shatter' (the mask breaks), 'swap' (another mask), 'bell' (the hour turns).
   function* transform() {
-    var run = G.run, T = R.Text || {};
+    var run = G.run, k;
+    var next = R.Run.cfg(run, { n: 7, phase: S.duel.phase + 1 });
+    var newMusic = next.music !== S.form.music;
     E.timeScale = 1; S.noSkip = true; S.resolving = false;
-    S.rSigil = 'gone'; S.pSigil = 'gone'; S.bub = null;
-    if (R.Audio) { R.Audio.music(null, 0.4); R.Audio.heartbeat(0); }
+    S.rSigil = 'gone'; S.pSigil = 'gone'; S.bub = null; S.tell = null;
+    if (R.Audio) { if (newMusic) R.Audio.music(null, 0.4); R.Audio.heartbeat(0); }
     play(S.rv, 'stagger', 'stay'); slide(S.rv, 0, 0.3);
     play(S.pl, 'idle', 'loop'); slide(S.pl, 0, 0.3);
-    yield 0.8;
-    say('...', true);
-    yield 0.9;
-    S.bub = null;
-    play(S.rv, 'transform', 'stay');
-    var total = S.rv.def.total / 1000;
-    yield total * 0.45;
-    E.flash(23, 0.25); E.shake(4, 0.5); sfx('phase2'); E.buzz([40, 60, 120]);
-    S.fx.burst('shard', RX, L.floorY - 40, 16);
-    E.tween(S, 'gutter', 1, 0.8);
-    yield total * 0.55 + 0.5;
+    if (next.change === 'bell') {                // the hour turns: the candles gutter and the bell counts the phase in
+      yield 0.5;
+      E.tween(S, 'gutter', 1, 0.6);
+      for (k = 1; k < next.phase; k++) { sfx('bell', { pitch: 0.62 }); E.shake(2, 0.25); E.buzz(40); yield 0.55; }
+      yield 0.3;
+    } else if (next.change === 'swap') {         // it turns away and comes back wearing another face
+      yield 0.7;
+      say('...', true);
+      yield 0.6;
+      S.bub = null;
+      E.flash(23, 0.2); E.shake(3, 0.35); sfx('phase2', { pitch: 1.25 }); E.buzz([30, 40, 60]);
+      S.fx.burst('shard', RX, L.floorY - 40, 10);
+      E.tween(S, 'gutter', 1, 0.3);
+      yield 0.45;
+    } else {                                     // the mask breaks
+      yield 0.8;
+      say('...', true);
+      yield 0.9;
+      S.bub = null;
+      play(S.rv, 'transform', 'stay');
+      var total = S.rv.def.total / 1000;
+      yield total * 0.45;
+      E.flash(23, 0.25); E.shake(4, 0.5); sfx('phase2'); E.buzz([40, 60, 120]);
+      S.fx.burst('shard', RX, L.floorY - 40, 16);
+      E.tween(S, 'gutter', 1, 0.8);
+      yield total * 0.55 + 0.5;
+    }
     // it rises
-    R.Run.endDuel(run, G.meta, 'p', null);       // closes phase 1 (no bonfire: the run stays in stage 'duel')
+    R.Run.endDuel(run, G.meta, 'p', null);       // closes the phase (no bonfire: the run stays in stage 'duel')
     var hpWas = S.duel.p.hp;
-    var duel = R.Run.startPhase2(run);
-    S.duel = duel; S.phase2 = true;
-    S.rv.who = 'rival2'; play(S.rv, 'idle', 'loop');
-    E.flash(31, 0.3);
-    if (R.Audio) R.Audio.music('boss2', 0.3);
+    var duel = R.Run.nextPhase(run);
+    S.duel = duel; setForm(duel);
+    play(S.rv, 'idle', 'loop');
+    E.flash(S.phase2 ? 31 : 23, 0.3);
+    if (R.Audio && newMusic) R.Audio.music(S.form.music, 0.3);
     E.tween(S, 'gutter', 0, 0.6);
     S.hp.r = 0; S.lag.r = 0; S.hp.p = duel.p.hp; S.lag.p = duel.p.hp; hpText();
     S.lowSaid.r = false;
     if (duel.p.hp > hpWas) { S.fx.burst('heal', PX, L.floorY - 20, 8); sfx('heal'); }      // A Moment's Peace out: no breath caught
-    var k, steps = duel.r.hp;
+    var steps = duel.r.hp;
     for (k = 1; k <= steps; k++) { S.hp.r = k; S.lag.r = k; hpText(); sfx('tick', { pitch: 0.8 + k * 0.05 }); yield 0.07; }
+    mood();
     G.save();
     play(S.rv, 'taunt', 'once');
-    yield* sayWait(taunt('phase2'), 1.2);
-    var rules = T.rules || {};
-    var cards = [rules.embers || { name: 'EMBERS', line: 'Tension never falls below one.' },
-                 rules.called_shot || { name: 'CALLED SHOT', line: 'It names your move. Prove it wrong.' }];
-    for (k = 0; k < cards.length; k++) {
-      S.card = cards[k]; sfx('boon'); S.tapped = false;
-      var until = S.clock + 2.4;
-      yield function () { return S.clock >= until || S.tapped; };
-    }
-    S.card = null; S.tapped = false; S.noSkip = false;
+    yield* sayWait(bossTaunt('p' + duel.phase, 'phase2'), 1.2);
+    yield* showCards(S.form.cards);
+    S.noSkip = false;
   }
 
   // ------------------------------------------------------------------ input
@@ -12174,6 +12457,13 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     g.fillStyle = hex(S.ledgerHot ? 25 : 24); g.fillRect(83, y + 23, 14, 9);
     g.fillStyle = hex(3); g.fillRect(84, y + 24, 12, 7);
     g.fillStyle = hex(12); g.fillRect(86, y + 26, 8, 1); g.fillRect(86, y + 28, 8, 1);
+    // duel 7: one pip per phase of the face, under its health bar (spent, current, still to come)
+    if (S.form && S.form.phases > 1) {
+      for (i = 0; i < S.form.phases; i++) {
+        g.fillStyle = hex(i < d.phase - 1 ? 5 : i === d.phase - 1 ? ((Math.floor(S.clock * 2) & 1) ? 19 : 18) : 17);
+        g.fillRect(110 + i * 6, y + 15, 4, 4);
+      }
+    }
     // the Vigil: seven stubs right of the ledger, the dark ones first
     if (S.lights.length) {
       for (i = 0; i < 7; i++) {
@@ -12266,8 +12556,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       var duel = resumed ? run.duel : R.Run.startDuel(run);
       var st = R.Save.data.settings;
       S = {
-        duel: duel, duelN: run.duelN, clock: 0, phase2: duel.phase === 2, tutorial: run.duelN === 1 && !meta.seenTutorial,
-        pl: mkActor('player', PX, false), rv: mkActor(duel.phase === 2 ? 'rival2' : 'rival', RX, true),
+        duel: duel, duelN: run.duelN, clock: 0, phase2: false, form: null, noStance: false, tutorial: run.duelN === 1 && !meta.seenTutorial,
+        pl: mkActor('player', PX, false), rv: mkActor('rival', RX, true),
         plOpts: [{ flip: false, white: false }, { flip: false, white: true }],
         rvOpts: [{ flip: true, white: false, mask: st.mask }, { flip: true, white: true, mask: st.mask }],
         fx: R.FX.create(220), floats: [], bub: null,
@@ -12283,8 +12573,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         idleT: 0, idleSaid: false,
         actives: [], bst: { pressed: false, disabled: false, icon: 'S', glow: false, accent: 0, broken: false },
         labels: { S: ui('strike', 'STRIKE'), G: ui('guard', 'GUARD'), F: ui('feint', 'FEINT') },
-        bgOpts: { variant: run.duelN, gutter: 0, snuffed: R.Run.stakeOf(run), phase2: duel.phase === 2, floorY: 0, arena: st.arena }
+        bgOpts: { variant: run.duelN, gutter: 0, snuffed: R.Run.stakeOf(run), phase2: false, floorY: 0, arena: st.arena }
       };
+      setForm(duel);
       for (var i = 0; i < duel.p.boons.length; i++) {
         var b = R.Boons.byId[duel.p.boons[i]];
         if (b && b.active && S.actives.length < 3) S.actives.push(b.id);
@@ -12292,7 +12583,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       play(S.pl, 'idle', 'loop'); play(S.rv, 'idle', 'loop');
       hpText(); setLegal();
       S.fx.ambient('ash', 5);
-      if (R.Audio) R.Audio.music(run.duelN === 7 ? (duel.phase === 2 ? 'boss2' : 'boss') : 'drone', 1);
+      if (R.Audio) R.Audio.music(S.form.music, 1);
       G.save();
       E.co(function* () { yield* flow(resumed); });
     },
@@ -12353,7 +12644,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         var dp = S.pSigil === 'sealed' ? Math.max(0, 6 - Math.floor(S.pSigilT * 40)) : 0;
         R.Art.sigil(g, 36, L.floorY - 68 - dp + bob, S.pSigil, S.shownP, 'p');
       }
-      if (S.stamp !== null && S.input) {
+      if (S.stamp !== null && S.input && !S.noStance) {
         R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, OPT_CS);
       }
       if (S.called && S.input) R.Font.draw(g, S.calledText, PX, L.floorY - 84, 31, OPT_CS);
@@ -12941,6 +13232,20 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function build() {
     var U = (R.Run && R.Run.UNLOCKS) || [], un = (G.meta && G.meta.unlocked) || {}, gi, i, n, got, all = 0, have = 0, head, o;
     S.rows.length = 0; S.contentH = 2;
+    // the faces of the final duel come first: earned ones show how often they have been beaten
+    var B = (R.Run && R.Run.BOSSES) || [], bs = R.Run.repairMeta(G.meta).bosses, TB = (R.Text && R.Text.bosses) || {}, wins;
+    head = { t: 'head', y: S.contentH, h: 18, text: 'FACES', count: bs.max + ' / ' + B.length };
+    S.rows.push(head); S.contentH += 18;
+    for (i = 0; i < B.length; i++) {
+      o = K.unlockInfo({ id: 'face_' + B[i].id, type: 'face', ref: B[i].id, name: B[i].name, how: i < bs.max ? (TB[B[i].id] || {}).line : TB.unseen }, 146, 160);
+      o.t = 'row'; o.y = S.contentH; o.h = ROW_H; o.open = i < bs.max;
+      if (!o.open) o.descLines = [];
+      wins = bs.wins[B[i].id] || 0;
+      o.note = o.open ? (wins ? K.fill(TB.winsLabel || 'BEATEN {n}', { n: wins }) : (TB.unbeaten || 'UNBEATEN')) : S.lockedText;
+      o.sub = o.open ? B[i].phases.length + ' PHASES · ' + o.note : o.typeLabel;
+      S.rows.push(o); S.contentH += ROW_H + 2;
+    }
+    S.contentH += 4;
     for (gi = 0; gi < GROUPS.length; gi++) {
       n = 0; got = 0;
       head = { t: 'head', y: S.contentH, h: 18, text: GROUPS[gi][1], count: '' };
@@ -13331,9 +13636,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (run.stage === 'duel') {
         var d = run.duel;
         if (d && d.over) {                       // the page closed between the last blow and the next screen
-          if (d.over === 'p' && run.duelN === 7 && d.phase === 1) {
+          if (d.over === 'p' && run.duelN === 7 && d.phase < R.Run.phaseCount(run)) {
             R.Run.endDuel(run, G.meta, 'p', null);
-            R.Run.startPhase2(run);
+            R.Run.nextPhase(run);
             G.save();
             E.go('duel', null, 0.4);
           } else G.duelOver(d.over);
@@ -13360,8 +13665,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         E.go('bonfire', null, 0.6);
         return;
       }
-      if (run.stage === 'duel') {                // duel 7, phase 1 won (normally handled inside the duel scene)
-        R.Run.startPhase2(run);
+      if (run.stage === 'duel') {                // duel 7, a phase won (normally handled inside the duel scene)
+        R.Run.nextPhase(run);
         G.save();
         E.go('duel', null, 0.4);
         return;
@@ -13379,7 +13684,12 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (fin.light > 0) {                       // a light of the Vigil was earned: it leads the reel
         var li = R.SceneKit && R.SceneKit.light ? R.SceneKit.light(fin.light) : null;
         if (li) unlocks.unshift({ id: 'vigil_' + li.id, type: 'vigil', ref: fin.light, name: li.name, how: R.Text.fill(TV.earned || '{rule}', { rule: li.rule }) });
-      } else if (won && stake >= R.Run.VIGIL.length && meta.vigil.wins[stake] === 1 && TV.lightlessWon) {
+      }
+      if (fin.face) {                            // a new face was earned: it leads everything
+        var TB = (R.Text && R.Text.bosses) || {}, tf = TB[fin.face] || {};
+        unlocks.unshift({ id: 'face_' + fin.face, type: 'face', ref: fin.face, name: tf.name || fin.face, how: tf.line || TB.earned || '' });
+      }
+      if (!fin.light && won && stake >= R.Run.VIGIL.length && meta.vigil.wins[stake] === 1 && TV.lightlessWon) {
         unlocks.unshift({ id: 'vigil_lightless', type: 'vigil', ref: stake, name: TV.lightlessWon.name, how: TV.lightlessWon.how });
       }
       G.last = {
@@ -13388,7 +13698,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         finishingMove: run.stats.lastMove || null, hp: Math.max(0, run.pHp || 0),
         unlocks: unlocks, firstWin: !!fin.firstWin, insights: insights,
         boons: run.pBoons.slice(), rivalBoons: run.rBoons.slice(),
-        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal(), stake: stake
+        reads: run.stats.reads || 0, surprises: run.stats.surprises || 0, tease: nextGoal(), stake: stake, boss: R.Run.bossOf(run).id
       };
       G.run = null;
       G.save();

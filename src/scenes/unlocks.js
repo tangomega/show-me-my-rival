@@ -9,6 +9,20 @@
   function build() {
     var U = (R.Run && R.Run.UNLOCKS) || [], un = (G.meta && G.meta.unlocked) || {}, gi, i, n, got, all = 0, have = 0, head, o;
     S.rows.length = 0; S.contentH = 2;
+    // the faces of the final duel come first: earned ones show how often they have been beaten
+    var B = (R.Run && R.Run.BOSSES) || [], bs = R.Run.repairMeta(G.meta).bosses, TB = (R.Text && R.Text.bosses) || {}, wins;
+    head = { t: 'head', y: S.contentH, h: 18, text: 'FACES', count: bs.max + ' / ' + B.length };
+    S.rows.push(head); S.contentH += 18;
+    for (i = 0; i < B.length; i++) {
+      o = K.unlockInfo({ id: 'face_' + B[i].id, type: 'face', ref: B[i].id, name: B[i].name, how: i < bs.max ? (TB[B[i].id] || {}).line : TB.unseen }, 146, 160);
+      o.t = 'row'; o.y = S.contentH; o.h = ROW_H; o.open = i < bs.max;
+      if (!o.open) o.descLines = [];
+      wins = bs.wins[B[i].id] || 0;
+      o.note = o.open ? (wins ? K.fill(TB.winsLabel || 'BEATEN {n}', { n: wins }) : (TB.unbeaten || 'UNBEATEN')) : S.lockedText;
+      o.sub = o.open ? B[i].phases.length + ' PHASES · ' + o.note : o.typeLabel;
+      S.rows.push(o); S.contentH += ROW_H + 2;
+    }
+    S.contentH += 4;
     for (gi = 0; gi < GROUPS.length; gi++) {
       n = 0; got = 0;
       head = { t: 'head', y: S.contentH, h: 18, text: GROUPS[gi][1], count: '' };

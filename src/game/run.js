@@ -64,6 +64,44 @@
     };
   })();
 
+  // ---------------------------------------------------------------- the final duel: the Faces at the Altar
+  // Order = unlock order: beating a face once earns the next; a run then draws one from those earned.
+  // Phase 1 of every face starts from the duel-7 row of DUELS, later phases from DUELS.phase2, unless the
+  // phase gives its own hp / exploit / honesty. Per phase:
+  //   name, hp, exploit, honesty   numbers (optional)
+  //   heal        player heal on entering this phase (default PHASE2_HEAL; phases 2+ only)
+  //   floor       tension floor 0..3          calls   Called Shot is live
+  //   stance      'none' = it shows no stance  mimic   it picks its move the way the player would
+  //   innate      [boon ids] it holds for this phase only      fortify  it starts the phase with this much
+  //   copyBoons   it also holds every boon of the player's that it is able to hold
+  //   who, mask, arena, witch, music   how it looks and sounds (scene)
+  //   change      how the previous phase ends: 'shatter' | 'swap' | 'bell'      cards  [R.Text.rules ids] shown after
+  var BOSSES = [
+    { id: 'unmasked', name: 'The Unmasked', phases: [
+      { name: 'The Altar' },
+      { name: 'The Unmasked', floor: 1, calls: true, who: 'rival2', witch: true, music: 'boss2', change: 'shatter', cards: ['embers', 'called_shot'] }
+    ] },
+    // Three masks, three moods. Each face leans on one thing: the lie, the guard, and finally nothing to read at all.
+    { id: 'three_faced', name: 'The Three-Faced', phases: [
+      { name: 'The Jester', hp: 5, honesty: 0.30, mask: 'jester', innate: ['painted_smile'], cards: ['jester'] },
+      { name: 'The Mourner', hp: 4, heal: 3, mask: 'mourner', innate: ['thorned_guard'], fortify: 1, change: 'swap', cards: ['mourner'] },
+      { name: 'The Blank', hp: 5, heal: 3, mask: 'blank', stance: 'none', music: 'boss2', change: 'swap', cards: ['blank'] }
+    ] },
+    // The night passes in four short fights; every bell raises the tension floor by one.
+    { id: 'hours', name: 'The Hours', phases: [
+      { name: 'Vespers', hp: 4, cards: ['hours'] },
+      { name: 'Compline', hp: 4, heal: 3, floor: 1, change: 'bell', cards: ['bell_1'] },
+      { name: 'Matins', hp: 4, heal: 3, floor: 2, arena: 'blood_moon', music: 'boss2', change: 'bell', cards: ['bell_2'] },
+      { name: 'Lauds', hp: 4, heal: 3, floor: 3, arena: 'pale_dawn', music: 'boss2', change: 'bell', cards: ['bell_3'] }
+    ] },
+    // It stops predicting the player and starts being the player: first their boons, then their habits, then both.
+    { id: 'reflection', name: 'The Reflection', phases: [
+      { name: 'The Borrower', hp: 5, copyBoons: true, cards: ['borrower'] },
+      { name: 'The Likeness', hp: 5, heal: 3, who: 'mirror', mimic: true, change: 'shatter', cards: ['likeness'] },
+      { name: 'The Reflection', hp: 5, heal: 3, who: 'mirror', mimic: true, copyBoons: true, floor: 1, witch: true, music: 'boss2', change: 'swap', cards: ['reflection'] }
+    ] }
+  ];
+
   // ---------------------------------------------------------------- helpers
 
   function byId(id) { return R.Boons.byId[id]; }
@@ -88,9 +126,14 @@
         lastPlayed: 0, firstPlayed: 0, lastFavorite: null, favorites: [], totalTurns: 0
       },
       // max: lights the player has earned the right to put out. sel: how many they choose to. wins[s]: wins with s out.
-      vigil: { max: 0, sel: 0, wins: [0, 0, 0, 0, 0, 0, 0, 0] }
+      vigil: { max: 0, sel: 0, wins: [0, 0, 0, 0, 0, 0, 0, 0] },
+      // max: how many faces (BOSSES, in order) have been earned. wins: { id: n }. last: the face of the previous run.
+      bosses: { max: 1, wins: {}, last: null }
     };
   }
+  function bossIndex(id) { for (var i = 0; i < BOSSES.length; i++) if (BOSSES[i].id === id) return i; return -1; }
+  function bossOf(run) { var i = run ? bossIndex(run.boss) : -1; return BOSSES[i < 0 ? 0 : i]; }
+  function phaseCount(run) { return bossOf(run).phases.length; }
   function clampStake(v) { v = Math.floor(num(v, 0)); return v < 0 ? 0 : v > VIGIL_MAX ? VIGIL_MAX : v; }
   function stakeOf(run) { return run ? clampStake(run.stake) : 0; }
 
@@ -119,6 +162,11 @@
     if (!Array.isArray(vg.wins)) vg.wins = [];
     for (k = 0; k <= VIGIL_MAX; k++) vg.wins[k] = Math.max(0, Math.floor(num(vg.wins[k], 0)));
     vg.wins.length = VIGIL_MAX + 1;
+    var bs = meta.bosses;
+    if (!bs || typeof bs !== 'object') bs = meta.bosses = d.bosses;
+    bs.max = Math.max(1, Math.min(BOSSES.length, Math.floor(num(bs.max, 1))));
+    if (!bs.wins || typeof bs.wins !== 'object') bs.wins = {};
+    if (bossIndex(bs.last) < 0) bs.last = null;
     return meta;
   }
 
@@ -191,8 +239,18 @@
       daysAway: days,                          // extra: days since the previous visit (for brain.beginRun)
       finished: null,
       stake: stake,                            // the Vigil: how many lights are out for this run
-      rivalHead: null                          // The Empty Hand: the boon the Rival walked in with
+      rivalHead: null,                         // The Empty Hand: the boon the Rival walked in with
+      boss: BOSSES[0].id                       // the face it will wear in duel 7
     };
+    // Which face: any earned one, but not the one from the previous run (its own stream: the run's rng is untouched).
+    var bs = meta.bosses, bi = bossIndex(o.boss);
+    if (bi >= 0 && (o.anyBoss || bi < bs.max)) run.boss = BOSSES[bi].id;
+    else if (bs.max >= 2) {
+      var faces = [], fi;
+      for (fi = 0; fi < bs.max; fi++) if (BOSSES[fi].id !== bs.last) faces.push(BOSSES[fi].id);
+      run.boss = faces[R.RNG.create((seed ^ 0x7f4a7c15) >>> 0).int(faces.length)];
+    }
+    bs.last = run.boss;
     if (stake >= 4) {                          // The Empty Hand: it drafts once before duel 1 (bonfire-1 odds)
       var rng = rngOf(run);
       var head = rivalDraft(run, meta, o.dossier || null, rng);
@@ -205,18 +263,58 @@
   // ---------------------------------------------------------------- the Vigil
 
   // Effective duel table row for this run (see VIGIL for which light does what).
+  // Phase k of this run's face before the Vigil touches it: { def, base, k, hp, exploit, honesty }.
+  function finalRow(run, k) {
+    var D = R.Run.DUELS, b = bossOf(run);
+    k = Math.max(1, Math.min(b.phases.length, Math.floor(num(k, 1))));
+    var def = b.phases[k - 1], base = k === 1 ? D[7] : D.phase2;
+    return { def: def, base: base, k: k, hp: num(def.hp, base.rivalHp), exploit: num(def.exploit, base.exploit), honesty: num(def.honesty, base.honesty) };
+  }
+  // Everything a fight needs to know about itself: the numbers (after the Vigil) and, in duel 7, the phase's rules and look.
   function cfg(run, duel) {
     var D = R.Run.DUELS, s = stakeOf(run);
-    var n = duel ? duel.n : run.duelN, p2 = !!(duel ? duel.phase === 2 : run.phase === 2);
-    var base = p2 ? D.phase2 : D[n];
-    if (s < 1) return base;
-    var next = p2 ? null : (n < 7 ? D[n + 1] : D.phase2);
-    var ex = next ? next.exploit : base.exploit;
-    var ho = s >= 3 && next ? (n < 7 ? next.honesty : (base.honesty + next.honesty) / 2) : base.honesty;
-    return { n: base.n, name: base.name, rivalHp: base.rivalHp + (s >= 6 ? VT.hp : 0), exploit: ex, honesty: ho, tau: tau(ex), rivalBoons: base.rivalBoons, variant: base.variant };
+    var n = duel ? duel.n : run.duelN, fin = n >= 7;
+    var row = fin ? finalRow(run, duel ? duel.phase : run.phase) : null;
+    var base = fin ? row.base : D[n], def = fin ? row.def : null, count = fin ? phaseCount(run) : 1, k = fin ? row.k : 1;
+    var hp = fin ? row.hp : base.rivalHp, ex = fin ? row.exploit : base.exploit, ho = fin ? row.honesty : base.honesty;
+    if (s >= 1) {                                // one step early: the next duel's (or phase's) numbers
+      var next = !fin ? (n < 6 ? D[n + 1] : finalRow(run, 1)) : (k < count ? finalRow(run, k + 1) : null);
+      if (next) {
+        ex = next.exploit;
+        if (s >= 3) ho = fin ? (ho + next.honesty) / 2 : next.honesty;
+      }
+    }
+    if (s >= 6) hp += VT.hp;
+    return {
+      n: base.n, name: (def && def.name) || base.name, rivalHp: hp, exploit: ex, honesty: ho, tau: tau(ex),
+      rivalBoons: base.rivalBoons, variant: base.variant,
+      phase: k, phases: count, last: !fin || k >= count,
+      floor: def ? num(def.floor, 0) : 0, calls: !!(def && def.calls), stance: (def && def.stance) || null, mimic: !!(def && def.mimic),
+      innate: (def && def.innate) || null, fortify: def ? num(def.fortify, 0) : 0, copyBoons: !!(def && def.copyBoons),
+      heal: def && typeof def.heal === 'number' ? def.heal : null,
+      who: (def && def.who) || 'rival', mask: (def && def.mask) || null, arena: (def && def.arena) || null, witch: !!(def && def.witch),
+      music: (def && def.music) || (fin ? 'boss' : 'drone'), change: (def && def.change) || null, cards: (def && def.cards) || null
+    };
+  }
+  // The Rival's fighter for a fight: its drafted boons plus whatever this phase lends it.
+  function rivalFighter(run, D) {
+    var ids = run.rBoons.slice(), i, b, inn = D.innate || [];
+    for (i = 0; i < inn.length; i++) if (ids.indexOf(inn[i]) < 0 && byId(inn[i])) ids.push(inn[i]);
+    if (D.copyBoons) {
+      for (i = 0; i < run.pBoons.length; i++) {
+        b = byId(run.pBoons[i]);
+        if (b && !b.relic && b.who === 'both' && !b.active && ids.indexOf(b.id) < 0) ids.push(b.id);
+      }
+    }
+    var r = R.Combat.newFighter(D.rivalHp, D.rivalHp, ids);
+    if (D.fortify > 0) r.status.fortify = D.fortify;
+    return r;
+  }
+  function duelOpts(run, D, n, k, p, r) {
+    return { n: n, phase: k, p: p, r: r, floor: D.floor, calls: D.calls || callsOn(run, n), stance: D.stance, mimic: D.mimic };
   }
   function healOf(run) { return Math.max(0, R.Run.HEAL - (stakeOf(run) >= 2 ? VT.healCut : 0)); }
-  function phase2HealOf(run) { return stakeOf(run) >= 5 ? 0 : R.Run.PHASE2_HEAL; }
+  function phaseHealOf(run, D) { return stakeOf(run) >= 5 ? 0 : (D && D.heal !== null && D.heal !== undefined ? D.heal : R.Run.PHASE2_HEAL); }
   function callsOn(run, n) { return stakeOf(run) >= 7 && n >= VT.callsFrom; }
   // The lights that are out for this run, in order: [{ k, id, name }].
   function lightsOut(run) {
@@ -253,14 +351,14 @@
     if (run.duelN > 7) run.duelN = 7;
     var D = cfg(run, { n: run.duelN, phase: 1 });
     var p = R.Combat.newFighter(run.pMaxHp, run.pHp, run.pBoons);
-    var r = R.Combat.newFighter(D.rivalHp, D.rivalHp, run.rBoons);
+    var r = rivalFighter(run, D);
     applySpent(p, s.spent.p);
     applySpent(r, s.spent.r);
     run.phase = 1;
     run.stage = 'duel';
     run.pending = null;
     run.offer = null;
-    run.duel = R.Combat.newDuel({ n: run.duelN, phase: 1, p: p, r: r, calls: callsOn(run, run.duelN) });
+    run.duel = R.Combat.newDuel(duelOpts(run, D, run.duelN, 1, p, r));
     return run.duel;
   }
 
@@ -282,13 +380,14 @@
     }
   }
 
-  // Final duel only: the Rival transforms. Keeps the player fighter (boons, counters, charges).
-  function startPhase2(run) {
+  // Final duel only: the Rival changes into phase k of its face. Keeps the player fighter (boons, counters, charges).
+  function startPhase(run, k) {
     var s = statsOf(run);
     var old = run.duel;
-    var D = cfg(run, { n: 7, phase: 2 });
-    var p, r;
     run.duelN = 7;
+    k = Math.max(2, Math.min(phaseCount(run), Math.floor(num(k, 2))));
+    var D = cfg(run, { n: 7, phase: k });
+    var p, r;
     if (old) {
       closeSegment(run, 'p');
       p = old.p;
@@ -300,23 +399,25 @@
     p.status = { guardBroken: 0, bleed: 0, fortify: 0, focus: 0, sealed: { S: 0, G: 0, F: 0 } };
     p.moves = [];
     p.results = [];
-    var healed = Math.max(0, Math.min(phase2HealOf(run), p.maxHp - p.hp));
+    var healed = Math.max(0, Math.min(phaseHealOf(run, D), p.maxHp - p.hp));
     p.hp += healed;
-    r = R.Combat.newFighter(D.rivalHp, D.rivalHp, run.rBoons);
+    r = rivalFighter(run, D);
     if (old) {                                   // same duel: per-duel caps and charges carry over
-      var k;
-      for (k in old.r.counters) r.counters[k] = old.r.counters[k];
-      for (k in old.r.charges) r.charges[k] = old.r.charges[k];
+      var key;                                   // (not k: that is the phase number)
+      for (key in old.r.counters) r.counters[key] = old.r.counters[key];
+      for (key in old.r.charges) r.charges[key] = old.r.charges[key];
     }
     applySpent(r, s.spent.r);
-    run.phase = 2;
+    run.phase = k;
     run.stage = 'duel';
     run.pending = null;
     run.pHp = p.hp;
-    run.duel = R.Combat.newDuel({ n: 7, phase: 2, p: p, r: r });
+    run.duel = R.Combat.newDuel(duelOpts(run, D, 7, k, p, r));
     if (healed > 0) run.duel.pendingEvents.push({ t: 'heal', side: 'p', n: healed });
     return run.duel;
   }
+  function startPhase2(run) { return startPhase(run, 2); }
+  function nextPhase(run) { return startPhase(run, (run.phase || 1) + 1); }
 
   // Per-turn bookkeeping. `sealed` (the Rival's commit) may be null. Returns the §6.6 signals.
   function record(run, meta, result, sealed) {
@@ -531,7 +632,7 @@
     run.pending = null;
     if (winner !== 'p') { run.stage = 'dead'; run.offer = null; return null; }
     if (run.duelN >= 7) {
-      if (run.phase === 2) run.stage = 'won';
+      if (run.phase >= phaseCount(run)) run.stage = 'won';
       else { run.stage = 'duel'; s.flags.phase1Won = true; }
       run.offer = null;
       return null;
@@ -660,14 +761,14 @@
   function finish(run, meta, now) {
     meta = repair(meta);
     var s = statsOf(run), m = meta.memory, i, u;
-    if (run.finished) return { unlocks: entriesFor(run.finished.unlocks || []), firstWin: !!run.finished.firstWin, light: run.finished.light || 0 };
+    if (run.finished) return { unlocks: entriesFor(run.finished.unlocks || []), firstWin: !!run.finished.firstWin, light: run.finished.light || 0, face: run.finished.face || null };
     now = num(now, m.lastPlayed);
 
     closeSegment(run, run.stage === 'won' ? 'p' : (run.stage === 'dead' ? 'r' : null));
     syncCounters(run, meta);
 
     var won = run.stage === 'won', died = run.stage === 'dead';
-    var reached = Math.min(8, Math.max(1, run.duelN + (run.duelN >= 7 && run.phase === 2 ? 1 : 0)));
+    var reached = Math.min(8, Math.max(1, run.duelN + (run.duelN >= 7 && run.phase >= 2 ? 1 : 0)));
     var score = typeof s.score === 'number' && s.score === s.score ? s.score : undefined;
     var outcome = { won: won, died: died, duel: reached, score: score };
 
@@ -716,9 +817,16 @@
       if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; }
     }
 
+    // The faces: beating the newest earned face earns the next. face = its id, or null.
+    var face = null, bs = meta.bosses, bx = bossIndex(bossOf(run).id);
+    if (won) {
+      bs.wins[BOSSES[bx].id] = num(bs.wins[BOSSES[bx].id], 0) + 1;
+      if (bx === bs.max - 1 && bs.max < BOSSES.length) { bs.max++; face = BOSSES[bs.max - 1].id; }
+    }
+
     var firstWin = won && m.wins === 1;
-    run.finished = { unlocks: ids, firstWin: firstWin, outcome: outcome, light: light };
-    return { unlocks: entriesFor(ids), firstWin: firstWin, light: light };
+    run.finished = { unlocks: ids, firstWin: firstWin, outcome: outcome, light: light, face: face };
+    return { unlocks: entriesFor(ids), firstWin: firstWin, light: light, face: face };
   }
 
   R.Run = {
@@ -728,6 +836,11 @@
     DUELS: DUELS,
     UNLOCKS: UNLOCKS,
     VIGIL: VIGIL,
+    BOSSES: BOSSES,
+    bossOf: bossOf,
+    phaseCount: phaseCount,
+    startPhase: startPhase,
+    nextPhase: nextPhase,
     VIGIL_TUNE: VT,
     cfg: cfg,
     healOf: healOf,

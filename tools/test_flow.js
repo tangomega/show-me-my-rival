@@ -99,8 +99,8 @@ const FAKE_ART = inline('fake-art', `
   R.Art = {
     init: function () {},
     anim: function (who, name) {
-      if (who !== 'player' && who !== 'rival' && who !== 'rival2') return null;
-      if (name === 'transform' && who === 'player') return null;
+      if (who !== 'player' && who !== 'rival' && who !== 'rival2' && who !== 'mirror') return null;
+      if (name === 'transform' && (who === 'player' || who === 'mirror')) return null;
       return DEFS[name] || null;
     },
     frameAt: function (a, ms) { var f = (ms / a.dur[0]) | 0; return f < 0 ? 0 : f >= a.n ? a.n - 1 : f; },
@@ -513,7 +513,7 @@ function makeMonitor(store) {
     exp: null, runKey: undefined, turns: 0, duelN: 0, phase: 1, commit: null, inputOpen: false, pendingStr: null,
     offers: {}, bonfireHp: {}, after: null, phase2Hp: null, lastDuelHp: 0, sig: '', sigAt: 0, simSec: 0, runStartSec: 0,
     count: { runs: 0, deaths: 0, wins: 0, abandons: 0, turns: 0, bonfires: 0, fourCard: 0, phase2: 0, credits: 0, midTurnReloads: 0, midTurnVerified: 0,
-      betweenTurnVerified: 0, bonfireReloadVerified: 0, lethalReloads: 0, transformReloads: 0, relicRuns: 0, stakeRuns: 0, earlyCalls: 0, tutorialTurns: 0, calledShots: 0, activesUsed: 0, persistedEqual: 0 },
+      betweenTurnVerified: 0, bonfireReloadVerified: 0, lethalReloads: 0, transformReloads: 0, relicRuns: 0, stakeRuns: 0, earlyCalls: 0, laterPhases: 0, faceRuns: 0, tutorialTurns: 0, calledShots: 0, activesUsed: 0, persistedEqual: 0 },
     trust: true                                                     // false while storage is failing (nothing survives a reload)
   };
   const J = JSON.stringify;
@@ -544,7 +544,7 @@ function makeMonitor(store) {
     // The transformation is stored when its HP count-up ends. A page killed before that comes back in phase 1: either
     // already won (resume() transforms again) or one bleed tick short of it (the turn start is replayed and kills the
     // Rival again). Nothing is applied twice: the phase-2 fighter is rebuilt from the same phase-1 state.
-    if (G.run && mon.phase === 2 && G.run.phase === 1 && G.run.duelN === 7 && G.run.duel && G.run.stats.turns === mon.turns) { mon.phase = 1; mon.phase2Hp = null; mon.count.phase2--; }
+    if (G.run && mon.phase >= 2 && G.run.phase === mon.phase - 1 && G.run.duelN === 7 && G.run.duel && G.run.stats.turns === mon.turns) { mon.phase--; mon.phase2Hp = null; mon.count.phase2--; }
     if (G.run) {
       ok(G.run.stats.turns === mon.turns, () => 'reload: stored stats.turns ' + G.run.stats.turns + ' != live ' + mon.turns + ' (' + before + ')');
       ok(G.run.duelN === mon.duelN, () => 'reload: stored duelN ' + G.run.duelN + ' != live ' + mon.duelN + ' (' + before + ')');
@@ -567,6 +567,8 @@ function makeMonitor(store) {
         ok(run.duelN === 1 && run.stats.turns === 0 && run.stage === 'duel', 'a new run must start at duel 1, turn 0');
         if (run.relicId) mon.count.relicRuns++;
         if (run.stake > 0) mon.count.stakeRuns++;
+        if (run.boss && run.boss !== 'unmasked') mon.count.faceRuns++;
+        ok(R.Run.BOSSES.findIndex(b => b.id === run.boss) < G.meta.bosses.max, () => 'the run drew a face that was not earned: ' + run.boss);
         ok(run.stake >= 0 && run.stake <= 7 && run.stake <= G.meta.vigil.max, () => 'run stake ' + run.stake + ' beyond the earned lights ' + G.meta.vigil.max);
         ok((run.stake >= 4) === !!run.rivalHead, () => 'The Empty Hand: stake ' + run.stake + ' but head boon ' + run.rivalHead);
       }
@@ -588,12 +590,20 @@ function makeMonitor(store) {
     }
     ok(run.duelN >= mon.duelN && run.duelN <= 7, () => 'duelN regressed or overflowed: ' + mon.duelN + ' -> ' + run.duelN);
     if (run.duelN > mon.duelN) { ok(run.duelN === mon.duelN + 1, 'duelN skipped'); mon.duelN = run.duelN; mon.phase = 1; mon.phase2Hp = null; }
-    ok(!(mon.phase === 2 && run.phase === 1 && run.duelN === 7), () => 'phase regressed 2 -> 1 @' + E.sceneName + ' (duel turn ' + (d && d.turn) + ', over ' + (d && d.over) + ', duel phase ' + (d && d.phase) + ', stats.turns ' + st.turns + ', last reload: ' + mon.lastReload + ', ' + (mon.simSec - mon.lastReloadAt).toFixed(1) + ' s ago)');
-    if (run.phase === 2 && mon.phase === 1) {                      // the transformation just happened
-      mon.phase = 2; mon.count.phase2++;
-      if (d) { mon.phase2Hp = d.p.hp; ok(d.p.hp === Math.min(d.p.maxHp, Math.max(1, mon.lastDuelHp) + (R.Run.stakeOf(run) >= 5 ? 0 : R.Run.PHASE2_HEAL)), () => 'phase-2 heal wrong: ' + mon.lastDuelHp + ' -> ' + d.p.hp); }
+    ok(!(run.phase < mon.phase && run.duelN === 7), () => 'phase regressed ' + mon.phase + ' -> ' + run.phase + ' @' + E.sceneName + ' (duel turn ' + (d && d.turn) + ', over ' + (d && d.over) + ', duel phase ' + (d && d.phase) + ', stats.turns ' + st.turns + ', last reload: ' + mon.lastReload + ', ' + (mon.simSec - mon.lastReloadAt).toFixed(1) + ' s ago)');
+    if (run.duelN === 7 && run.phase > mon.phase) {                // a phase change just happened
+      ok(run.phase === mon.phase + 1 && run.phase <= R.Run.phaseCount(run), () => 'phase jumped ' + mon.phase + ' -> ' + run.phase + ' (' + run.boss + ' has ' + R.Run.phaseCount(run) + ')');
+      mon.phase = run.phase; mon.count.phase2++;
+      if (run.phase > 2) mon.count.laterPhases++;
+      if (d) {
+        const row = R.Run.cfg(run, d), heal = R.Run.stakeOf(run) >= 5 ? 0 : (row.heal !== null ? row.heal : R.Run.PHASE2_HEAL);
+        mon.phase2Hp = d.p.hp;
+        ok(d.p.hp === Math.min(d.p.maxHp, Math.max(1, mon.lastDuelHp) + heal), () => 'heal at the phase change is wrong: ' + mon.lastDuelHp + ' -> ' + d.p.hp + ' (' + run.boss + ' phase ' + run.phase + ')');
+        ok(d.floor === row.floor && d.tension >= d.floor && (d.stance || null) === row.stance && !!d.mimic === row.mimic, () => 'the phase started with the wrong rules: ' + run.boss + ' phase ' + run.phase);
+      }
     }
-    if (d && d.phase === 1) mon.lastDuelHp = d.p.hp;
+    if (d && d.phase === mon.phase) mon.lastDuelHp = d.p.hp;
+    if (d) ok(d.tension >= R.Combat.floorOf(d) && d.tension <= 3, () => 'tension ' + d.tension + ' outside ' + R.Combat.floorOf(d) + '..3');
     ok(fin(run.pHp, run.pMaxHp) && run.pHp >= 0 && run.pHp <= run.pMaxHp, 'run.pHp out of range: ' + run.pHp + '/' + run.pMaxHp);
     if (d) ok(fin(d.p.hp, d.r.hp) && d.p.hp <= d.p.maxHp && d.r.hp <= d.r.maxHp, 'duel hp out of range');
     const relic = run.pBoons.length && /^relic_/.test(run.pBoons[0]) ? 1 : 0, done = run.stage === 'bonfire' ? run.duelN : run.duelN - 1;
@@ -622,7 +632,7 @@ function makeMonitor(store) {
     for (let i = 0; i < st.duelTurns.length; i++) sum += st.duelTurns[i];
     if (d && !d.closed) sum += d.p.moves.length;
     if (!mon.lenient) ok(sum === st.turns, () => 'stats.turns ' + st.turns + ' != turns on record ' + sum);
-    if (mon.phase2Hp !== null && d && d.phase === 2) ok(d.p.hp === mon.phase2Hp, () => 'player hp changed between the transformation and the first phase-2 exchange: ' + mon.phase2Hp + ' -> ' + d.p.hp);
+    if (mon.phase2Hp !== null && d && d.phase === mon.phase && d.phase >= 2) ok(d.p.hp === mon.phase2Hp, () => 'player hp changed between the transformation and the first phase-2 exchange: ' + mon.phase2Hp + ' -> ' + d.p.hp);
 
     // ---- the commit
     const pend = run.pending;
@@ -642,7 +652,8 @@ function makeMonitor(store) {
       if (ok(!!pend && !!d && pend.turn === d.turn && pend.n === d.n && pend.phase === d.phase, 'input is enabled but the Rival has not committed for this turn')) {
         if (!mon.inputOpen) {
           mon.inputOpen = true;
-          ok(pk.tell === pend.sealed.tell, 'the stance shown is not the committed tell');
+          if (d.stance === 'none') ok(pk.tell === null, 'a stance was shown in a fight that shows none');
+          else ok(pk.tell === pend.sealed.tell, 'the stance shown is not the committed tell');
           ok(R.Combat.legal(d, 'r').indexOf(pend.sealed.move) >= 0, 'the committed move is not legal');
           if (pk.only) mon.count.tutorialTurns++;
           if (mon.trust) {
@@ -730,7 +741,7 @@ function session(o) {
     if (run.stage === 'bonfire') return 'D:bonfire' + (sc === 'dossier' ? '-dossier' : '');
     if (sc !== 'duel') return 'G:menu-run';
     if (d && d.over) return run.duelN === 7 && d.phase === 1 && d.over === 'p' ? 'E:transform' : 'C:lethal';
-    if (d && d.phase === 2 && d.turn === 1 && !run.pending) return 'E:transform2';
+    if (d && d.phase >= 2 && d.turn === 1 && !run.pending) return 'E:transform2';
     const pk = page.R.Scenes.duel.peek();
     if (run.pending) return pk && pk.input ? 'A:input' : 'B:committed';
     return 'I:between';
@@ -839,6 +850,7 @@ function soak() {
         // (white box) every other session plays with lights of the Vigil out: earned, then a different count each run
         const pm = (i & 1) && page.G && !page.G.run ? page.G.meta : null;
         if (pm && pm.vigil && pm.seenTutorial) { pm.vigil.max = 7; pm.vigil.sel = (pm.memory.runs * 3 + i) % 8; }
+        if (pm && pm.bosses && pm.seenTutorial) pm.bosses.max = page.R.Run.BOSSES.length;      // ... and with every face earned
         if (page.c.listeners !== page.bootListeners) { listenersGrew++; page.bootListeners = page.c.listeners; }
       }
     });
@@ -859,7 +871,7 @@ function soak() {
   ok(c.bonfireReloadVerified > 0, 'no bonfire reload was verified');
   ok(c.lethalReloads > 0 && c.transformReloads > 0, 'no reload after a lethal blow / during the transformation');
   console.log('soak: ' + total.runs + ' runs (' + c.wins + ' wins, ' + c.deaths + ' deaths incl. ' + c.abandons + ' abandoned), ' + c.turns + ' turns, ' + c.bonfires + ' bonfires (' + c.fourCard +
-    ' with 4 cards), ' + c.phase2 + ' phase-2, ' + c.relicRuns + ' relic runs, ' + c.stakeRuns + ' Vigil runs, ' + c.calledShots + ' called shots (' + c.earlyCalls + ' before phase 2), ' + c.tutorialTurns + ' tutorial turns');
+    ' with 4 cards), ' + c.phase2 + ' phase-2, ' + c.relicRuns + ' relic runs, ' + c.stakeRuns + ' Vigil runs, ' + c.faceRuns + ' runs against a later face (' + c.laterPhases + ' third or fourth phases), ' + c.calledShots + ' called shots (' + c.earlyCalls + ' before phase 2), ' + c.tutorialTurns + ' tutorial turns');
   console.log('      ' + total.frames + ' frames, ' + total.reloads + ' reloads: ' + Object.keys(total.kinds).sort().map(k => k + ' ' + total.kinds[k]).join(', '));
   console.log('      verified: mid-turn commit unchanged ' + c.midTurnVerified + '/' + c.midTurnReloads + ' reloads (the rest never resolved that turn before the next reload), between-turn state ' +
     c.betweenTurnVerified + ', bonfire offers ' + c.bonfireReloadVerified + ', stored==live at input ' + c.persistedEqual);

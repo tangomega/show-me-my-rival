@@ -224,13 +224,19 @@
 
   function newDuel(o) {
     o = o || {};
+    var phase = o.phase >= 2 ? Math.floor(o.phase) : 1;
+    // Rules of this fight (R.Run sets them from the boss table). Callers that pass only a phase get the
+    // classic second phase: a tension floor of 1 (Embers) and Called Shot.
+    var floor = typeof o.floor === 'number' ? Math.max(0, Math.min(TENSION_MAX, Math.floor(o.floor))) : (phase >= 2 ? 1 : 0);
     var duel = {
       n: o.n || 1,
-      phase: o.phase === 2 ? 2 : 1,
+      phase: phase,
       turn: 1,
-      tension: o.phase === 2 || o.embers ? 1 : 0,   // Embers: the duel starts at (and never drops below) 1 pip
-      embers: o.phase === 2 || !!o.embers,     // phase 2 always; earlier duels when the Vigil says so
-      calls: o.phase === 2 || !!o.calls,       // Called Shot may be used in this duel
+      tension: floor,                          // the duel starts at (and never drops below) its floor
+      floor: floor,
+      calls: o.calls !== undefined ? !!o.calls : phase >= 2,   // Called Shot may be used in this duel
+      stance: o.stance || null,                // 'none': the Rival shows no stance
+      mimic: !!o.mimic,                        // the Rival picks its move the way the player would
       p: o.p || newFighter(12, 12, []),
       r: o.r || newFighter(6, 6, []),
       over: null,
@@ -258,8 +264,13 @@
     return out;
   }
 
-  function ctx(duel) {
-    var p = duel.p, r = duel.r, pm = p.moves, n = pm.length;
+  function floorOf(duel) { return typeof duel.floor === 'number' ? duel.floor : (duel.phase === 2 ? 1 : 0); }
+  function callsOf(duel) { return duel.calls !== undefined ? !!duel.calls : duel.phase === 2; }
+
+  // The player's situation, as the brain keys its habits. side 'r' gives the same picture from the Rival's seat
+  // (used when it plays as the player would).
+  function ctx(duel, side) {
+    var p = side === 'r' ? duel.r : duel.p, r = side === 'r' ? duel.p : duel.r, pm = p.moves, n = pm.length;
     return {
       duel: duel.n, phase: duel.phase, turn: duel.turn,
       prev1: n >= 1 ? pm[n - 1] : null,
@@ -363,7 +374,7 @@
       var W = duel[w], L = duel[l];
       var xw = w === 'p' ? xp : xr, xl = w === 'p' ? xr : xp;
       var wm = xw.my;
-      var called = (duel.phase === 2 || duel.calls) && intel.called ? intel.called : null;
+      var called = callsOf(duel) && intel.called ? intel.called : null;
       res.winner = w;
       xw.won = true;
       xl.lost = true;
@@ -379,7 +390,7 @@
       }
 
       dmg += T;                                               // tension pips
-      duel.tension = duel.phase === 2 || duel.embers ? 1 : 0; // Embers: floor of 1
+      duel.tension = floorOf(duel);                           // Embers: back to the floor, not to 0
       if (T > 0) ev.push({ t: 'tension', n: duel.tension, from: T, spent: T });
       if (T >= TENSION_MAX) { res.deathblow = true; ev.push({ t: 'deathblow', side: w }); }
 
@@ -536,6 +547,8 @@
     newDuel: newDuel,
     legal: legal,
     ctx: ctx,
+    floorOf: floorOf,
+    callsOf: callsOf,
     payoff: payoff,
     beginTurn: beginTurn,
     resolve: resolve,

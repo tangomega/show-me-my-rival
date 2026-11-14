@@ -649,5 +649,53 @@ section('8. Timing and bounded state');
   check('state size after 20,000 turns still under 12 KB', JSON.stringify(st.brain.serialize()).length < 12288, JSON.stringify(st.brain.serialize()).length + ' bytes');
 })();
 
+// ------------------------------------------------------------------ the faces: no stance, and playing as the player
+section('Boss modes: noTell (The Blank) and mimic (The Reflection)');
+(function () {
+  const pay = { S: { S: 0, G: -2, F: 3 }, G: { S: 2, G: 0, F: -2 }, F: { S: -3, G: 2, F: 0 } };
+  const ctxW = { duel: 7, phase: 2, turn: 4, prev1: 'G', prev2: 'S', prevR: 'F', last: 'W', pHp: 12, pMaxHp: 26, rHp: 4, rMaxHp: 5, tension: 0, pBroken: false, rBroken: false };
+  // a player who always Guards after a win and always Strikes after a loss
+  const b = R.Brain.create(null), rng = R.RNG.create(77);
+  b.beginRun({ days: 0 });
+  for (let i = 0; i < 300; i++) {
+    const last = i % 2 ? 'W' : 'L', ctx = Object.assign({}, ctxW, { last: last, turn: 2 + (i % 5) });
+    b.observe(ctx, MOVES[i % 3], last === 'W' ? 'G' : 'S', MOVES[(i + 1) % 3]);
+  }
+  let lies = 0, modes = {}, illegal = 0;
+  for (let i = 0; i < 400; i++) {
+    const s = b.commit({ ctx: ctxW, payoff: pay, legalR: MOVES, legalP: MOVES, exploit: 1, honestyBase: 0.2, rng: rng, noTell: true });
+    if (!s.honest || s.tell !== s.move) lies++;
+    modes[s.mode] = 1;
+  }
+  check('noTell: the stance never differs from the move (it is not shown)', lies === 0, lies + ' of 400');
+  const before = JSON.stringify(b.serialize());
+  b.observe(ctxW, null, 'G', 'S');
+  check('observe with no stance still learns the habit', JSON.stringify(b.serialize()) !== before);
+  // (every observe decays all tables a little, so "alone" means no more than that decay)
+  check('observe with no stance does not count as a response to a stance', Math.abs(b.trust() - R.Brain.create(JSON.parse(before)).trust()) < 0.01,
+    b.trust() + ' vs ' + R.Brain.create(JSON.parse(before)).trust());
+
+  // mimic: in the seat of someone who just won, it Guards (as the player does); after a loss it Strikes
+  const count = { W: { S: 0, G: 0, F: 0 }, L: { S: 0, G: 0, F: 0 } };
+  ['W', 'L'].forEach(function (last) {
+    for (let i = 0; i < 600; i++) {
+      const s = b.commit({ ctx: ctxW, payoff: pay, legalR: MOVES, legalP: MOVES, exploit: 1, honestyBase: 0.5, rng: rng, mimic: Object.assign({}, ctxW, { last: last }) });
+      count[last][s.move]++;
+      if (s.mode !== 'mimic') modes.bad = 1;
+      if (MOVES.indexOf(s.move) < 0 || MOVES.indexOf(s.tell) < 0 || s.honest !== (s.tell === s.move)) illegal++;
+    }
+  });
+  console.log('  mimic after a win: ' + JSON.stringify(count.W) + '   after a loss: ' + JSON.stringify(count.L));
+  check('mimic plays Guard after a win, as the player does', count.W.G > 360, JSON.stringify(count.W));
+  check('mimic plays Strike after a loss, as the player does', count.L.S > 360, JSON.stringify(count.L));
+  check('mimic reports its mode and a consistent stance', !modes.bad && illegal === 0);
+  let guardWhenBroken = 0;
+  for (let i = 0; i < 200; i++) if (b.commit({ ctx: ctxW, payoff: pay, legalR: ['S', 'F'], legalP: MOVES, exploit: 1, honestyBase: 0.5, rng: rng, mimic: ctxW }).move === 'G') guardWhenBroken++;
+  check('mimic never plays a move it may not', guardWhenBroken === 0);
+  const fresh = R.Brain.create(null), seen = { S: 0, G: 0, F: 0 };
+  for (let i = 0; i < 600; i++) seen[fresh.commit({ ctx: ctxW, payoff: pay, legalR: MOVES, legalP: MOVES, exploit: 1, honestyBase: 0.5, rng: rng, mimic: ctxW }).move]++;
+  check('mimic of an unknown player is close to even', Math.min(seen.S, seen.G, seen.F) > 120, JSON.stringify(seen));
+})();
+
 console.log('\n' + (failures ? failures + ' of ' + checks + ' checks FAILED' : 'all ' + checks + ' checks passed'));
 process.exit(failures ? 1 : 0);

@@ -421,6 +421,7 @@
         t = lr[i];
         var acc = [base[0], base[1], base[2]], tw = bw;
         for (e = NH; e < NE; e++) {
+          if (q.noTell) break;                           // no stance is shown: nothing for the player to respond to
           if (!expertP(e, tellKey(e, t, ctx), t, legalP, tmp)) continue;
           var w = s.w[e];
           acc[0] += w * tmp[0]; acc[1] += w * tmp[1]; acc[2] += w * tmp[2];
@@ -452,7 +453,22 @@
         var exploit = num(q.exploit, 0, 1, 0.5);
         var h = honesty(q.honestyBase);
         var honest = rng.next() < h;
-        if (!(rng.next() < exploit)) {
+        if (q.noTell) honest = true;                     // the stance is never seen, so it carries nothing
+        if (q.mimic && typeof q.mimic === 'object') {
+          // 'mimic': it plays the move the player would most likely play in its seat (q.mimic = that context),
+          // sampled from the same model it uses to predict them. The stance is honest with probability h.
+          mode = 'mimic';
+          rng.next();                                    // keeps the dice count the same as the other branches
+          var mp = predictIdx(q.mimic, lr), wm = [];
+          for (i = 0; i < lr.length; i++) wm.push(mp[lr[i]]);
+          move = lr[sampleIdx(wm, wm.length, rng.next())];
+          tell = move;
+          if (!honest) {
+            var lies2 = [];
+            for (i = 0; i < lr.length; i++) if (lr[i] !== move) lies2.push(lr[i]);
+            if (lies2.length) tell = lies2[Math.min(lies2.length - 1, Math.floor(rng.next() * lies2.length))];
+          }
+        } else if (!(rng.next() < exploit)) {
           // 'mix': equilibrium move, tell honest with probability h, otherwise either lie shape
           var wr = [];
           for (i = 0; i < lr.length; i++) wr.push(eq.r[lr[i]]);

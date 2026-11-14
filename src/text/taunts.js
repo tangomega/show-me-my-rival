@@ -515,6 +515,51 @@
       "You snuffed the last one yourself. I only watched."
     ],
 
+    // The other faces of the final duel: boss_<id>_intro when duel 7 begins, boss_<id>_p<k> as phase k begins.
+    boss_three_faced_intro: [
+      "Three faces tonight. You will dislike each one differently.",
+      "I brought three masks. One of them is honest. Briefly.",
+      "Tonight I am several people. All of them know you."
+    ],
+    boss_three_faced_p2: [
+      "The Jester is done laughing. The Mourner does not tire.",
+      "A sadder face. It hits back harder when you strike."
+    ],
+    boss_three_faced_p3: [
+      "No face now. Nothing to read. Only what I know of you.",
+      "The last mask is no mask. Guess. I will not be guessing."
+    ],
+    boss_hours_intro: [
+      "Vespers. The night is long and I mean to use all of it.",
+      "Four hours until dawn. You will not like the last one.",
+      "Listen for the bell. Each time, the air gets sharper."
+    ],
+    boss_hours_p2: [
+      "Compline. The air has an edge now. It stays.",
+      "One bell. The tension keeps a pip in reserve."
+    ],
+    boss_hours_p3: [
+      "Matins. The dead of night. Two pips, always.",
+      "Two bells. Every touch cuts deeper now."
+    ],
+    boss_hours_p4: [
+      "Lauds. Dawn is close and every blow is the last one.",
+      "The last bell. No small wounds from here."
+    ],
+    boss_reflection_intro: [
+      "I kept a copy of everything you drafted. It suits me.",
+      "Recognise these? You chose them. I only borrowed.",
+      "Tonight I fight with your tools. Then with your habits."
+    ],
+    boss_reflection_p2: [
+      "Look closer. This is how you move. I have been watching.",
+      "I stopped predicting you. It is easier to be you."
+    ],
+    boss_reflection_p3: [
+      "Your boons, your habits, your shape. Beat yourself.",
+      "Everything you are, facing you. Prove you are more."
+    ],
+
     final_duel_intro: [
       "Seven. The altar. You know every stone by now; you've died on most of them.",
       "No more lessons. I know you by heart. Come and be known.",

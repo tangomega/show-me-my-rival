@@ -193,6 +193,27 @@ Run win % by lights out, 8 chains × 300 runs, natural unlocks:
 - Known cost: with The Unsaid out, duels with a hit of 7+ double to about 7%, because the Called Shot bonus is live from duel 1.
 - Rules tried and dropped: a tension floor of one pip from duel 5 raised the adaptive bot's win rate by 3.5 points (tension rewards whoever wins more exchanges); offering two boons instead of three moved no bot.
 
+## 8c. The faces (final bosses)
+
+`node tools/sim.js --unlocks all --set boss=<id>` forces one face; `--set B.<id>.<phase>.<key>=n` overrides one number in the table (for example `--set B.hours.4.floor=2`). The target was: winning the final duel, given that you reach it, stays within about 5 points of The Unmasked for the adaptive and mixer bots.
+
+Final-duel win % given arrival (run win % in brackets), 8 chains × 300 runs:
+
+| Face (health per phase, heal between) | adaptive | mixer | uniform | habit |
+|---|---|---|---|---|
+| The Unmasked (9 / 7, heal 4) | 70 (56) | 64 (35) | 51 (21) | 23 (10) |
+| The Three-Faced (5 / 4 / 5, heal 3) | 72 (56) | 64 (34) | 54 (22) | 24 (11) |
+| The Hours (4 / 4 / 4 / 4, heal 3) | 71 (57) | 61 (34) | 50 (21) | 16 (7) |
+| The Reflection (5 / 5 / 5, heal 3) | 75 (59) | 61 (31) | 55 (24) | 32 (14) |
+
+With all seven lights out: Unmasked 46 / 39 / 23 / 17, Three-Faced 44 / 32 / 25 / 0, Hours 47 / 30 / 25 / 0, Reflection 46 / 32 / 25 / 14.
+
+- **Met** with no lights out. **Missed for the mixer with seven lights out** (30–32% against 39%): The Glass Jaw adds its health and A Moment's Peace removes its heal once per phase, so faces with more phases pay more. Not corrected.
+- First numbers and what moved them: The Three-Faced at 5 / 5 / 6 with heal 2 and fortify 2 was 59 / 57, ten points too hard; The Reflection at 6 / 5 / 5 with heal 2 was 69 / 52, where the mixer's own drafted boons were being used against it.
+- The Hours favours whoever wins more exchanges, because a raised tension floor makes every hit bigger. That is why the habit bot does worst there and the adaptive bot is unmoved.
+- The Reflection is the kindest to the habit bot: when it plays as the bot would, the two of them clash a lot.
+- The adaptive bot was taught one thing for The Reflection: under the mimic rule it weighs the Rival's moves by its own record after a win, loss or clash, which is what a player who has read the rule card would do.
+
 ## 9. About the sim
 
 - `node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot a,b] [--quick] [--unlocks natural|all] [--no-combos] [--no-boons] [--set key=value] [--label text] [--trace]`. About 100 to 150 runs per second per worker, 1,300 per second on 11 workers.

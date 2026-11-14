@@ -38,6 +38,7 @@ const BUCKET_NAMES = ['1-10', '11-50', '51-200', '201+'];
 
 // ------------------------------------------------------------------ overrides
 let STAKE = 0;                                        // --set stake=N: every run is played with N lights of the Vigil out
+let BOSS = 'unmasked';                                // --set boss=id: the face worn in duel 7 (R.Run.BOSSES)
 function applySet(list) {
   (list || []).forEach(function (kv) {
     const i = kv.indexOf('=');
@@ -55,6 +56,12 @@ function applySet(list) {
     else if (k === 'maxhp') RUN.PLAYER_MAX_HP = nums[0];
     else if (k === 'p2heal') RUN.PHASE2_HEAL = nums[0];
     else if (k === 'stake') STAKE = nums[0];
+    else if (k.indexOf('B.') === 0) {                 // B.<boss id>.<phase 1..n>.<key>=number, e.g. B.hours.4.floor=2
+      const parts = k.split('.'), bo = RUN.BOSSES.filter(function (b) { return b.id === parts[1]; })[0];
+      if (!bo || !bo.phases[+parts[2] - 1]) throw new Error('unknown boss phase: ' + k);
+      bo.phases[+parts[2] - 1][parts[3]] = nums[0];
+    }
+    else if (k === 'boss') { BOSS = v; if (!RUN.BOSSES.some(function (b) { return b.id === v; })) throw new Error('unknown boss: ' + v); }
     else if (k.indexOf('V.') === 0) RUN.VIGIL_TUNE[k.slice(2)] = nums[0];
     else if (k.indexOf('K.') === 0) R.Brain.K[k.slice(2)] = nums[0];
     else if (k.indexOf('A.') === 0) ADAPT[k.slice(2)] = nums[0];
@@ -277,6 +284,8 @@ function makeAdaptive(rng) {
   for (let k = 0; k <= 8; k++) shape.push([0, 0, 0]);
   const recent = [0.7, 0.15, 0.15];
   const q = { S: 0, G: 0, F: 0 }, ev = { S: 0, G: 0, F: 0 }, pr = { S: 0, G: 0, F: 0 };
+  const FLIP = { W: 'L', L: 'W', C: 'C' };
+  const own = { W: { S: 0, G: 0, F: 0 }, L: { S: 0, G: 0, F: 0 }, C: { S: 0, G: 0, F: 0 }, start: { S: 0, G: 0, F: 0 } };
 
   function estimate(k, out) {
     const c = shape[k], n = c[0] + c[1] + c[2], ph0 = PRIOR_H[k];
@@ -289,8 +298,11 @@ function makeAdaptive(rng) {
 
   const est = [0, 0, 0];
   function pick(v) {
-    const k = v.phase === 2 ? 8 : v.n, t = v.tell, lp = v.legalP, lr = v.legalR;
+    const k = v.phase >= 2 ? 8 : v.n, t = v.tell, lp = v.legalP, lr = v.legalR;
     if (bored(v)) return rng.pick(lp);
+    // It plays as I would in its seat: its last result is the mirror of mine, so weigh its moves by my own record there.
+    const mine = v.mimic ? own[FLIP[v.ctx.last] || 'start'] : null;
+    const mineN = mine ? mine.S + mine.G + mine.F : 0;
     const eq = R.Brain.equilibrium(v.payoff, lr, lp);
     estimate(k, est);
     if (v.info.tallyH !== null) {                     // Liar's Tally: the game shows its honesty to the nearest 10%
@@ -303,8 +315,9 @@ function makeAdaptive(rng) {
     for (i = 0; i < 3; i++) q[MOVES[i]] = 0;
     for (i = 0; i < lr.length; i++) {
       m = lr[i];
-      const f = m === t ? est[0] : (m === BEATS[t] ? est[1] : est[2]);
+      const f = t === null ? 1 : (m === t ? est[0] : (m === BEATS[t] ? est[1] : est[2]));     // no stance shown: nothing to read
       q[m] = Math.max(0.04, eq.r[m]) * f;
+      if (mine) q[m] = f * (mine[m] + 1) / (mineN + 3);
     }
     // stakes: the biggest swing on the board this turn
     let stakes = 0;
@@ -353,7 +366,9 @@ function makeAdaptive(rng) {
   }
 
   function after(v, pm, rm) {
-    const k = v.phase === 2 ? 8 : v.n, t = v.tell;
+    const k = v.phase >= 2 ? 8 : v.n, t = v.tell;
+    own[v.ctx.last || 'start'][pm]++;                                   // what I do after a win / loss / clash / at the start
+    if (t === null) return;
     const s = rm === t ? 0 : (rm === BEATS[t] ? 1 : 2);
     const c = shape[k];
     c[0] *= A.DECAY; c[1] *= A.DECAY; c[2] *= A.DECAY; c[s] += 1;
@@ -435,18 +450,23 @@ function runChain(job) {
       const ctx = C.ctx(duel), legalP = C.legal(duel, 'p'), legalR = C.legal(duel, 'r');
       const cfg = RUN.cfg(run, duel);
       let called = null;
-      if ((duel.phase === 2 || duel.calls) && duel.turn % 3 === 2) called = argmaxMove(brain.predict(ctx, legalP), legalP);
+      if (C.callsOf(duel) && duel.turn % 3 === 2) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       const payoff = C.payoff(duel);
-      const sealed = brain.commit({ ctx: ctx, payoff: payoff, legalR: legalR, legalP: legalP, exploit: cfg.exploit, honestyBase: cfg.honesty, rng: rng });
+      const noStance = duel.stance === 'none';
+      const cq = { ctx: ctx, payoff: payoff, legalR: legalR, legalP: legalP, exploit: cfg.exploit, honestyBase: cfg.honesty, rng: rng };
+      if (noStance) cq.noTell = true;                                   // as scenes/duel.js turn()
+      if (duel.mimic) cq.mimic = C.ctx(duel, 'r');
+      const sealed = brain.commit(cq);
 
       // ---- the player's window: public information only
       const inf = C.info(duel);
       view.n = duel.n; view.phase = duel.phase; view.turn = duel.turn; view.ctx = ctx; view.legalP = legalP; view.legalR = legalR;
       view.clashRun = clashRun; if (duel.tension >= 3 && clashRun >= BORED_AFTER) locked = true;
-      view.tell = sealed.tell; view.called = called; view.payoff = payoff; view.tension = duel.tension;
+      view.tell = noStance ? null : sealed.tell; view.called = called; view.payoff = payoff; view.tension = duel.tension;
+      view.mimic = !!duel.mimic;                                        // public: the rule card says it plays as you do
       view.pHp = duel.p.hp; view.rHp = duel.r.hp; view.pBoons = duel.p.boons; view.rBoons = duel.r.boons; view.charges = duel.p.charges;
-      view.info.stamp = inf.coinTurn1 ? sealed.honest : null;
+      view.info.stamp = inf.coinTurn1 && !noStance ? sealed.honest : null;
       view.info.ledger = inf.ledger ? { top: sealed.top, dots: sealed.confidence > 0.66 ? 3 : sealed.confidence > 0.33 ? 2 : 1 } : null;
       view.info.tallyH = (!inf.ledger && inf.tally) ? Math.round(brain.honesty(cfg.honesty) * 10) * 10 : null;
       cur = { duel: duel, sealed: sealed, legalP: legalP, rng: rng, coin: false, forced: null };
@@ -457,7 +477,7 @@ function runChain(job) {
 
       duel.intel.honest = sealed.honest; duel.intel.pred = sealed.pred; duel.intel.coin = cur.coin;
       const res = C.resolve(duel, pm, sealed.move);
-      brain.observe(ctx, sealed.tell, pm, sealed.move);
+      brain.observe(ctx, noStance ? null : sealed.tell, pm, sealed.move);
       RUN.record(run, meta, res, sealed);
       bot.after(view, pm, sealed.move, res);
 
@@ -504,7 +524,7 @@ function runChain(job) {
     const now = 1.7e12 + i * 600000;
     const owned = RUN.relics(meta).map(function (b) { return b.id; });
     const relicId = bot.relic(owned);
-    const run = RUN.create(meta, { seed: seed, relicId: relicId, now: now, stake: STAKE, anyStake: true, dossier: STAKE >= 4 ? brain.dossier() : null });
+    const run = RUN.create(meta, { seed: seed, relicId: relicId, now: now, stake: STAKE, anyStake: true, dossier: STAKE >= 4 ? brain.dossier() : null, boss: BOSS, anyBoss: true });
     brain.beginRun({ days: run.daysAway || 0 });
     const rng = R.RNG.create((seed ^ 0x5bd1e995) >>> 0);
     bot.runStart();
@@ -519,11 +539,11 @@ function runChain(job) {
       RUN.startDuel(run);
       let winner = fight(run, rng, run.duelN);
       reached = run.duelN;
-      if (winner === 'p' && run.duelN === 7) {
-        RUN.endDuel(run, meta, 'p', null);            // closes phase 1 (the scene's transform())
-        RUN.startPhase2(run);
+      while (winner === 'p' && run.duelN === 7 && run.phase < RUN.phaseCount(run)) {
+        RUN.endDuel(run, meta, 'p', null);            // closes the phase (the scene's transform())
+        RUN.nextPhase(run);
         reached = 8;
-        winner = fight(run, rng, 8);
+        winner = fight(run, rng, 8);                  // every later phase is counted in the "P2" column
       }
       RUN.endDuel(run, meta, winner, brain.dossier());
       if (run.stage !== 'bonfire') break;

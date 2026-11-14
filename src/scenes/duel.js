@@ -54,7 +54,8 @@
     return { who: who, x: x, ox: 0, oy: 0, anim: 'idle', def: null, t: 0, mode: 'loop', white: 0, flip: flip, hidden: false };
   }
   function play(a, name, mode) {
-    var def = R.Art.anim(a.who, name) || R.Art.anim(a.who, 'idle');
+    // an unknown sprite set or animation must never leave an actor without a clip (a null def would stop the frame)
+    var def = R.Art.anim(a.who, name) || R.Art.anim(a.who, 'idle') || R.Art.anim('rival', name) || R.Art.anim('rival', 'idle');
     a.anim = name; a.def = def; a.t = 0;
     a.mode = mode || (def.loop ? 'loop' : 'once');
   }
@@ -133,6 +134,16 @@
 
   // ------------------------------------------------------------------ helpers
   function cfgOf(duel) { return R.Run.cfg(G.run, duel); }
+  // The look of the fight in front of you: sprite set, mask, arena, witchfire. Set on entry and at every phase change.
+  function setForm(duel) {
+    var D = cfgOf(duel), st = R.Save.data.settings, mask = D.mask || st.mask;
+    S.form = D;
+    S.phase2 = D.witch;
+    S.rv.who = D.who;
+    S.rvOpts[0].mask = mask; S.rvOpts[1].mask = mask;
+    S.bgOpts.arena = D.arena || st.arena;
+    S.noStance = D.stance === 'none';
+  }
   function argmaxMove(pred, legal) {
     var best = legal[0], i;
     for (i = 1; i < legal.length; i++) if (pred[legal[i]] > pred[best]) best = legal[i];
@@ -196,7 +207,7 @@
     for (;;) {
       while (!S.duel.over) yield* turn();
       var winner = S.duel.over;
-      if (winner === 'p' && run.duelN === 7 && S.duel.phase === 1) {
+      if (winner === 'p' && run.duelN === 7 && S.duel.phase < R.Run.phaseCount(run)) {
         yield* transform();
         continue;
       }
@@ -208,7 +219,7 @@
   function introLine() {
     var m = G.meta.memory, run = G.run, n = run.duelN, t = null;
     if (S.tutorial) return (R.Text.tutorial && R.Text.tutorial.intro) || null;
-    if (n === 7) return taunt('final_duel_intro');
+    if (n === 7) return bossTaunt('intro', 'final_duel_intro');
     if (n === 1 && S.lights.length) {             // lights of the Vigil are out: it remarks on the newest
       t = taunt('vigil_' + S.lights[S.lights.length - 1].id);
       if (t) return t;
@@ -238,8 +249,10 @@
   }
 
   function* intro() {
-    var n = S.duelN;
-    S.banner = { t: 0, a: 'DUEL ' + n, b: String((R.Text.duelNames && R.Text.duelNames[n - 1]) || '').toUpperCase() };
+    var n = S.duelN, faces = R.Run.repairMeta(G.meta).bosses.max > 1, boss = R.Run.bossOf(G.run);
+    var bname = ((R.Text.bosses || {})[boss.id] || {}).name || boss.name;
+    // once more than one face has been earned, duel 7 is announced by the face that waits there
+    S.banner = { t: 0, a: 'DUEL ' + n, b: String(n === 7 && faces ? bname : (R.Text.duelNames && R.Text.duelNames[n - 1]) || '').toUpperCase() };
     S.rv.ox = 50; play(S.rv, 'idle', 'loop');
     slide(S.rv, 0, 0.5);
     sfx('step');
@@ -259,6 +272,14 @@
       yield function () { return S.clock >= until || S.tapped; };
       S.card = null; S.tapped = false;
     }
+    if (n === 1 && faces) {                      // which face waits at the altar: said up front, so you can draft for it
+      S.card = { name: bname.toUpperCase(), line: ((R.Text.bosses || {}).omen) || 'waits at the altar tonight.' };
+      sfx('bell', { pitch: 0.8 }); S.tapped = false;
+      var until2 = S.clock + 2.6;
+      yield function () { return S.clock >= until2 || S.tapped; };
+      S.card = null; S.tapped = false;
+    }
+    if (n === 7) yield* showCards(S.form.cards);  // the first phase's rule, if this face has one
   }
 
   function* turn() {
@@ -289,11 +310,13 @@
       sealed = pend.sealed; called = pend.called || null;
       duel.intel.called = called;
     } else {
-      if ((duel.phase === 2 || duel.calls) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
+      if (R.Combat.callsOf(duel) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       var q = { ctx: ctx, payoff: R.Combat.payoff(duel), legalR: legalR, legalP: legalP,
                 exploit: cfg.exploit, honestyBase: cfg.honesty, rng: G.rng };
       if (tut && tut.force) q.force = tut.force;
+      if (duel.stance === 'none') q.noTell = true;                 // The Blank: no stance to respond to
+      if (duel.mimic) q.mimic = R.Combat.ctx(duel, 'r');           // The Reflection: it plays as you would in its seat
       sealed = brain.commit(q);
       run.pending = { sealed: sealed, turn: duel.turn, n: duel.n, phase: duel.phase, called: called };
       G.save();
@@ -304,9 +327,12 @@
     yield 0.3;
 
     // 3. stance (the tell) — public information
-    S.tell = sealed.tell;
-    S.stanceText = 'STANCE: ' + mname(sealed.tell).toUpperCase();
-    play(S.rv, 'tell_' + sealed.tell, 'tell');
+    if (S.noStance) { S.tell = null; S.stanceText = ''; }
+    else {
+      S.tell = sealed.tell;
+      S.stanceText = 'STANCE: ' + mname(sealed.tell).toUpperCase();
+      play(S.rv, 'tell_' + sealed.tell, 'tell');
+    }
     yield 0.35;
 
     var info = R.Combat.info ? R.Combat.info(duel) : null;
@@ -357,7 +383,7 @@
     duel.intel.honest = sealed.honest; duel.intel.pred = sealed.pred; duel.intel.coin = S.coin;
     var tensionBefore = duel.tension;
     var res = R.Combat.resolve(duel, pm, sealed.move);
-    if (!tut || tut.observe) brain.observe(ctx, sealed.tell, pm, sealed.move);
+    if (!tut || tut.observe) brain.observe(ctx, S.noStance ? null : sealed.tell, pm, sealed.move);   // no stance shown: nothing learned about stances
     R.Run.record(run, G.meta, res, sealed);
     run.pending = null;
     if (tut && tut.last) G.meta.seenTutorial = true;
@@ -547,7 +573,7 @@
   }
 
   function* outro(winner) {
-    var duel = S.duel, run = G.run, fin2 = run.duelN === 7 && duel.phase === 2;
+    var duel = S.duel, run = G.run, fin2 = run.duelN === 7 && duel.phase >= R.Run.phaseCount(run);
     E.timeScale = 1; S.resolving = false; S.input = false;
     if (R.Audio) R.Audio.heartbeat(0);
     if (winner === 'p') {
@@ -572,51 +598,80 @@
     }
   }
 
-  // The mask breaks. Duel 7, phase 1 -> phase 2.
+  // One Rival line for this boss and phase, falling back to the classic category.
+  function bossTaunt(kind, fallback) {
+    var id = R.Run.bossOf(G.run).id;
+    return taunt('boss_' + id + '_' + kind) || (fallback ? taunt(fallback) : null);
+  }
+  function* showCards(ids) {
+    var rules = (R.Text && R.Text.rules) || {}, k, until;
+    for (k = 0; ids && k < ids.length; k++) {
+      if (!rules[ids[k]]) continue;
+      S.card = rules[ids[k]]; sfx('boon'); S.tapped = false;
+      until = S.clock + 2.4;
+      yield function () { return S.clock >= until || S.tapped; };
+    }
+    S.card = null; S.tapped = false;
+  }
+
+  // Duel 7: one phase of its face ends and the next begins. How it looks depends on the next phase's `change`:
+  // 'shatter' (the mask breaks), 'swap' (another mask), 'bell' (the hour turns).
   function* transform() {
-    var run = G.run, T = R.Text || {};
+    var run = G.run, k;
+    var next = R.Run.cfg(run, { n: 7, phase: S.duel.phase + 1 });
+    var newMusic = next.music !== S.form.music;
     E.timeScale = 1; S.noSkip = true; S.resolving = false;
-    S.rSigil = 'gone'; S.pSigil = 'gone'; S.bub = null;
-    if (R.Audio) { R.Audio.music(null, 0.4); R.Audio.heartbeat(0); }
+    S.rSigil = 'gone'; S.pSigil = 'gone'; S.bub = null; S.tell = null;
+    if (R.Audio) { if (newMusic) R.Audio.music(null, 0.4); R.Audio.heartbeat(0); }
     play(S.rv, 'stagger', 'stay'); slide(S.rv, 0, 0.3);
     play(S.pl, 'idle', 'loop'); slide(S.pl, 0, 0.3);
-    yield 0.8;
-    say('...', true);
-    yield 0.9;
-    S.bub = null;
-    play(S.rv, 'transform', 'stay');
-    var total = S.rv.def.total / 1000;
-    yield total * 0.45;
-    E.flash(23, 0.25); E.shake(4, 0.5); sfx('phase2'); E.buzz([40, 60, 120]);
-    S.fx.burst('shard', RX, L.floorY - 40, 16);
-    E.tween(S, 'gutter', 1, 0.8);
-    yield total * 0.55 + 0.5;
+    if (next.change === 'bell') {                // the hour turns: the candles gutter and the bell counts the phase in
+      yield 0.5;
+      E.tween(S, 'gutter', 1, 0.6);
+      for (k = 1; k < next.phase; k++) { sfx('bell', { pitch: 0.62 }); E.shake(2, 0.25); E.buzz(40); yield 0.55; }
+      yield 0.3;
+    } else if (next.change === 'swap') {         // it turns away and comes back wearing another face
+      yield 0.7;
+      say('...', true);
+      yield 0.6;
+      S.bub = null;
+      E.flash(23, 0.2); E.shake(3, 0.35); sfx('phase2', { pitch: 1.25 }); E.buzz([30, 40, 60]);
+      S.fx.burst('shard', RX, L.floorY - 40, 10);
+      E.tween(S, 'gutter', 1, 0.3);
+      yield 0.45;
+    } else {                                     // the mask breaks
+      yield 0.8;
+      say('...', true);
+      yield 0.9;
+      S.bub = null;
+      play(S.rv, 'transform', 'stay');
+      var total = S.rv.def.total / 1000;
+      yield total * 0.45;
+      E.flash(23, 0.25); E.shake(4, 0.5); sfx('phase2'); E.buzz([40, 60, 120]);
+      S.fx.burst('shard', RX, L.floorY - 40, 16);
+      E.tween(S, 'gutter', 1, 0.8);
+      yield total * 0.55 + 0.5;
+    }
     // it rises
-    R.Run.endDuel(run, G.meta, 'p', null);       // closes phase 1 (no bonfire: the run stays in stage 'duel')
+    R.Run.endDuel(run, G.meta, 'p', null);       // closes the phase (no bonfire: the run stays in stage 'duel')
     var hpWas = S.duel.p.hp;
-    var duel = R.Run.startPhase2(run);
-    S.duel = duel; S.phase2 = true;
-    S.rv.who = 'rival2'; play(S.rv, 'idle', 'loop');
-    E.flash(31, 0.3);
-    if (R.Audio) R.Audio.music('boss2', 0.3);
+    var duel = R.Run.nextPhase(run);
+    S.duel = duel; setForm(duel);
+    play(S.rv, 'idle', 'loop');
+    E.flash(S.phase2 ? 31 : 23, 0.3);
+    if (R.Audio && newMusic) R.Audio.music(S.form.music, 0.3);
     E.tween(S, 'gutter', 0, 0.6);
     S.hp.r = 0; S.lag.r = 0; S.hp.p = duel.p.hp; S.lag.p = duel.p.hp; hpText();
     S.lowSaid.r = false;
     if (duel.p.hp > hpWas) { S.fx.burst('heal', PX, L.floorY - 20, 8); sfx('heal'); }      // A Moment's Peace out: no breath caught
-    var k, steps = duel.r.hp;
+    var steps = duel.r.hp;
     for (k = 1; k <= steps; k++) { S.hp.r = k; S.lag.r = k; hpText(); sfx('tick', { pitch: 0.8 + k * 0.05 }); yield 0.07; }
+    mood();
     G.save();
     play(S.rv, 'taunt', 'once');
-    yield* sayWait(taunt('phase2'), 1.2);
-    var rules = T.rules || {};
-    var cards = [rules.embers || { name: 'EMBERS', line: 'Tension never falls below one.' },
-                 rules.called_shot || { name: 'CALLED SHOT', line: 'It names your move. Prove it wrong.' }];
-    for (k = 0; k < cards.length; k++) {
-      S.card = cards[k]; sfx('boon'); S.tapped = false;
-      var until = S.clock + 2.4;
-      yield function () { return S.clock >= until || S.tapped; };
-    }
-    S.card = null; S.tapped = false; S.noSkip = false;
+    yield* sayWait(bossTaunt('p' + duel.phase, 'phase2'), 1.2);
+    yield* showCards(S.form.cards);
+    S.noSkip = false;
   }
 
   // ------------------------------------------------------------------ input
@@ -691,6 +746,13 @@
     g.fillStyle = hex(S.ledgerHot ? 25 : 24); g.fillRect(83, y + 23, 14, 9);
     g.fillStyle = hex(3); g.fillRect(84, y + 24, 12, 7);
     g.fillStyle = hex(12); g.fillRect(86, y + 26, 8, 1); g.fillRect(86, y + 28, 8, 1);
+    // duel 7: one pip per phase of the face, under its health bar (spent, current, still to come)
+    if (S.form && S.form.phases > 1) {
+      for (i = 0; i < S.form.phases; i++) {
+        g.fillStyle = hex(i < d.phase - 1 ? 5 : i === d.phase - 1 ? ((Math.floor(S.clock * 2) & 1) ? 19 : 18) : 17);
+        g.fillRect(110 + i * 6, y + 15, 4, 4);
+      }
+    }
     // the Vigil: seven stubs right of the ledger, the dark ones first
     if (S.lights.length) {
       for (i = 0; i < 7; i++) {
@@ -783,8 +845,8 @@
       var duel = resumed ? run.duel : R.Run.startDuel(run);
       var st = R.Save.data.settings;
       S = {
-        duel: duel, duelN: run.duelN, clock: 0, phase2: duel.phase === 2, tutorial: run.duelN === 1 && !meta.seenTutorial,
-        pl: mkActor('player', PX, false), rv: mkActor(duel.phase === 2 ? 'rival2' : 'rival', RX, true),
+        duel: duel, duelN: run.duelN, clock: 0, phase2: false, form: null, noStance: false, tutorial: run.duelN === 1 && !meta.seenTutorial,
+        pl: mkActor('player', PX, false), rv: mkActor('rival', RX, true),
         plOpts: [{ flip: false, white: false }, { flip: false, white: true }],
         rvOpts: [{ flip: true, white: false, mask: st.mask }, { flip: true, white: true, mask: st.mask }],
         fx: R.FX.create(220), floats: [], bub: null,
@@ -800,8 +862,9 @@
         idleT: 0, idleSaid: false,
         actives: [], bst: { pressed: false, disabled: false, icon: 'S', glow: false, accent: 0, broken: false },
         labels: { S: ui('strike', 'STRIKE'), G: ui('guard', 'GUARD'), F: ui('feint', 'FEINT') },
-        bgOpts: { variant: run.duelN, gutter: 0, snuffed: R.Run.stakeOf(run), phase2: duel.phase === 2, floorY: 0, arena: st.arena }
+        bgOpts: { variant: run.duelN, gutter: 0, snuffed: R.Run.stakeOf(run), phase2: false, floorY: 0, arena: st.arena }
       };
+      setForm(duel);
       for (var i = 0; i < duel.p.boons.length; i++) {
         var b = R.Boons.byId[duel.p.boons[i]];
         if (b && b.active && S.actives.length < 3) S.actives.push(b.id);
@@ -809,7 +872,7 @@
       play(S.pl, 'idle', 'loop'); play(S.rv, 'idle', 'loop');
       hpText(); setLegal();
       S.fx.ambient('ash', 5);
-      if (R.Audio) R.Audio.music(run.duelN === 7 ? (duel.phase === 2 ? 'boss2' : 'boss') : 'drone', 1);
+      if (R.Audio) R.Audio.music(S.form.music, 1);
       G.save();
       E.co(function* () { yield* flow(resumed); });
     },
@@ -870,7 +933,7 @@
         var dp = S.pSigil === 'sealed' ? Math.max(0, 6 - Math.floor(S.pSigilT * 40)) : 0;
         R.Art.sigil(g, 36, L.floorY - 68 - dp + bob, S.pSigil, S.shownP, 'p');
       }
-      if (S.stamp !== null && S.input) {
+      if (S.stamp !== null && S.input && !S.noStance) {
         R.Font.draw(g, S.stamp ? ui('trueStance', 'TRUE') : ui('falseStance', 'FALSE'), 136, L.floorY - 84, S.stamp ? 28 : 19, OPT_CS);
       }
       if (S.called && S.input) R.Font.draw(g, S.calledText, PX, L.floorY - 84, 31, OPT_CS);

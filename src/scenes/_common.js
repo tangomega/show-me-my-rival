@@ -11,8 +11,8 @@
   'use strict';
 
   var RAR_COL = { common: 7, uncommon: 25, rare: 30 };
-  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA', vigil: 'LIGHT' };
-  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28, vigil: 22 };
+  var TYPE_LABEL = { boon: 'BOON', relic: 'RELIC', mask: 'MASK', arena: 'ARENA', vigil: 'LIGHT', face: 'FACE' };
+  var TYPE_COL = { boon: 21, relic: 30, mask: 11, arena: 28, vigil: 22, face: 19 };
   var ARENA_SWATCH = { cathedral: [26, 28], blood_moon: [16, 18], pale_dawn: [7, 22] };
   var BAYER = [0, 2, 3, 1];
   var RAMP = [3, 5, 7, 8];                        // fade-in ramp for text on black (then the real colour)
@@ -312,6 +312,10 @@
       x = T.arenas ? T.arenas[u.ref] : null;
       if (x && x.name) o.name = x.name;
       o.desc = (x && x.line) || ''; o.swatch = ARENA_SWATCH[u.ref] || ARENA_SWATCH.cathedral;
+    } else if (u.type === 'face') {
+      x = T.bosses ? T.bosses[u.ref] : null;
+      if (x && x.name) o.name = x.name;
+      o.desc = (x && x.line) || ''; o.icon = (x && x.icon) || 'mask_porcelain';
     }
     o.nameLines = wrap(o.name, 48, 3);
     o.howLines = wrap(o.how, howW || 138, 2);

@@ -48,7 +48,11 @@
     if (who === 'rival') t.transform = A(rep(10, 100));
     return t;
   }
-  var ANIMS = { player: table('player'), rival: table('rival'), rival2: table('rival2') };
+  // 'mirror' = The Reflection: the player's own poses and timings, redrawn in the Rival's colours (see MIRROR_MAP).
+  var ANIMS = { player: table('player'), rival: table('rival'), rival2: table('rival2'), mirror: table('player') };
+  // umber cloak -> the Rival's reds; bandages -> porcelain. Steel is left alone.
+  var MIRROR_MAP = {};
+  MIRROR_MAP[13] = 18; MIRROR_MAP[14] = 17; MIRROR_MAP[15] = 16; MIRROR_MAP[12] = 9; MIRROR_MAP[11] = 10;
 
   function anim(who, name) { var t = ANIMS[who]; return (t && t[name]) || null; }
 
@@ -1553,13 +1557,16 @@
   // Frames, caches, public API
   // =============================================================================================
   function poseOf(who, name, f) {
-    var list = FR[who][name] || (who === 'rival2' && FR.rival[name]) || FR[who].idle || FR.rival.idle;
+    var src = who === 'mirror' ? 'player' : who;
+    var list = FR[src][name] || (who === 'rival2' && FR.rival[name]) || FR[src].idle || FR.rival.idle;
     return list[f < list.length ? f : list.length - 1];
   }
 
   function rawImg(who, name, f, mi) {
     var a = ANIMS[who][name], row = a.raw[mi] || (a.raw[mi] = []);
-    return row[f] || (row[f] = compose(who, poseOf(who, name, f), MASKS[mi], f));
+    if (row[f]) return row[f];
+    if (who === 'mirror') return (row[f] = Pix.remapped(compose('player', poseOf(who, name, f), MASKS[0], f), MIRROR_MAP));
+    return (row[f] = compose(who, poseOf(who, name, f), MASKS[mi], f));
   }
   // rival2 afterimage: the silhouette of a frame in bruise violet, checkerboarded unless solid
   function trail(img, solid) {
@@ -1574,7 +1581,7 @@
     if (!t) { who = 'player'; t = ANIMS.player; }
     a = t[name]; if (!a) { name = 'idle'; a = t.idle; }
     f = f | 0; if (f < 0) f = 0; else if (f >= a.n) f = a.n - 1;
-    mi = who === 'player' ? 0 : (MASK_IX[mask] || 0);
+    mi = who === 'player' || who === 'mirror' ? 0 : (MASK_IX[mask] || 0);
     row = a.im[mi] || (a.im[mi] = []);
     img = row[f];
     if (img) return img;
@@ -1597,7 +1604,7 @@
     if (!t) { who = 'player'; t = ANIMS.player; }
     a = t[name]; if (!a) { name = 'idle'; a = t.idle; }
     frame = frame | 0; if (frame < 0) frame = 0; else if (frame >= a.n) frame = a.n - 1;
-    if (opts && opts.mask && who !== 'player') mi = MASK_IX[opts.mask] || 0;
+    if (opts && opts.mask && who !== 'player' && who !== 'mirror') mi = MASK_IX[opts.mask] || 0;
     k = frame * 4 + (opts && opts.flip ? 2 : 0) + (opts && opts.white ? 1 : 0);
     row = a.cv[mi] || (a.cv[mi] = []);
     cv = row[k];
