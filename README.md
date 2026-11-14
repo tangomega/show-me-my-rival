@@ -73,19 +73,13 @@ then visit http://localhost:4173 (use your browser's phone emulation for the int
 
 ## Put it on your phone with GitHub Pages
 
-1. Create a new **public** repository on github.com (no README, no licence), for example `show-me-my-rival`.
-2. From this folder, replacing `YOUR-NAME`:
+The code lives at https://github.com/tangomega/show-me-my-rival and is meant to be played at **https://tangomega.github.io/show-me-my-rival/** (on the phone, use "Add to Home Screen" for a full-screen icon).
 
-```bash
-git remote add origin https://github.com/YOUR-NAME/show-me-my-rival.git
-```
+To host your own copy:
 
-```bash
-git push -u origin main
-```
-
-3. On GitHub: **Settings → Pages → Build and deployment → Source: Deploy from a branch → Branch: `main`, folder `/ (root)` → Save.**
-4. After a minute the game is at `https://YOUR-NAME.github.io/show-me-my-rival/`. On the phone, use "Add to Home Screen" for a full-screen icon.
+1. Create a new **public** repository on github.com (no README, no licence) and push this folder's `main` branch to it.
+2. On GitHub: **Settings → Pages → Build and deployment → Source: Deploy from a branch → Branch: `main`, folder `/ (root)` → Save.**
+3. After a minute the game is at `https://YOUR-NAME.github.io/REPO-NAME/`.
 
 ## Develop
 
