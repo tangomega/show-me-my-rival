@@ -1,4 +1,4 @@
-// THE RIVAL - everything the Rival says out loud.
+// SHOW ME MY RIVAL - everything the Rival says out loud.
 // Loads after text/strings.js (a stub) and extends R.Text. Pure: no DOM, no Math.random.
 //
 // Rules every line obeys (tools/out/check_text.js verifies them):

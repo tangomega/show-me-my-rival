@@ -5453,7 +5453,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- text/taunts.js ----
-// THE RIVAL - everything the Rival says out loud.
+// SHOW ME MY RIVAL - everything the Rival says out loud.
 // Loads after text/strings.js (a stub) and extends R.Text. Pure: no DOM, no Math.random.
 //
 // Rules every line obeys (tools/out/check_text.js verifies them):
@@ -6157,7 +6157,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- text/dossier.js ----
-// THE RIVAL - everything written down rather than said: the dossier, card flavor, unlocks, menus.
+// SHOW ME MY RIVAL - everything written down rather than said: the dossier, card flavor, unlocks, menus.
 // Loads after text/strings.js and text/taunts.js and extends R.Text. Pure: no DOM.
 // Nothing in here throws on bad input; a malformed stat gets a generic line.
 (function (R) {
@@ -6833,7 +6833,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- ai/brain.js ----
-// THE RIVAL — the Rival's mind (R.Brain). Pure: no DOM, no Date, no Math.random; runs under Node.
+// SHOW ME MY RIVAL — the Rival's mind (R.Brain). Pure: no DOM, no Date, no Math.random; runs under Node.
 //
 // An ensemble of 13 small experts (E0–E9 habits, T0–T2 tell responses) mixed with Hedge,
 // a regret-matching equilibrium solver for the payoff matrix it is handed, and the
@@ -7743,7 +7743,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- game/boons.js ----
-// THE RIVAL — boons (36) + relics (6). Pure data table with hook functions (runs under Node).
+// SHOW ME MY RIVAL — boons (36) + relics (6). Pure data table with hook functions (runs under Node).
 // Hooks are looked up by boon id at call time; nothing here is ever stored on game state.
 //
 // Hook argument `x` (built by R.Combat / R.Run):
@@ -8169,7 +8169,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- game/combat.js ----
-// THE RIVAL — combat rules. Pure (no DOM, no Date, no rng). All state is plain JSON.
+// SHOW ME MY RIVAL — combat rules. Pure (no DOM, no Date, no rng). All state is plain JSON.
 //
 // Timer convention (guardBroken, sealed.<m>): the stored number is "turns this is still active,
 // counting the current one". A status applied while resolving turn t with length n is stored as n+1
@@ -8718,7 +8718,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 })(globalThis.RIVAL = globalThis.RIVAL || {});
 ;
 // ---- game/run.js ----
-// THE RIVAL — run structure: duel table, bonfire offers, the Rival's draft, meta, unlocks, memory.
+// SHOW ME MY RIVAL — run structure: duel table, bonfire offers, the Rival's draft, meta, unlocks, memory.
 // Pure (no DOM, no Date — `now` is passed in; randomness only from run.rngState via R.RNG).
 (function (R) {
   'use strict';
@@ -11305,6 +11305,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   var STATUS = ['guardBroken', 'bleed', 'fortify', 'focus'];
   // Shared draw options and names: nothing below may build an object or a string per frame.
   var OPT_R = { align: 'right' }, OPT_C = { align: 'center' }, OPT_CS = { align: 'center', shadow: 1 }, OPT_CS2 = { align: 'center', shadow: 1, scale: 2 };
+  var MUTE_ST = { pressed: false, disabled: false };
   var OPT_P2 = { phase2: true }, BAR_P = { ticks: 0 }, BAR_R = { ticks: 0, flip: true };
   var ST_SPR = { guardBroken: 'st_guardBroken', bleed: 'st_bleed', fortify: 'st_fortify', focus: 'st_focus' };
   var ACT_SPR = { glimpse: 'act_glimpse', honesty: 'act_honesty', coin: 'act_coin' };
@@ -11514,7 +11515,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       t = taunt('habit_broken', R.Text.tauntVars ? R.Text.tauntVars(dos.broken) : dos.broken.vars);
       if (t) return t;
     }
-    if (n === 1) return G.crng.chance(0.7) ? taunt('milestone_runs') : null;   // duel-intro lines assume a rest came first
+    if (n === 1) return (m.runs >= 4 && G.crng.chance(0.7)) ? taunt('milestone_runs') : null;   // duel-intro lines assume a rest came first
     if (G.crng.chance(0.8)) {
       var open = null;
       for (var i = 0; i < dos.stats.length; i++) if (dos.stats[i].id === 'opening' && dos.stats[i].strength > 0) open = dos.stats[i];
@@ -12030,7 +12031,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     R.Font.draw(g, its ? 'TAP: YOURS' : 'TAP: CLOSE', 170, y, 7, OPT_R);
     y += 12;
     if (!list.length) R.Font.draw(g, '(none yet)', 10, y, 7);
-    R.UI.button(g, 10, bot - 26, 160, 22, S.muteText, null);
+    R.UI.button(g, 10, bot - 26, 160, 22, S.muteText, MUTE_ST);
     for (i = 0; i < list.length && y + 9 + list[i].lines.length * 8 <= bot - 30; i++) {
       R.Font.draw(g, list[i].name, 10, y, 10); y += 9;
       for (k = 0; k < list[i].lines.length; k++) { R.Font.draw(g, list[i].lines[k], 14, y, 8); y += 8; }
@@ -12207,7 +12208,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (m) pick(m); else S.tapped = true;
     },
     // Test hook: public information only (what a player can see on screen).
-    peek: function () { return S ? { input: S.input, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
+    peek: function () { return S ? { input: S.input && S.choice === null, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
     pause: function () { if (S && G) G.save(); },
     back: function () { if (!S) return; if (S.overlay) S.overlay = 0; else openLedger(); },
     resize: function () { if (S) layout(); }       // update() does not run while paused / in hit-stop: keep the layout current

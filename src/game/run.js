@@ -1,4 +1,4 @@
-// THE RIVAL — run structure: duel table, bonfire offers, the Rival's draft, meta, unlocks, memory.
+// SHOW ME MY RIVAL — run structure: duel table, bonfire offers, the Rival's draft, meta, unlocks, memory.
 // Pure (no DOM, no Date — `now` is passed in; randomness only from run.rngState via R.RNG).
 (function (R) {
   'use strict';

@@ -1,4 +1,4 @@
-// THE RIVAL - everything written down rather than said: the dossier, card flavor, unlocks, menus.
+// SHOW ME MY RIVAL - everything written down rather than said: the dossier, card flavor, unlocks, menus.
 // Loads after text/strings.js and text/taunts.js and extends R.Text. Pure: no DOM.
 // Nothing in here throws on bad input; a malformed stat gets a generic line.
 (function (R) {

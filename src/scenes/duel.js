@@ -14,6 +14,7 @@
   var STATUS = ['guardBroken', 'bleed', 'fortify', 'focus'];
   // Shared draw options and names: nothing below may build an object or a string per frame.
   var OPT_R = { align: 'right' }, OPT_C = { align: 'center' }, OPT_CS = { align: 'center', shadow: 1 }, OPT_CS2 = { align: 'center', shadow: 1, scale: 2 };
+  var MUTE_ST = { pressed: false, disabled: false };
   var OPT_P2 = { phase2: true }, BAR_P = { ticks: 0 }, BAR_R = { ticks: 0, flip: true };
   var ST_SPR = { guardBroken: 'st_guardBroken', bleed: 'st_bleed', fortify: 'st_fortify', focus: 'st_focus' };
   var ACT_SPR = { glimpse: 'act_glimpse', honesty: 'act_honesty', coin: 'act_coin' };
@@ -223,7 +224,7 @@
       t = taunt('habit_broken', R.Text.tauntVars ? R.Text.tauntVars(dos.broken) : dos.broken.vars);
       if (t) return t;
     }
-    if (n === 1) return G.crng.chance(0.7) ? taunt('milestone_runs') : null;   // duel-intro lines assume a rest came first
+    if (n === 1) return (m.runs >= 4 && G.crng.chance(0.7)) ? taunt('milestone_runs') : null;   // duel-intro lines assume a rest came first
     if (G.crng.chance(0.8)) {
       var open = null;
       for (var i = 0; i < dos.stats.length; i++) if (dos.stats[i].id === 'opening' && dos.stats[i].strength > 0) open = dos.stats[i];
@@ -739,7 +740,7 @@
     R.Font.draw(g, its ? 'TAP: YOURS' : 'TAP: CLOSE', 170, y, 7, OPT_R);
     y += 12;
     if (!list.length) R.Font.draw(g, '(none yet)', 10, y, 7);
-    R.UI.button(g, 10, bot - 26, 160, 22, S.muteText, null);
+    R.UI.button(g, 10, bot - 26, 160, 22, S.muteText, MUTE_ST);
     for (i = 0; i < list.length && y + 9 + list[i].lines.length * 8 <= bot - 30; i++) {
       R.Font.draw(g, list[i].name, 10, y, 10); y += 9;
       for (k = 0; k < list[i].lines.length; k++) { R.Font.draw(g, list[i].lines[k], 14, y, 8); y += 8; }
@@ -916,7 +917,7 @@
       if (m) pick(m); else S.tapped = true;
     },
     // Test hook: public information only (what a player can see on screen).
-    peek: function () { return S ? { input: S.input, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
+    peek: function () { return S ? { input: S.input && S.choice === null, tell: S.tell, legal: S.legal, only: S.only, called: S.called } : null; },
     pause: function () { if (S && G) G.save(); },
     back: function () { if (!S) return; if (S.overlay) S.overlay = 0; else openLedger(); },
     resize: function () { if (S) layout(); }       // update() does not run while paused / in hit-stop: keep the layout current

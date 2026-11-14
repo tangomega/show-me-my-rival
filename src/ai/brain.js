@@ -1,4 +1,4 @@
-// THE RIVAL — the Rival's mind (R.Brain). Pure: no DOM, no Date, no Math.random; runs under Node.
+// SHOW ME MY RIVAL — the Rival's mind (R.Brain). Pure: no DOM, no Date, no Math.random; runs under Node.
 //
 // An ensemble of 13 small experts (E0–E9 habits, T0–T2 tell responses) mixed with Hedge,
 // a regret-matching equilibrium solver for the payoff matrix it is handed, and the

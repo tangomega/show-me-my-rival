@@ -1,4 +1,4 @@
-// THE RIVAL — combat rules. Pure (no DOM, no Date, no rng). All state is plain JSON.
+// SHOW ME MY RIVAL — combat rules. Pure (no DOM, no Date, no rng). All state is plain JSON.
 //
 // Timer convention (guardBroken, sealed.<m>): the stored number is "turns this is still active,
 // counting the current one". A status applied while resolving turn t with length n is stored as n+1

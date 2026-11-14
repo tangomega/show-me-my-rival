@@ -1,4 +1,4 @@
-// THE RIVAL — boons (36) + relics (6). Pure data table with hook functions (runs under Node).
+// SHOW ME MY RIVAL — boons (36) + relics (6). Pure data table with hook functions (runs under Node).
 // Hooks are looked up by boon id at call time; nothing here is ever stored on game state.
 //
 // Hook argument `x` (built by R.Combat / R.Run):
