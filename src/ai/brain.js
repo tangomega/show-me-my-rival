@@ -45,6 +45,11 @@
   var CAT_NAME = ['counter', 'mirror', 'under'];
 
   // Experts: index, number of keys. 0..9 = E0..E9 (habit), 10..12 = T0..T2 (tell response).
+  // Save layout (frozen): slot e of w, c, life and run is expert e, in this order. w is always written as
+  // exactly 13 numbers (load drops any other length). A future expert never takes or shifts a slot: its
+  // weight goes in a side key of the brain object (`wa`) and its tables are appended after index 12 in c,
+  // life and run; NE grows in memory only. A save without it loads with the new expert at its start state,
+  // and the 13 stored weights keep their ratios to one another.
   var NE = 13, NH = 10;
   var SIZES = [1, 3, 9, 3, 9, 2, 1, 3, 4, 4, 1, 3, 3];
   var E_GLOBAL = 0, E_PREV = 1, E_PREV2 = 2, E_LAST = 3, E_LOW = 5, E_OPEN = 6, E_RPREV = 7,
@@ -98,10 +103,28 @@
   // ---------- small helpers ----------
 
   function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
-  function num(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(x, a, b) : d; }
-  function int(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(Math.round(x), a, b) : d; }
+  // +0 folds a -0 (JSON.parse reads "-0", and Math.round(-0.3) is -0) so a loaded field never holds one.
+  function num(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(x, a, b) + 0 : d; }
+  function int(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(Math.round(x), a, b) + 0 : d; }
   function r3(x) { return Math.round(x * 1000) / 1000; }
   function r4(x) { return Math.round(x * 10000) / 10000; }
+  // A weight as the save holds it: 4 dp and never below 0.0001, because load() rejects a w holding a 0.
+  // Weights in play sit far above it (observe floors them at K.W_FLOOR); only a hand-edited save reaches it.
+  function rw(x) { return Math.max(1e-4, r4(x)); }
+  // Reload-exact state: round every real-valued field to the precision serialize() writes (w by rw(), ema 4 dp,
+  // c and rs 3 dp; +0 folds -0). Run at the end of create (after load), observe, beginRun and forget, never
+  // in commit or any read, so the live brain always equals R.Brain.create(its own save) bit for bit. The
+  // integer fields (n, runs, life, run, t2, rn, pk) are exact already (int() folds -0).
+  function quant(s) {
+    for (var e = 0; e < NE; e++) {
+      s.w[e] = rw(s.w[e]);
+      var c = s.c[e];
+      for (var i = 0; i < c.length; i++) c[i] = r3(c[i]) + 0;
+    }
+    s.ema = r4(s.ema) + 0;
+    s.rs = r3(s.rs) + 0;
+    return s;
+  }
   function mi(m) { var i = MI[m]; return i === undefined ? -1 : i; }
 
   function newTables() {
@@ -151,13 +174,16 @@
     s.n = int(src.n, 0, 1e9, 0);
     s.runs = int(src.runs, 0, 1e9, 0);
     if (Array.isArray(src.w) && src.w.length === NE) {
-      var sum = 0, ok = true, e;
+      var sum = 0, qsum = 0, ok = true, e;
       for (e = 0; e < NE; e++) {
         if (typeof src.w[e] !== 'number' || !isFinite(src.w[e]) || src.w[e] <= 0) { ok = false; break; }
-        sum += src.w[e];
+        sum += src.w[e]; qsum += rw(src.w[e]);
       }
-      if (ok && sum > 0) {
-        var div = Math.abs(sum - 1) < 0.01 ? 1 : sum;          // rounding slack: keep as stored (stable round trip)
+      if (ok && isFinite(sum)) {
+        // Rounding slack: keep the weights as stored when, as quant() leaves them, they sum to 1 within 0.01, so
+        // the save that quant() writes keeps them too (a stable round trip); otherwise renormalise, which quant()
+        // then moves by at most 13 x 0.0001. A sum that overflows is a corrupt w, so the weights stay fresh.
+        var div = Math.abs(qsum - 1) < 0.01 ? 1 : sum;
         for (e = 0; e < NE; e++) s.w[e] = src.w[e] / div;
       }
     }
@@ -302,7 +328,7 @@
   // ---------- the brain ----------
 
   function create(serialized) {
-    var s = load(serialized);
+    var s = quant(load(serialized));                         // load can return early, so quant here
     var fbState = 0x9e3779b9;
     var fallbackRng = { next: function () {                    // only if the caller forgot q.rng
       fbState = (Math.imul(fbState, 1664525) + 1013904223) >>> 0;
@@ -588,6 +614,7 @@
 
       s.n++;
       trackPeaks(keys, restricted);
+      quant(s);
     }
 
     // --- dossier ---
@@ -885,17 +912,25 @@
       s.run = newTables();
       s.rs = 0; s.rn = 0; s.t2 = 0;
       s.runs++;
+      quant(s);
     }
 
     function forget(f) {
       scaleCounts(num(f, 0, 1, 0.5));
       for (var e = 0; e < NE; e++) s.w[e] = (s.w[e] + 1 / NE) / 2;
+      quant(s);
     }
 
+    // Canonical: every key in one fixed order (pk in PEAK_IDS order, not insertion order), so
+    // serialize(create(serialize(b))) is byte-identical to serialize(b). A new map must do the same.
     function serialize() {
-      var w = [], pk = {}, e, id;
+      var w = [], pk = {}, e, i, id;
       for (e = 0; e < NE; e++) w.push(r4(s.w[e]));
-      for (id in s.pk) { var p = s.pk[id]; pk[id] = { k: p.k, m: p.m, p: p.p, r: p.r, s: p.s }; }
+      for (i = 0; i < PEAK_IDS.length; i++) {
+        id = PEAK_IDS[i];
+        var p = s.pk[id];
+        if (p) pk[id] = { k: p.k, m: p.m, p: p.p, r: p.r, s: p.s };
+      }
       return { v: 1, n: s.n, runs: s.runs, w: w,
                c: writeTables(s.c, false), life: writeTables(s.life, true), run: writeTables(s.run, true),
                t2: s.t2, ema: r4(s.ema), rs: r3(s.rs), rn: s.rn, pk: pk };

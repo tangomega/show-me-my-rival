@@ -1,0 +1,25 @@
+{
+ "about": "Golden save written by the game code of commit 42ec57c (the Vigil, no faces), reload point \"seal\". Made by tools/fixtures/gen.js; read by FLOW_SECTIONS=fixtures node tools/test_flow.js.",
+ "sha": "42ec57c",
+ "made": "real",
+ "point": "seal",
+ "tag": "duel:1:1:t2P",
+ "store": {
+  "rival.save.v1": "{\"v\":1,\"settings\":{\"muted\":false,\"haptics\":true,\"mask\":\"porcelain\",\"arena\":\"cathedral\"},\"brain\":{\"v\":1,\"n\":0,\"runs\":1,\"w\":[0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769,0.0769],\"c\":[[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0],[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]],\"life\":[[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0],[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]],\"run\":[[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0],[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0],[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]],\"t2\":0,\"ema\":0,\"rs\":0,\"rn\":0,\"pk\":{}},\"meta\":{\"unlocked\":{},\"seenCredits\":false,\"seenTutorial\":false,\"counters\":{\"deathblows\":0,\"bleedDealt\":0,\"reads\":0,\"guardBroken\":0,\"drafts\":0,\"liesCaught\":0},\"memory\":{\"runs\":1,\"wins\":0,\"deaths\":0,\"streakW\":0,\"streakL\":0,\"bestDuel\":1,\"closestLoss\":null,\"fastestDeath\":null,\"lastWin\":null,\"lastPlayed\":1760000000834.9976,\"firstPlayed\":1760000000834.9976,\"lastFavorite\":null,\"favorites\":[],\"totalTurns\":1},\"vigil\":{\"max\":2,\"sel\":2,\"wins\":[0,0,0,0,0,0,0,0]}},\"run\":{\"seed\":3290333285,\"rngState\":2515773294,\"duelN\":1,\"phase\":1,\"stage\":\"duel\",\"pHp\":26,\"pMaxHp\":26,\"pBoons\":[\"truth_candle\",\"relic_dealers_thumb\",\"ash_of_forgetting\"],\"rBoons\":[],\"duel\":{\"n\":1,\"phase\":1,\"turn\":2,\"tension\":0,\"embers\":false,\"calls\":false,\"p\":{\"hp\":26,\"maxHp\":26,\"boons\":[\"truth_candle\",\"relic_dealers_thumb\",\"ash_of_forgetting\"],\"status\":{\"guardBroken\":0,\"bleed\":0,\"fortify\":0,\"focus\":0,\"sealed\":{\"S\":0,\"G\":0,\"F\":0}},\"counters\":{},\"charges\":{\"truth_candle\":1},\"moves\":[\"G\"],\"results\":[\"W\"]},\"r\":{\"hp\":4,\"maxHp\":6,\"boons\":[],\"status\":{\"guardBroken\":0,\"bleed\":0,\"fortify\":0,\"focus\":0,\"sealed\":{\"S\":0,\"G\":0,\"F\":0}},\"counters\":{},\"charges\":{},\"moves\":[\"S\"],\"results\":[\"L\"]},\"over\":null,\"pendingEvents\":[],\"intel\":{\"called\":null,\"honest\":null,\"pred\":null,\"coin\":false},\"begun\":2,\"tally\":{\"lostP\":0,\"lostR\":2,\"bleedP\":0,\"bleedR\":0,\"healP\":0,\"healR\":0,\"bleedCounted\":0}},\"offer\":null,\"pending\":{\"sealed\":{\"move\":\"G\",\"tell\":\"G\",\"honest\":true,\"pred\":{\"S\":0.36637800833683437,\"G\":0.37753280659370386,\"F\":0.25608918506946166},\"top\":\"G\",\"confidence\":0,\"mode\":\"mix\"},\"turn\":2,\"n\":1,\"phase\":1,\"called\":null},\"relicId\":null,\"stats\":{\"turns\":1,\"moves\":{\"S\":0,\"G\":1,\"F\":0},\"wins\":1,\"losses\":0,\"clashes\":0,\"reads\":0,\"surprises\":0,\"liesCaught\":0,\"duelTurns\":[],\"flags\":{},\"liesWorked\":0,\"deathblows\":0,\"guardBroken\":0,\"repeats\":0,\"repeatOpp\":0,\"drafts\":0,\"draftsSynced\":0,\"bleedDealt\":0,\"bleedSynced\":0,\"lastMove\":\"G\",\"lowHpEnd\":false,\"spent\":{\"p\":{},\"r\":{}}},\"runNo\":1,\"daysAway\":0,\"finished\":null,\"stake\":2,\"rivalHead\":null}}"
+ },
+ "expect": {
+  "stage": "duel",
+  "duelN": 1,
+  "phase": 1,
+  "turn": 2,
+  "pending": true,
+  "begun": true,
+  "over": null,
+  "boss": null,
+  "seen": false,
+  "tutorial": true,
+  "cards": null,
+  "applied": false,
+  "shown": false
+ }
+}

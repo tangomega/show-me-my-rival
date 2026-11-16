@@ -16,6 +16,7 @@
   var OPT_R = { align: 'right' }, OPT_C = { align: 'center' }, OPT_CS = { align: 'center', shadow: 1 }, OPT_CS2 = { align: 'center', shadow: 1, scale: 2 };
   var MUTE_ST = { pressed: false, disabled: false };
   var OPT_P2 = { phase2: true }, BAR_P = { ticks: 0 }, BAR_R = { ticks: 0, flip: true };
+  var ACT_OPT = { disabled: false, pressed: false };              // reused for each active-boon button, every frame
   var ST_SPR = { guardBroken: 'st_guardBroken', bleed: 'st_bleed', fortify: 'st_fortify', focus: 'st_focus' };
   var ACT_SPR = { glimpse: 'act_glimpse', honesty: 'act_honesty', coin: 'act_coin' };
   var DIGIT = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
@@ -201,9 +202,12 @@
   }
 
   // ------------------------------------------------------------------ main flow
-  function* flow(resumed) {
+  // resumed: a stored duel goes on (no intro). rebuilt: a later phase of the final duel was rebuilt from a stored run
+  // whose duel had an older shape; it plays as resumed, with that phase's rule cards shown again.
+  function* flow(resumed, rebuilt) {
     var run = G.run;
-    if (!resumed) yield* intro();
+    if (rebuilt) yield* showCards(S.form.cards);
+    else if (!resumed) yield* intro();
     for (;;) {
       while (!S.duel.over) yield* turn();
       var winner = S.duel.over;
@@ -310,6 +314,9 @@
       sealed = pend.sealed; called = pend.called || null;
       duel.intel.called = called;
     } else {
+      // A stale tab (another tab saved since) must not seal a turn it cannot save: its stance would be a free look
+      // at a seal that the reboot rolls again. It reboots now, and this scene never runs on.
+      if (R.Save.stale || R.Save.check()) { G.reboot(); yield function () { return false; }; }
       if (R.Combat.callsOf(duel) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       var q = { ctx: ctx, payoff: R.Combat.payoff(duel), legalR: legalR, legalP: legalP,
@@ -319,7 +326,8 @@
       if (duel.mimic) q.mimic = R.Combat.ctx(duel, 'r');           // The Reflection: it plays as you would in its seat
       sealed = brain.commit(q);
       run.pending = { sealed: sealed, turn: duel.turn, n: duel.n, phase: duel.phase, called: called };
-      G.save();
+      // The save itself can find the tab stale (another tab saved during the commit): reboot before anything shows.
+      if (!G.save() && R.Save.stale) { G.reboot(); yield function () { return false; }; }
     }
     S.called = called; S.calledText = called ? mname(called).toUpperCase() + '?' : '';
     S.rSigil = 'sealed'; S.rSigilT = 0; S.pSigil = 'gone'; S.glass = null; S.stamp = null;
@@ -387,7 +395,9 @@
     R.Run.record(run, G.meta, res, sealed);
     run.pending = null;
     if (tut && tut.last) G.meta.seenTutorial = true;
-    G.save();
+    // A tab that went stale since its seal was saved must not show a resolve it cannot save: the reboot replays the
+    // saved seal, and the player would play it again knowing the Rival's move.
+    if (!G.save() && R.Save.stale) { G.reboot(); yield function () { return false; }; }
 
     S.resolving = true;
     yield* present(res, sealed, pm, tensionBefore);
@@ -689,6 +699,8 @@
   function useActive(i) {
     var id = S.actives[i], duel = S.duel;
     if (!S.input || S.only || !(duel.p.charges && duel.p.charges[id] > 0)) { sfx('back'); return; }
+    // a stale tab would show a glimpse or stamp and then lose the spent charge: reboot instead
+    if (R.Save.stale || R.Save.check()) { G.reboot(); return; }
     var r = R.Combat.useActive(duel, id);
     if (!r || !r.ok) { sfx('back'); return; }
     sfx('boon'); E.buzz(10);
@@ -788,7 +800,8 @@
     // active boons
     for (i = 0; i < S.actives.length; i++) {
       var id = S.actives[i], ch = (S.duel.p.charges && S.duel.p.charges[id]) || 0;
-      R.UI.button(g, 4 + i * 26, y + 1, 22, 22, '', { disabled: ch <= 0 || !S.input, pressed: S.pressA === i });
+      ACT_OPT.disabled = ch <= 0 || !S.input; ACT_OPT.pressed = S.pressA === i;
+      R.UI.button(g, 4 + i * 26, y + 1, 22, 22, '', ACT_OPT);
       R.Art.sprite(g, ACT_SPR[(R.Boons.byId[id].active || OPT_C).kind] || 'act_glimpse', 4 + i * 26 + 5, y + 5 + (S.pressA === i ? 1 : 0));
       if (ch > 0) R.Font.draw(g, DIGIT[ch] || '9', 4 + i * 26 + 20, y + 15, 22, OPT_R);
     }
@@ -842,7 +855,9 @@
       var run = G.run, meta = G.meta;
       layout();
       var resumed = !!(run.duel && !run.duel.over);
-      var duel = resumed ? run.duel : R.Run.startDuel(run);
+      // a stored final duel past phase 1 whose duel was dropped at boot (an older shape): rebuild that phase, not phase 1
+      var rebuilt = !resumed && run.duelN === 7 && (run.phase | 0) > 1 && !run.duel;
+      var duel = resumed ? run.duel : rebuilt ? R.Run.startPhase(run, run.phase, { rebuild: true }) : R.Run.startDuel(run);
       var st = R.Save.data.settings;
       S = {
         duel: duel, duelN: run.duelN, clock: 0, phase2: false, form: null, noStance: false, tutorial: run.duelN === 1 && !meta.seenTutorial,
@@ -874,7 +889,7 @@
       S.fx.ambient('ash', 5);
       if (R.Audio) R.Audio.music(S.form.music, 1);
       G.save();
-      E.co(function* () { yield* flow(resumed); });
+      E.co(function* () { yield* flow(resumed, rebuilt); });
     },
     exit: function () {
       E.timeScale = 1;

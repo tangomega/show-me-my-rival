@@ -97,12 +97,14 @@ const RULE_CARDS = {
   fortify: ['mourner']
 };
 // The scene's card schedule (src/scenes/duel.js): rule cards appear only in duel 7, the first phase's in the intro and
-// each later phase's at its transformation. The anchor below fails if the scene's card call sites change.
+// each later phase's at its transformation, or when that phase is rebuilt from an older-shape save (flow(), P1.1 V1:
+// the same cards for the same phase). The anchor below fails if the scene's card call sites change.
 function shownAt(row, D) {
   return row.n === 7 ? (D.cards || []).filter(id => own(R.Text.rules, id)) : [];
 }
 // Every line in src/ (outside src/text) that shows or reads rule cards, comments stripped. Matched by text.
 const CARD_SITES = [
+  'scenes/duel.js: if (rebuilt) yield* showCards(S.form.cards);',
   'scenes/duel.js: if (n === 7) yield* showCards(S.form.cards);',
   'scenes/duel.js: function* showCards(ids) {',
   'scenes/duel.js: var rules = (R.Text && R.Text.rules) || {}, k, until;',

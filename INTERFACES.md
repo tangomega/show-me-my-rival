@@ -51,8 +51,12 @@ R.RNG.hash(str) -> uint32
 ```
 R.Save.init(storageLike|null)     // pass window.localStorage inside try/catch; null => in-memory
 R.Save.data                       // live object, schema below
-R.Save.commit()                   // write now; try/catch; never throws
-R.Save.reset()                    // wipe to defaults and commit
+R.Save.commit() -> bool           // write now; true when the save reached storage; try/catch; never throws
+R.Save.reset()                    // wipe to defaults and commit (does nothing in a stale tab)
+R.Save.stale                      // true once another tab has saved since this one loaded: nothing is written until a reload
+R.Save.check() -> bool            // re-reads the generation; true = stale. Never writes
+R.Save.changedElsewhere()         // a storage event from another tab: stale (only when this tab has storage)
+R.Save.KEY, R.Save.GEN_KEY        // 'rival.save.v1', 'rival.save.v1.gen'
 ```
 Schema (key `rival.save.v1`):
 ```
@@ -60,14 +64,18 @@ Schema (key `rival.save.v1`):
   settings:{ muted:false, haptics:true, mask:'porcelain', arena:'cathedral' },
   brain:null|object,   // owned by R.Brain (serialize())
   meta:null|object,    // owned by R.Run   (defaultMeta())
-  run:null|object }    // owned by R.Run   (mid-run state incl. current duel)
+  run:null|object,     // owned by R.Run   (mid-run state incl. current duel)
+  parked?:object }     // a run saved under newer rules (run.req > R.Run.RULES): kept, never played or counted
 ```
+- **Generation (stale-tab guard).** `rival.save.v1.gen` holds a decimal integer string (1-9 digits; after 999999999 comes 1). It is written only after a successful save write, as the generation this tab last read or wrote plus one. A tab whose next save finds a different generation, or that receives a storage event for either key, is stale: it writes nothing (commit returns false, reset erases nothing) and reboots from storage on its next tap, key press or return to view (`R.Game.reboot`), or at its next seal. The duel scene never shows Rival information it could not save: it checks `R.Save.stale || R.Save.check()` before `brain.commit` and reboots instead of sealing; it reboots before the stance shows if the seal's own save finds the tab stale; it reboots before the presentation if the resolve's save finds the tab stale (the reboot replays the saved seal unresolved); and it checks before an active boon (Keyhole, Candle of Truth) is spent. The tap listener also calls `R.Save.check()`, so a tap after another tab saved with no storage event is swallowed too. The tap that reboots is swallowed, so it cannot pick a move in the old state. A commit whose text equals what storage already holds writes nothing and takes no new generation. No storage, or a generation that cannot be read, is memory-only and never stale; the in-memory copy stands in only when storage cannot be read at all.
+- **Top-level keys.** `Save.repair` keeps top-level keys it does not know (such as `parked`), so an older build does not drop a newer build's data. A new top-level key must tolerate that.
+- **Never revert past train 0.** From P1.1 on, a brain is reload-exact and runs carry `req`; older builds read these saves, but rolling the live game back past P1.1 loses those guarantees.
 
 ## R.Brain — `src/ai/brain.js` (pure)
 
 ```
-R.Brain.create(serialized|null) -> brain
-brain.serialize() -> object
+R.Brain.create(serialized|null) -> brain  // a non-object gives a fresh brain; each field is sanitised, unknown keys dropped
+brain.serialize() -> object              // the save (schema below); canonical, so it is a byte fixed point
 brain.beginRun({ days })                 // run-start decay (stronger if days >= 7); resets per-run tracking
 brain.commit(q) -> sealed
 brain.predict(ctx, legalP) -> {S,G,F}    // tell-independent habit-only ensemble; the game uses it for the Called Shot call only.
@@ -104,6 +112,17 @@ brain.runInsights() -> stat[]            // up to 3, for the death/victory scree
 `stat = { id, kind:'habit'|'tell'|'record', move:move|null, pct:0..100, n:int, strength:0..1, vars:{...} }`
 `dossier = { samples:int, predictability:0..100, favorite:move|null, tell:{counter,mirror,under,n}, stats:stat[] (strongest first), broken:stat|null }`
 Stat ids are the ones listed in DESIGN.md "Dossier stats"; `R.Text.dossierLine(stat)` turns one into a sentence.
+
+Save (`brain.serialize()`, format `v:1`):
+```
+{ v:1, n:int, runs:int,
+  w:[13 numbers, 4 dp, each >= 0.0001],       // Hedge weight per expert slot
+  c:[13 arrays, 3 dp], life:[13 int arrays], run:[13 int arrays],   // decayed / lifetime / this-run counts
+  t2:0..2, ema:4 dp, rs:3 dp, rn:int,
+  pk:{ id:{k,m,p,r,s} } }                     // habit peaks, keys in the fixed order of brain.js PEAK_IDS
+```
+- **Reload-exact.** create, observe, beginRun and forget end by rounding the live state to the precision the save holds (`quant()`, never run by commit or a read), and every key is written in one fixed order. So `R.Brain.create(JSON.parse(JSON.stringify(b.serialize())))` agrees with `b` bit for bit in every later output, and `serialize(create(serialize(b)))` is byte-identical to `serialize(b)`. This holds for any input create accepts, a hand-edited save included: a loaded field never holds -0, a weight is never rounded below 0.0001, and load keeps the stored weights only when their rounded sum is within 0.01 of 1 (otherwise it renormalises; a `w` with a sum that overflows is ignored). Any new map in the save must also be written in a fixed order. Tested in tools/test_brain.js sections 3-3c, which also load saves written by earlier builds.
+- **Expert layout (frozen).** Slot e of `w`, `c`, `life` and `run` is expert e, in the order E0-E9, T0, T1, T2, with tables of 3, 9, 27, 9, 27, 6, 3, 9, 12, 12, 3, 9, 9 numbers. `w` is always written as exactly 13 numbers (load ignores a `w` of any other length). A future expert never takes or shifts a slot: its weight goes in a side key of the brain object (`wa`), and its tables are appended after index 12 in `c`, `life` and `run`. Slots are only ever appended, never inserted or reordered. A save without the new expert loads with that expert at its start state, and the 13 stored weights keep their ratios to one another.
 
 ## R.Boons — `src/game/boons.js` (pure)
 
@@ -192,6 +211,22 @@ duel.floor, duel.calls, duel.stance, duel.mimic       // set by R.Run; read with
 R.Combat.ctx(duel, 'r')                               // the same picture from the Rival's seat
 brain.commit({ ..., noTell:true })                    // no stance is shown; honest is forced true after the honesty draw (same dice count)
 brain.commit({ ..., mimic: ctxFromRivalSeat })        // it plays as the player would; the payoff is still passed but not used to pick the move
+```
+
+Save safety (P1.1, train 0):
+
+```
+R.Run.RULES            // the rules this build plays (0); read at call time
+run.req                // the rules a run was made under (stamped by create); a build with RULES below it parks the run
+R.Run.reqOf(run) -> int                               // 0 for a run from before run.req, or a garbage value
+R.Run.bossIndex(id) -> index | -1
+R.Run.repairRun(run, meta) -> { redrawn, restart }    // in place, at load: a face this build does not know is redrawn
+                       // from the earned faces (its own seeded stream) and becomes meta.bosses.last; at duel 7 that,
+                       // or a phase past the face's count, restarts the final duel at phase 1 (no duel, no pending)
+R.Run.startPhase(run, k, { rebuild:true })            // rebuild phase k of a stored final duel whose duel was dropped
+                       // (an older shape): no second phase heal, no heal event; the scene plays it as resumed
+meta.bosses.hi, meta.vigil.hi, meta.vigil.winsX       // high-water shadows of bosses.max, vigil.max and wins past the
+                       // light table; never clamped or dropped, so an older build cannot lower what a newer one reads
 ```
 
 ## R.Engine — `src/core/engine.js` (DOM)
@@ -304,7 +339,8 @@ R.Game.newRun(relicId|null)      // creates the run, brain.beginRun, saves, goes
 R.Game.resume()                  // continues a saved run at its stage ('duel' or 'bonfire')
 R.Game.duelOver(winner)          // called by the duel scene; routes to 'bonfire' / 'victory' / 'death'
 R.Game.draft(boonId)             // called by the bonfire scene; applies the pick, saves, goes to 'duel'
-R.Game.save()                    // serializes brain + meta + run into R.Save and commits
+R.Game.save() -> bool            // serializes brain + meta + run into R.Save and commits; false in a stale tab
+R.Game.reboot()                  // a stale tab: reload the save as a fresh page would and cut to 'title'
 R.Game.vars(extra?) -> object    // template variables for R.Text.taunt: runs, deaths, wins, days, streak, duel,
                                  // bestDuel, hp, rivalHp, turns, score, lastWinMove, lastWinHp (+ extra merged in)
 R.Game.last                      // result of the run that just ended, for 'death' / 'victory' / 'credits':

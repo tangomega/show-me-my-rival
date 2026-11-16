@@ -43,6 +43,9 @@
     { id: 'unsaid', name: 'The Unsaid' }                            // 7: Called Shot in every duel
   ];
   var VIGIL_MAX = VIGIL.length;
+  // The rules a run is made under. A newer build that changes what a stored run means raises it; a build whose
+  // R.Run.RULES is below a run's run.req parks that run (keeps it, never plays it). Read as R.Run.RULES at call time.
+  var RULES = 0;
 
   var NAMES = ['The Nave', 'Vespers', 'The Leak', 'Draught', 'The Wake', 'Blood Moon', 'The Altar'];
   var VARIANTS = ['nave', 'vespers', 'leak', 'draught', 'wake', 'bloodmoon', 'altar'];
@@ -136,6 +139,36 @@
   function phaseCount(run) { return bossOf(run).phases.length; }
   function clampStake(v) { v = Math.floor(num(v, 0)); return v < 0 ? 0 : v > VIGIL_MAX ? VIGIL_MAX : v; }
   function stakeOf(run) { return run ? clampStake(run.stake) : 0; }
+  function isObj(o) { return !!o && typeof o === 'object' && !Array.isArray(o); }
+  function hiOf(v) { return typeof v === 'number' && v > 0 && isFinite(v) ? Math.floor(v) : 0; }
+  // The rules a stored run needs (0 for a run made before run.req existed, or a garbage value).
+  function reqOf(run) { var q = run && typeof run === 'object' ? run.req : 0; return typeof q === 'number' && q > 0 ? Math.floor(q) : 0; }
+
+  // A stored run whose face or phase this build cannot read is repaired, never dropped and never silently fought as
+  // another face. A missing run.boss (a run from before the faces) still means The Unmasked. A missing or garbage
+  // run.phase comes back from the duel's own phase, else 1. A face this build does not know is redrawn from the
+  // earned faces on the run's own face stream (the one create() draws from) and becomes meta.bosses.last; in the
+  // final duel that restarts duel 7 at phase 1, and so does a phase past the face's count.
+  // In place. Returns { redrawn, restart }.
+  function repairRun(run, meta) {
+    var out = { redrawn: false, restart: false };
+    if (!isObj(run)) return out;
+    meta = repair(meta);
+    var d = isObj(run.duel) ? run.duel : null, ph = run.phase, atAltar = run.duelN === 7 && run.stage === 'duel';
+    if (typeof ph !== 'number' || !isFinite(ph)) ph = d && typeof d.phase === 'number' && isFinite(d.phase) ? d.phase : 1;
+    run.phase = Math.max(1, Math.floor(ph));
+    if (run.boss !== undefined && run.boss !== null && bossIndex(run.boss) < 0) {
+      var bs = meta.bosses, faces = [], fi;
+      for (fi = 0; fi < bs.max; fi++) faces.push(BOSSES[fi].id);
+      run.boss = faces[R.RNG.create((num(run.seed, 0) ^ 0x7f4a7c15) >>> 0).int(faces.length)];
+      bs.last = run.boss;
+      out.redrawn = true;
+      if (atAltar) out.restart = true;
+    }
+    if (run.phase > phaseCount(run)) { run.phase = 1; if (atAltar) out.restart = true; }
+    if (out.restart) { run.phase = 1; run.duel = null; run.pending = null; }
+    return out;
+  }
 
   // Fill in anything a stored meta is missing (older saves, hand-edited storage). In place.
   function repair(meta) {
@@ -155,16 +188,25 @@
         else if (v === undefined) meta[name][k] = dv;
       }
     }
-    var vg = meta.vigil;
+    // Shadow high-water keys: vigil.hi and bosses.hi (the most lights / faces ever earned) and vigil.winsX (wins with
+    // more lights out than this build has). They are never clamped or dropped, so a build with fewer lights or faces
+    // that saves this meta cannot lower what a later build reads back; max and wins stay the clamped view it plays.
+    var vg = meta.vigil, wx;
     if (!vg || typeof vg !== 'object') vg = meta.vigil = d.vigil;
-    vg.max = clampStake(vg.max);
+    vg.max = clampStake(Math.max(num(vg.max, 0), hiOf(vg.hi)));
     vg.sel = Math.min(clampStake(vg.sel), vg.max);
     if (!Array.isArray(vg.wins)) vg.wins = [];
+    for (k = VIGIL_MAX + 1; k < vg.wins.length; k++) {
+      wx = Math.max(0, Math.floor(num(vg.wins[k], 0)));
+      if (!(wx > 0)) continue;
+      if (!isObj(vg.winsX)) vg.winsX = {};
+      vg.winsX[String(k)] = Math.max(hiOf(vg.winsX[String(k)]), wx);
+    }
     for (k = 0; k <= VIGIL_MAX; k++) vg.wins[k] = Math.max(0, Math.floor(num(vg.wins[k], 0)));
     vg.wins.length = VIGIL_MAX + 1;
     var bs = meta.bosses;
     if (!bs || typeof bs !== 'object') bs = meta.bosses = d.bosses;
-    bs.max = Math.max(1, Math.min(BOSSES.length, Math.floor(num(bs.max, 1))));
+    bs.max = Math.max(1, Math.min(BOSSES.length, Math.floor(Math.max(num(bs.max, 1), hiOf(bs.hi)))));
     if (!bs.wins || typeof bs.wins !== 'object') bs.wins = {};
     if (bossIndex(bs.last) < 0) bs.last = null;
     return meta;
@@ -240,7 +282,8 @@
       finished: null,
       stake: stake,                            // the Vigil: how many lights are out for this run
       rivalHead: null,                         // The Empty Hand: the boon the Rival walked in with
-      boss: BOSSES[0].id                       // the face it will wear in duel 7
+      boss: BOSSES[0].id,                      // the face it will wear in duel 7
+      req: R.Run.RULES                         // the rules it is made under: a build below them parks it
     };
     // Which face: any earned one, but not the one from the previous run (its own stream: the run's rng is untouched).
     var bs = meta.bosses, bi = bossIndex(o.boss);
@@ -381,8 +424,11 @@
   }
 
   // Final duel only: the Rival changes into phase k of its face. Keeps the player fighter (boons, counters, charges).
-  function startPhase(run, k) {
-    var s = statsOf(run);
+  // opts.rebuild: phase k is rebuilt for a stored run whose duel was dropped (an older duel shape): the player comes
+  // back from run.pHp with no second phase heal and no heal event; the Rival's per-duel counters and charges start
+  // over, and the seal of the turn in progress is made again.
+  function startPhase(run, k, opts) {
+    var s = statsOf(run), rebuild = !!(opts && opts.rebuild);
     var old = run.duel;
     run.duelN = 7;
     k = Math.max(2, Math.min(phaseCount(run), Math.floor(num(k, 2))));
@@ -399,7 +445,7 @@
     p.status = { guardBroken: 0, bleed: 0, fortify: 0, focus: 0, sealed: { S: 0, G: 0, F: 0 } };
     p.moves = [];
     p.results = [];
-    var healed = Math.max(0, Math.min(phaseHealOf(run, D), p.maxHp - p.hp));
+    var healed = rebuild ? 0 : Math.max(0, Math.min(phaseHealOf(run, D), p.maxHp - p.hp));
     p.hp += healed;
     r = rivalFighter(run, D);
     if (old) {                                   // same duel: per-duel caps and charges carry over
@@ -814,14 +860,14 @@
     var light = 0, vg = meta.vigil, st = stakeOf(run);
     if (won) {
       vg.wins[st]++;
-      if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; }
+      if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; vg.hi = Math.max(hiOf(vg.hi), vg.max); }
     }
 
     // The faces: beating the newest earned face earns the next. face = its id, or null.
     var face = null, bs = meta.bosses, bx = bossIndex(bossOf(run).id);
     if (won) {
       bs.wins[BOSSES[bx].id] = num(bs.wins[BOSSES[bx].id], 0) + 1;
-      if (bx === bs.max - 1 && bs.max < BOSSES.length) { bs.max++; face = BOSSES[bs.max - 1].id; }
+      if (bx === bs.max - 1 && bs.max < BOSSES.length) { bs.max++; face = BOSSES[bs.max - 1].id; bs.hi = Math.max(hiOf(bs.hi), bs.max); }
     }
 
     var firstWin = won && m.wins === 1;
@@ -837,8 +883,12 @@
     UNLOCKS: UNLOCKS,
     VIGIL: VIGIL,
     BOSSES: BOSSES,
+    RULES: RULES,
+    bossIndex: bossIndex,
     bossOf: bossOf,
     phaseCount: phaseCount,
+    reqOf: reqOf,
+    repairRun: repairRun,
     startPhase: startPhase,
     nextPhase: nextPhase,
     VIGIL_TUNE: VT,

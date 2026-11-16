@@ -44,10 +44,10 @@ Measured by `tools/sim.js`: bot players, 8 chains of 400 sequential runs each, o
 | Fixed Strike → Guard → Feint cycle | 0% |
 | Win-stay / lose-shift | 0.2% |
 | Always trusts the stance | 0% |
-| A realistic creature of habit | 9.8% (16% in the first ten runs, then 9–10%) |
-| Uniform random | 21.6% |
-| Equilibrium mixer (unpredictable, ignores stances) | 34.8% |
-| Adaptive stance-reader | 54.8% |
+| A realistic creature of habit | 10.3% (16% in the first ten runs, then about 10%) |
+| Uniform random | 20.9% |
+| Equilibrium mixer (unpredictable, ignores stances) | 34.7% |
+| Adaptive stance-reader | 57.1% |
 
 Duels last about seven turns; a winning run is about fifty.
 

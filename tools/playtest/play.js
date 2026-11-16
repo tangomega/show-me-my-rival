@@ -246,7 +246,9 @@ function save() {
   fs.writeFileSync(tmp, JSON.stringify(ST));
   fs.renameSync(tmp, path.join(dir, 'save.json'));
 }
-// main.js boot(): brain from the save, a fresh seed for the gameplay and cosmetic streams, run validated.
+// main.js boot() / load(): brain from the save, a fresh seed for the gameplay and cosmetic streams, run loaded
+// through loadRun. (The stale-tab guard of main.js boot, and the stale checks at the seal, the resolve and an active
+// boon in the duel scene, have nothing to guard here: one process per command.)
 function boot(first) {
   const c = ST.client;
   if (!first) { ST.brainBase = G.brain.serialize(); ST.brainOps = []; G.brain = loadBrain(); }
@@ -254,11 +256,21 @@ function boot(first) {
   G.rng = R.RNG.create(seed);
   G.crng = R.RNG.create(seed ^ 0x2545f491);
   c.bags = {};
-  G.run = validRun(G.run) ? G.run : null;
+  G.run = loadRun();
   G.days = G.run ? (G.run.daysAway || 0) : 0;
   G.last = null;
   c.S = null;
   c.booted = true;
+}
+// main.js loadRun: a run made under newer rules is parked in the profile (ST.parked), never played; a parked run
+// this build can read comes back when no other run is in progress.
+function loadRun() {
+  let run = G.run;
+  if (run && typeof run === 'object' && RUN.reqOf(run) > RUN.RULES) { ST.parked = run; G.run = run = null; }
+  if (validRun(run)) return run;
+  const pk = ST.parked;
+  if (pk && typeof pk === 'object' && !Array.isArray(pk) && RUN.reqOf(pk) <= RUN.RULES && validRun(pk)) { delete ST.parked; return pk; }
+  return null;
 }
 // main.js validRun
 function validRun(run) {
@@ -266,6 +278,7 @@ function validRun(run) {
   if (run.stage !== 'duel' && run.stage !== 'bonfire') return false;
   if (!(run.duelN >= 1 && run.duelN <= 7 && run.pHp >= 0 && run.pMaxHp >= 1)) return false;
   if (run.stage === 'bonfire' && !(run.offer && Array.isArray(run.offer.choices))) return false;
+  RUN.repairRun(run, G.meta);
   const d = run.duel, q = run.pending && run.pending.sealed;
   if (d && !(d.turn >= 1 && d.tally && d.p && d.r && d.p.status && d.r.status && d.p.status.sealed && d.r.status.sealed &&
              d.p.counters && d.r.counters && d.p.charges && d.r.charges && Array.isArray(d.p.moves) && Array.isArray(d.r.moves) &&
@@ -445,14 +458,18 @@ function showCards(ids) {
 function enterDuel() {
   const run = G.run, meta = G.meta;
   const resumed = !!(run.duel && !run.duel.over);
-  const duel = resumed ? run.duel : RUN.startDuel(run);
+  // a stored final duel past phase 1 whose duel was dropped (an older shape): that phase is rebuilt, not phase 1
+  const rebuilt = !resumed && run.duelN === 7 && (run.phase | 0) > 1 && !run.duel;
+  const duel = resumed ? run.duel : rebuilt ? RUN.startPhase(run, run.phase, { rebuild: true }) : RUN.startDuel(run);
   const D = cfgOf(duel);
   ST.client.S = {
     tutorial: run.duelN === 1 && !meta.seenTutorial, noStance: D.stance === 'none',
     cool: 0, silent: 0, nHabit: 0, nRead: 0, saidHabit: null, lowSaid: { p: low(duel.p), r: false }, forceLine: false,
     input: false, speech: null, only: null, called: null, coinMove: null
   };
-  if (!resumed) intro();
+  // duel.js flow(resumed, rebuilt): a rebuilt phase plays as resumed, with its rule cards shown again
+  if (rebuilt) { out('(The duel resumes where it was left.)'); showCards(D.cards); }
+  else if (!resumed) intro();
   else out('(The duel resumes where it was left.)');
 }
 function introLine() {
@@ -1369,7 +1386,7 @@ const MIRROR = [
   { file: 'src/scenes/unlocks.js', fns: ['build'] },
   { file: 'src/scenes/relic.js', fns: ['viewLight', 'refreshLabel', 'tapLight', 'confirm', 'enter'] },
   { file: 'src/scenes/title.js', fns: ['memory', 'refresh', 'begin', 'activate'] },
-  { file: 'src/main.js', fns: ['validRun', 'nextGoal', 'hasRun', 'startFlow', 'newRun', 'resume', 'duelOver', 'draft', 'abandon', 'vars', 'boot'] },
+  { file: 'src/main.js', fns: ['validRun', 'loadRun', 'nextGoal', 'hasRun', 'startFlow', 'newRun', 'resume', 'duelOver', 'draft', 'abandon', 'vars', 'load', 'boot'] },
   { file: 'src/text/taunts.js', fns: ['freshOrder', 'draw', 'taunt'] }
 ].reduce(function (all, m) {
   if (m.fns) m.fns.forEach(function (fn) { all.push({ file: m.file, fn: fn }); });

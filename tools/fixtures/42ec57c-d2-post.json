@@ -1,0 +1,25 @@
+{
+ "about": "Golden save written by the game code of commit 42ec57c (the Vigil, no faces), reload point \"post\". Made by tools/fixtures/gen.js; read by FLOW_SECTIONS=fixtures node tools/test_flow.js.",
+ "sha": "42ec57c",
+ "made": "real",
+ "point": "post",
+ "tag": "duel:2:1:t3",
+ "store": {
+  "rival.save.v1": "{\"v\":1,\"settings\":{\"muted\":false,\"haptics\":true,\"mask\":\"porcelain\",\"arena\":\"cathedral\"},\"brain\":{\"v\":1,\"n\":3,\"runs\":1,\"w\":[0.0951,0.0769,0.0769,0.0655,0.0769,0.0949,0.0769,0.0769,0.0947,0.0761,0.0525,0.0761,0.0604],\"c\":[[2.362,0,0],[1,0,0,0,0,0,0.5,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.5,0,0,0,0,0,0,0,0,0,0,0],[1.45,0,0,0,0,0,0,0,0],[1,0,0,0,0,0,0.5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[2.305,0,0,0,0,0],[1,0,0],[0,0,0,0.5,0,0,1,0,0],[2.267,0,0,0,0,0,0,0,0,0,0,0],[1.88,0,0,0,0,0,0.5,0,0,0,0,0],[1.92,0.423,0],[0,0.5,0,0,0,0,1.88,0,0],[1,0.44,0,0,0,0,1,0,0]],\"life\":[[3,0,0],[1,0,0,0,0,0,1,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0],[2,0,0,0,0,0,0,0,0],[1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[3,0,0,0,0,0],[1,0,0],[0,0,0,1,0,0,1,0,0],[3,0,0,0,0,0,0,0,0,0,0,0],[2,0,0,0,0,0,1,0,0,0,0,0],[2,1,0],[0,1,0,0,0,0,2,0,0],[1,1,0,0,0,0,1,0,0]],\"run\":[[3,0,0],[1,0,0,0,0,0,1,0,0],[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0],[2,0,0,0,0,0,0,0,0],[1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[3,0,0,0,0,0],[1,0,0],[0,0,0,1,0,0,1,0,0],[3,0,0,0,0,0,0,0,0,0,0,0],[2,0,0,0,0,0,1,0,0,0,0,0],[2,1,0],[0,1,0,0,0,0,2,0,0],[1,1,0,0,0,0,1,0,0]],\"t2\":2,\"ema\":0.0101,\"rs\":0.508,\"rn\":3,\"pk\":{}},\"meta\":{\"unlocked\":{},\"seenCredits\":false,\"seenTutorial\":true,\"counters\":{\"deathblows\":0,\"bleedDealt\":0,\"reads\":0,\"guardBroken\":0,\"drafts\":1,\"liesCaught\":1},\"memory\":{\"runs\":1,\"wins\":0,\"deaths\":0,\"streakW\":0,\"streakL\":0,\"bestDuel\":1,\"closestLoss\":null,\"fastestDeath\":null,\"lastWin\":null,\"lastPlayed\":1760000000834.9976,\"firstPlayed\":1760000000834.9976,\"lastFavorite\":null,\"favorites\":[],\"totalTurns\":5},\"vigil\":{\"max\":2,\"sel\":2,\"wins\":[0,0,0,0,0,0,0,0]}},\"run\":{\"seed\":3290333285,\"rngState\":1124219560,\"duelN\":2,\"phase\":1,\"stage\":\"duel\",\"pHp\":25,\"pMaxHp\":26,\"pBoons\":[\"truth_candle\",\"relic_dealers_thumb\",\"ash_of_forgetting\",\"coiled_riposte\"],\"rBoons\":[\"resonance\"],\"duel\":{\"n\":2,\"phase\":1,\"turn\":3,\"tension\":0,\"embers\":false,\"calls\":false,\"p\":{\"hp\":25,\"maxHp\":26,\"boons\":[\"truth_candle\",\"relic_dealers_thumb\",\"ash_of_forgetting\",\"coiled_riposte\"],\"status\":{\"guardBroken\":0,\"bleed\":1,\"fortify\":0,\"focus\":0,\"sealed\":{\"S\":0,\"G\":0,\"F\":0}},\"counters\":{},\"charges\":{\"truth_candle\":0},\"moves\":[\"S\",\"S\"],\"results\":[\"W\",\"W\"]},\"r\":{\"hp\":1,\"maxHp\":7,\"boons\":[\"resonance\"],\"status\":{\"guardBroken\":0,\"bleed\":0,\"fortify\":0,\"focus\":0,\"sealed\":{\"S\":0,\"G\":0,\"F\":0}},\"counters\":{},\"charges\":{},\"moves\":[\"F\",\"F\"],\"results\":[\"L\",\"L\"]},\"over\":null,\"pendingEvents\":[],\"intel\":{\"called\":null,\"honest\":null,\"pred\":null,\"coin\":false},\"begun\":2,\"tally\":{\"lostP\":1,\"lostR\":6,\"bleedP\":1,\"bleedR\":0,\"healP\":0,\"healR\":0,\"bleedCounted\":0}},\"offer\":null,\"pending\":null,\"relicId\":null,\"stats\":{\"turns\":5,\"moves\":{\"S\":3,\"G\":1,\"F\":1},\"wins\":5,\"losses\":0,\"clashes\":0,\"reads\":0,\"surprises\":0,\"liesCaught\":1,\"duelTurns\":[3],\"flags\":{},\"liesWorked\":0,\"deathblows\":0,\"guardBroken\":0,\"repeats\":1,\"repeatOpp\":3,\"drafts\":1,\"draftsSynced\":1,\"bleedDealt\":0,\"bleedSynced\":0,\"lastMove\":\"S\",\"lowHpEnd\":false,\"spent\":{\"p\":{},\"r\":{}}},\"runNo\":1,\"daysAway\":0,\"finished\":null,\"stake\":2,\"rivalHead\":null}}"
+ },
+ "expect": {
+  "stage": "duel",
+  "duelN": 2,
+  "phase": 1,
+  "turn": 3,
+  "pending": false,
+  "begun": false,
+  "over": null,
+  "boss": null,
+  "seen": false,
+  "tutorial": false,
+  "cards": null,
+  "applied": false,
+  "shown": false
+ }
+}

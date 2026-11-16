@@ -1649,6 +1649,108 @@ section("4f. Liar's Coin: at most one stamp per final duel");
   else ok(false, 'stale KNOWN row coin-stamp-every-phase: remove it from tools/known.json in the fixing commit (and make 4f assert one stamp per final duel)');
 }
 
+// ================================================================== 4g. save train 0 (P1.1)
+// Shadow high-water keys (bosses.hi, vigil.hi, vigil.winsX: a build with fewer faces or lights clamps max in place
+// but cannot lower what a later build reads back), the run.req stamp, the repair of a face or phase this build cannot
+// read (R.Run.repairRun), and the old-shape duel-7 rebuild (startPhase with opts.rebuild: no second phase heal).
+section('4g. Save train 0: shadow high-water keys, run.req, face and phase repair, the phase rebuild');
+{
+  const J = JSON.stringify, NB = RUN.BOSSES.length, NV = RUN.VIGIL.length;
+  // bosses.hi
+  let m = RUN.repairMeta({ bosses: { max: 5, hi: 5 } });
+  ok(m.bosses.max === NB && m.bosses.hi === 5, 'bosses {max 5, hi 5}: max clamps to ' + NB + ', hi stays 5 (got ' + J(m.bosses) + ')');
+  m = RUN.repairMeta({ bosses: { max: 1, hi: 3, wins: {}, last: null } });
+  eq(m.bosses.max, 3, 'a max an older build lowered comes back from hi');
+  eq(RUN.repairMeta({ bosses: { max: 2, hi: 'x' } }).bosses.hi, 'x', 'a garbage hi is kept as stored (never dropped) and ignored');
+  eq(RUN.repairMeta({ bosses: { max: 2, hi: 'x' } }).bosses.max, 2, 'and does not raise max');
+  // a later build's face table: hi is read back in full once the table is longer (a scratch context)
+  {
+    const vm = require('vm'), ctx = vm.createContext({});
+    for (const f of ['core/rng.js', 'game/boons.js', 'game/combat.js', 'game/run.js']) vm.runInContext(require('fs').readFileSync(path.join(src, f), 'utf8'), ctx);
+    const SR = vm.runInContext('RIVAL', ctx).Run;
+    SR.BOSSES.push({ id: 'scratch_face', name: 'Scratch', phases: [{ name: 'One' }, { name: 'Two', change: 'swap' }] });
+    eq(SR.repairMeta({ bosses: { max: 4, hi: 5 } }).bosses.max, 5, 'with a fifth face in the table, hi 5 earns it back');
+    const sm = SR.repairMeta({ bosses: { max: 4, hi: 4, wins: { reflection: 1 }, last: null } });
+    const sr = SR.create(sm, { seed: 1, now: 1 }); sr.stage = 'won'; sr.duelN = 7; sr.phase = 3; sr.boss = 'reflection';
+    SR.finish(sr, sm, 1);
+    ok(sm.bosses.max === 5 && sm.bosses.hi === 5, 'beating the newest face raises max and hi together: ' + J(sm.bosses));
+  }
+  // vigil.hi and vigil.winsX
+  m = RUN.repairMeta({ vigil: { max: 9, sel: 9, hi: 9, wins: [1, 0, 0, 0, 0, 0, 0, 2, 3, 4], winsX: { 9: 6 } } });
+  ok(m.vigil.max === NV && m.vigil.hi === 9 && m.vigil.sel === NV, 'vigil: max and sel clamp to ' + NV + ', hi stays 9 (got ' + J(m.vigil) + ')');
+  ok(m.vigil.wins.length === NV + 1 && m.vigil.wins[NV] === 2, 'vigil.wins is cut to the lights this build has');
+  ok(J(m.vigil.winsX) === J({ 8: 3, 9: 6 }), 'wins past the table go to winsX first (the larger count kept): ' + J(m.vigil.winsX));
+  eq(RUN.repairMeta({ vigil: { max: 0, hi: 4, wins: [] } }).vigil.max, 4, 'a lowered vigil.max comes back from hi');
+  eq(J(RUN.repairMeta({ vigil: { max: 1, wins: [0, 0, 0, 0, 0, 0, 0, 0, 5], winsX: 7 } }).vigil.winsX), J({ 8: 5 }), 'a garbage winsX is replaced only when there is a win to keep');
+  eq(RUN.repairMeta({ vigil: { max: 1, wins: [], winsX: 7 } }).vigil.winsX, 7, 'and is otherwise kept as stored');
+  const mr = allMeta(); RUN.repairMeta(mr);
+  const before = J(mr); RUN.repairMeta(mr);
+  eq(J(mr), before, 'repairMeta is idempotent and adds no shadow key by itself');
+  ok(!('hi' in mr.bosses) && !('hi' in mr.vigil) && !('winsX' in mr.vigil), 'a fresh meta has no shadow keys');
+  // finish() writes hi when it raises max
+  const mf = allMeta(), rf = RUN.create(mf, { seed: 2, now: 1 });
+  rf.stage = 'won'; rf.duelN = 7; rf.phase = RUN.phaseCount(rf);
+  const ff = RUN.finish(rf, mf, 1);
+  ok(ff.light === 1 && mf.vigil.max === 1 && mf.vigil.hi === 1, 'the first light earned sets vigil.hi: ' + J(mf.vigil));
+  ok(ff.face === 'three_faced' && mf.bosses.max === 2 && mf.bosses.hi === 2, 'the second face earned sets bosses.hi: ' + J(mf.bosses));
+  // create() never throws whatever max / hi say, and stamps run.req
+  let threw = 0, badFace = 0;
+  for (let mx = -5; mx <= 99; mx += 13) for (let hi = -5; hi <= 99; hi += 13) {
+    const mm = allMeta(); mm.bosses.max = mx; mm.bosses.hi = hi; mm.vigil.max = mx; mm.vigil.hi = hi; mm.vigil.sel = hi;
+    try { const r = RUN.create(mm, { seed: 100 + mx * 7 + hi, now: 1, stake: hi }); if (RUN.bossIndex(r.boss) < 0 || RUN.bossIndex(r.boss) >= mm.bosses.max) badFace++; }
+    catch (e) { threw++; }
+  }
+  eq(threw, 0, 'R.Run.create never throws for bosses / vigil max and hi in -5..99');
+  eq(badFace, 0, 'and always draws an earned face');
+  eq(RUN.RULES, 0, 'R.Run.RULES is 0');
+  eq(RUN.create(allMeta(), { seed: 3, now: 1 }).req, RUN.RULES, 'a new run is stamped run.req = R.Run.RULES');
+  eq(J([RUN.reqOf({}), RUN.reqOf({ req: 2.7 }), RUN.reqOf({ req: 'x' }), RUN.reqOf({ req: -1 }), RUN.reqOf(null)]), J([0, 2, 0, 0, 0]), 'reqOf reads a missing or garbage run.req as 0');
+
+  // repairRun: an unknown face is redrawn from the earned ones on the run's face stream; at duel 7 the final duel
+  // restarts at phase 1. A missing face stays The Unmasked; a missing phase comes back from the duel.
+  const m3 = allMeta(); m3.bosses.max = 3;
+  const base = RUN.create(m3, { seed: 41, now: 1, boss: 'hours', anyBoss: true });
+  base.duelN = 7; RUN.startDuel(base); base.duel.over = 'p'; RUN.endDuel(base, m3, 'p', null); RUN.nextPhase(base); RUN.nextPhase(base);
+  base.pending = { sealed: { move: 'S', tell: 'G', pred: { S: 0.3, G: 0.3, F: 0.4 } }, turn: base.duel.turn, n: 7, phase: 3, called: null };
+  const r1 = rt(base); r1.boss = 'face_of_a_later_build';
+  const mm1 = rt(m3), o1 = RUN.repairRun(r1, mm1);
+  ok(o1.redrawn && o1.restart && RUN.bossIndex(r1.boss) >= 0 && RUN.bossIndex(r1.boss) < 3, 'an unknown face at the altar is redrawn from the earned faces: ' + r1.boss);
+  ok(r1.phase === 1 && r1.duel === null && r1.pending === null, 'and the final duel restarts at phase 1 with no duel and no commit');
+  eq(mm1.bosses.last, r1.boss, 'the redrawn face becomes bosses.last');
+  const r1b = rt(base); r1b.boss = 'face_of_a_later_build'; RUN.repairRun(r1b, rt(m3));
+  eq(r1b.boss, r1.boss, 'the redraw depends only on the run seed and the record');
+  const r2 = rt(base); r2.duelN = 3; r2.phase = 1; r2.boss = 'face_of_a_later_build';
+  const o2 = RUN.repairRun(r2, rt(m3));
+  ok(o2.redrawn && !o2.restart && r2.duel !== null && r2.pending !== null, 'before the final duel the redraw keeps the duel and its commit');
+  const r3 = rt(base); delete r3.boss;
+  const o3 = RUN.repairRun(r3, rt(m3));
+  ok(!o3.redrawn && r3.boss === undefined && RUN.bossOf(r3).id === 'unmasked', 'a run from before the faces stays The Unmasked (no redraw)');
+  ok(o3.restart && r3.phase === 1 && r3.duel === null, 'its phase 3 is past The Unmasked count: the final duel restarts');
+  const r4 = rt(base); r4.phase = 9;
+  ok(RUN.repairRun(r4, rt(m3)).restart && r4.phase === 1 && r4.duel === null && r4.pending === null, 'a phase past the count restarts duel 7 at phase 1');
+  const r5 = rt(base); delete r5.phase;
+  const o5 = RUN.repairRun(r5, rt(m3));
+  ok(!o5.restart && r5.phase === 3 && r5.duel !== null, 'a missing run.phase comes back from the duel (3): ' + r5.phase);
+  const r6 = rt(base); r6.phase = 'x'; r6.duel = null;
+  RUN.repairRun(r6, rt(m3)); eq(r6.phase, 1, 'a garbage run.phase with no duel becomes 1');
+  const r7 = rt(base), j7 = J(r7);
+  ok(J(RUN.repairRun(r7, rt(m3))) === J({ redrawn: false, restart: false }) && J(r7) === j7, 'a run this build can read is left untouched');
+  let rthrew = 0;
+  for (const g of [null, 7, 'x', [], {}, { boss: {}, phase: {}, duel: 'x' }, { duelN: 7, stage: 'duel', boss: 5, seed: 'x' }]) { try { RUN.repairRun(g, null); } catch (e) { rthrew++; } }
+  eq(rthrew, 0, 'repairRun never throws on garbage');
+
+  // startPhase(run, k, {rebuild}): phase k from run.pHp, no second heal, no heal event
+  const rb = rt(base); rb.duel = null; rb.pending = null; rb.pHp = 9;
+  const db = RUN.startPhase(rb, 3, { rebuild: true });
+  ok(db.phase === 3 && rb.phase === 3 && db.n === 7 && rb.stage === 'duel', 'rebuild: phase 3 of the final duel');
+  ok(db.p.hp === 9 && rb.pHp === 9, 'rebuild: the player comes back with run.pHp (9), got ' + db.p.hp);
+  eq(db.pendingEvents.filter(e => e.t === 'heal').length, 0, 'rebuild: no heal event');
+  ok(db.r.hp === RUN.cfg(rb, db).rivalHp, 'rebuild: the Rival has the phase health');
+  const rh = rt(base); rh.duel = null; rh.pHp = 9;
+  const dh = RUN.startPhase(rh, 3);
+  ok(dh.p.hp > 9 && dh.pendingEvents.some(e => e.t === 'heal'), 'without rebuild the same call heals (the phase change)');
+}
+
 // ================================================================== 5. smoke sim
 section('5. Smoke sim: uniform-random player vs uniform-random Rival');
 (function () {

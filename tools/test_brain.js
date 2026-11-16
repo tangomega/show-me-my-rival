@@ -1,9 +1,14 @@
 // THE RIVAL — tests + learning benchmark for src/ai/brain.js.   node tools/test_brain.js
 // Exit code 1 on any failed check. Uses a tiny local model of the duel rules (DESIGN §4):
 // HP 12 vs 10, tension, guard break, Rupture chip. No boons, no phase 2.
+//   RIVAL_LOCKSTEP=full   section 3b plays 100 snapshot and 100 chained games (default: 1 and 20; 2,000 turns each)
+//   RIVAL_OLD_SAVES=print print the old-build saves of section 3c regenerated from git history, then exit
+//   RIVAL_OLD_SAVES=check also check that regenerated text against the embedded saves (not part of the default run)
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
+const cp = require('child_process');
 const SRC = path.join(__dirname, '..', 'src');
 require(path.join(SRC, 'core', 'rng.js'));
 require(path.join(SRC, 'ai', 'brain.js'));
@@ -182,6 +187,100 @@ function trained(playerName, turns, seed, exploit, honestyBase) {
                     honestyBase: honestyBase === undefined ? 0.7 : honestyBase }).brain;
 }
 
+// ---------------------------------------------------------------- reload helpers (sections 1, 3, 3b, 3c)
+// What a page reload does to the brain: the save text is all that survives.
+function reload(b) { return R.Brain.create(JSON.parse(JSON.stringify(b.serialize()))); }
+// Deep equality with Object.is on every number (so 1e-17 or -0 counts) and the same key order.
+function bitSame(a, b) {
+  if (typeof a === 'number' || typeof b === 'number') return Object.is(a, b);
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i] || !bitSame(a[ka[i]], b[kb[i]])) return false;
+  return true;
+}
+function hasNegZero(x) {
+  if (typeof x === 'number') return Object.is(x, -0);
+  if (x && typeof x === 'object') for (const k of Object.keys(x)) if (hasNegZero(x[k])) return true;
+  return false;
+}
+// The order brain.serialize() writes pk in (brain.js PEAK_IDS), and the frozen expert-table sizes (SIZES x 3).
+const PEAK_ORDER = ['fav_move', 'opening', 'after_loss', 'after_win', 'low_hp', 'two_step', 'loop3', 'deathblow_nerves', 'broken_panic', 'vs_broken'];
+const TABLE_LENS = [3, 9, 27, 9, 27, 6, 3, 9, 12, 12, 3, 9, 9];
+// The Rival's own seat, for q.mimic: the player's view of the duel turned around.
+function mimicCtxOf(d) {
+  return { duel: d.n, phase: 1, turn: d.turn, prev1: d.prevR, prev2: null, prevR: d.prev1,
+           last: d.last === 'W' ? 'L' : d.last === 'L' ? 'W' : d.last, pHp: d.rHp, pMaxHp: d.rMax, rHp: d.pHp, rMaxHp: d.pMax,
+           tension: d.tension, pBroken: d.rBroken, rBroken: d.pBroken };
+}
+// Duel n's exploit and honesty base, roughly the run's ramp; 10% of turns hide the stance, 10% mimic.
+const RAMP_EXPLOIT = [0.3, 0.5, 0.65, 0.75, 0.85, 0.95, 1], RAMP_HONESTY = [0.97, 0.9, 0.82, 0.74, 0.64, 0.5, 0.42];
+function rampQuestion(d, sit, modes) {
+  const q = { ctx: ctxOf(d), payoff: payoffOf(d.tension), legalR: legalOf(d.rBroken), legalP: legalOf(d.pBroken),
+              exploit: RAMP_EXPLOIT[d.n - 1], honestyBase: RAMP_HONESTY[d.n - 1] };
+  if (modes) { const u = sit.next(); if (u < 0.1) q.noTell = true; else if (u < 0.2) q.mimic = mimicCtxOf(d); }
+  return q;
+}
+// The player answers only after the seal, seeing the stance unless it was hidden.
+function answer(name, q, sealed, prng, mem, i) {
+  let pm = PLAYERS[name]({ ctx: q.ctx, tell: q.noTell ? null : sealed.tell, legal: q.legalP, rng: prng, mem: mem, turn: i });
+  if (q.legalP.indexOf(pm) < 0) pm = prng.pick(q.legalP);
+  return pm;
+}
+
+// ---------------------------------------------------------------- saves written by earlier builds (section 3c)
+// The exact save text three earlier builds wrote (their serialize() kept pk in first-seen order and did not
+// quantise in memory). A fixed script played each one: OLD_PLAY below, on that build's own brain.js. The embedded
+// text is the acceptance. RIVAL_OLD_SAVES=check regenerates it from `git show <sha>:src/ai/brain.js` and compares;
+// RIVAL_OLD_SAVES=print prints it. Both replay with this file's current players and rules model, so a later edit to
+// those helpers can change the regenerated text while the old builds and their saves stay the same: that is why the
+// default run (and the gate) does not regenerate.
+const OLD_PLAY = {
+  '6e8a65b': { seed: 61, turns: 900, start: 2, modes: false },
+  '42ec57c': { seed: 42, turns: 1300, start: 0, modes: false },
+  '0cba25d': { seed: 25, turns: 1100, start: 5, modes: true }
+};
+const OLD_SAVES = {
+  '6e8a65b': '{"v":1,"n":900,"runs":15,"w":[0.0515,0.0317,0.0289,0.0847,0.082,0.125,0.0777,0.0624,0.0733,0.0791,0.0742,0.0366,0.1928],"c":[[5.563,5.102,3.599],[3.674,3.711,2.48,3.994,3.528,1.907,4.949,1.778,2.995],[2.761,1.827,1.45,2.369,2.401,0.779,1.516,1.826,2.711,3.299,2.18,0.599,2.227,2.004,0.186,2.652,1.023,1.507,1,2.303,2.866,3.168,1.175,1.038,2.863,1.085,1.625],[4.685,4.057,1.011,3.82,3.352,2.505,3.298,1.896,4.588],[2.132,2.035,1.086,2.31,3.096,0.751,4.448,1.58,0.057,2.149,3.103,1.019,0,0,0,2.466,1.445,2.374,2.402,1.422,2.654,2.961,0.754,2.105,0.497,1.388,3.011],[2.855,4.827,2.308,5.606,0.698,3.298],[1.905,1.23,1.71],[3.512,3.369,3.044,5.381,3.329,1.105,2.177,2.694,3.407],[3.191,3.803,1.335,2.224,2.143,3.707,3.017,0.702,2.63,1.917,0.687,1.352],[2.393,3.775,2.165,2.759,0,3.069,5.147,1.962,0.117,0,0,0],[2.152,4.25,6.088],[1.81,3.71,2.756,1.797,2.687,3.805,2.648,2.125,3.295],[1.328,2.068,4.933,1.322,0.847,3.189,1.771,5.372,0.968]],"life":[[249,296,270],[89,85,97,56,65,56,78,109,76],[28,24,28,16,19,21,22,35,24,35,28,33,14,12,14,23,27,26,15,23,31,18,27,13,20,26,19],[69,72,59,52,95,68,102,92,102],[20,19,12,23,34,23,26,19,24,22,24,35,0,0,0,30,71,33,47,42,50,33,31,33,22,19,19],[203,233,205,46,63,65],[26,37,41],[100,147,106,81,74,92,42,38,31],[147,204,168,69,59,62,21,20,28,12,13,12],[223,277,246,47,0,38,26,19,24,0,0,0],[318,300,197],[122,102,69,109,106,60,87,92,68],[186,217,143,52,39,16,80,44,38]],"run":[[25,18,15],[8,8,5,6,5,3,7,4,4],[2,2,1,3,2,1,1,2,2,3,2,0,1,2,0,2,1,1,1,3,3,2,1,1,2,0,1],[10,7,1,6,6,3,5,4,8],[2,1,0,4,4,1,4,2,0,3,4,1,0,0,0,3,2,2,3,3,4,2,1,2,0,0,2],[17,17,10,8,1,5],[4,1,3],[10,9,7,9,7,3,2,1,2],[20,14,7,2,4,6,2,0,2,1,0,0],[21,16,15,0,0,2,4,2,0,0,0,0],[17,21,20],[7,10,5,6,7,11,4,4,4],[13,12,17,1,0,1,3,9,2]],"t2":0,"ema":0.0021,"rs":-0.023,"rn":60,"pk":{"two_step":{"k":2,"m":1,"p":64,"r":3,"s":1},"low_hp":{"k":1,"m":1,"p":65,"r":2,"s":0},"fav_move":{"k":0,"m":1,"p":47,"r":3,"s":0}}}',
+  '42ec57c': '{"v":1,"n":1300,"runs":22,"w":[0.0601,0.0979,0.0573,0.0966,0.1079,0.1128,0.0493,0.0374,0.0786,0.0913,0.0732,0.0532,0.0844],"c":[[5.427,5.708,2.861],[2.581,5.021,1.653,3.522,1.458,3.18,4.685,2.691,0.549],[1.242,2.861,1.279,2.372,0.623,2.202,2.322,1.271,0.921,1.093,2.798,1.071,1.16,0.594,1.258,2.825,1.612,0.078,2.035,1.39,1.187,1.653,1.27,0.695,0.892,1.519,0.176],[4.948,0.9,1.326,3.737,2.687,2.036,2.661,4.965,1.713],[2.462,0.254,0.702,2.531,0.375,1.309,2.29,1.402,0.005,2.001,2.102,1.609,0,0,0,2.602,1.012,0.868,0.983,4.159,0.593,1.97,1.457,2.124,2.605,1.718,0.064],[5.643,2.806,1.299,1.751,4.462,2.7],[2.228,1.396,0.569],[3.094,4.107,1.715,3.208,3.111,2.883,4.389,1.711,0.48],[4.778,1.76,1.615,2.428,4.05,0.781,1.857,0.868,2.367,1.894,2.688,0.815],[2.757,3.789,1.768,0.316,0,3.19,2.594,1.649,0.014,0,0,0],[4.613,5.175,2.556],[2.806,4.329,0.675,2.228,2.893,2.793,2.112,2.082,2.765],[3.182,3.297,1.814,0.352,1.345,2.082,1.927,3.567,0.585]],"life":[[339,455,338],[105,165,102,62,90,83,132,136,99],[32,27,34,25,18,33,26,35,28,32,61,27,11,26,11,65,57,24,29,58,32,19,32,23,17,30,31],[90,111,65,75,134,93,134,146,126],[26,15,12,25,58,29,39,38,24,21,58,40,0,0,0,54,76,53,58,92,50,37,32,54,39,22,22],[279,342,263,60,113,75],[40,64,54],[137,226,132,97,128,118,65,37,34],[205,309,212,76,107,78,36,25,31,22,14,17],[300,417,314,65,0,103,39,38,24,0,0,0],[381,432,319],[164,150,77,118,139,90,99,143,152],[230,310,243,53,58,26,98,64,50]],"run":[[17,12,9],[5,7,4,3,1,3,6,3,1],[1,3,2,2,0,2,2,1,1,0,2,1,0,0,1,3,1,0,2,1,1,1,1,0,0,1,0],[4,1,1,5,3,4,5,7,3],[1,0,0,2,0,1,1,1,0,3,2,3,0,0,0,2,1,1,1,5,1,1,1,2,3,1,0],[14,5,5,3,7,4],[3,1,1],[5,6,3,5,4,5,4,1,0],[12,5,6,4,5,1,1,0,2,0,2,0],[16,11,9,0,0,2,1,1,0,0,0,0],[10,15,13],[4,8,2,4,4,7,2,3,4],[8,10,12,0,1,1,2,4,0]],"t2":0,"ema":0.0147,"rs":0.577,"rn":40,"pk":{"fav_move":{"k":0,"m":1,"p":100,"r":2,"s":1},"low_hp":{"k":1,"m":1,"p":100,"r":2,"s":1},"after_win":{"k":0,"m":1,"p":83,"r":3,"s":1}}}',
+  '0cba25d': '{"v":1,"n":1100,"runs":19,"w":[0.0281,0.0201,0.02,0.0237,0.3057,0.0231,0.0932,0.2891,0.0291,0.0798,0.0263,0.0358,0.0261],"c":[[2.845,7.655,3.353],[2.327,3.848,3.03,1.54,4.905,2.51,0.933,6.225,1.601],[1.377,1.604,1.224,0.813,2.486,1.622,0.427,2.956,1.21,1.64,2.171,1.88,1.457,2.334,1.446,0.77,2.608,1.543,0.097,1.948,1.962,0.372,2.911,0.988,0.513,2.99,0.427],[1.887,5.167,1.923,0.033,6.998,1.397,2.354,3.623,3.345],[1.77,2.065,0.792,0.412,4.76,0.616,1.61,0.061,2.879,0,2.59,2.315,0,0,0,0.05,5.448,0,1.418,2.66,1.956,1.618,1.346,2.636,1.346,1.926,1.004],[2.298,5.283,2.102,1.541,4.41,2.331],[2.332,1.368,0.78],[0.847,7.25,1.489,1.682,2.067,5.123,2.625,3.368,1.367],[1.682,5.346,1.069,2.033,3.037,2.77,1.001,1.35,1.994,0.594,1.108,0.028],[1.711,4.811,1.704,5.682,0,0.862,1.982,0.1,3.084,0,0,0],[2.646,2.753,6.732],[3.141,1.802,2.931,1.146,3.767,2.415,1.128,0.717,6.003],[1.518,1.867,4.765,0.673,0.969,2.025,2.995,2.118,2.131]],"life":[[278,434,254],[67,165,71,61,110,85,113,114,59],[18,22,21,19,35,40,21,26,14,25,60,22,18,32,13,67,45,22,15,65,18,19,30,21,11,27,14],[76,103,63,55,109,49,110,177,103],[8,28,9,24,47,36,44,28,18,11,61,24,0,0,0,44,48,25,48,76,38,37,63,49,25,38,16],[213,335,199,65,99,55],[37,45,39],[116,171,99,92,152,91,33,66,25],[168,257,151,65,117,65,21,36,22,24,24,16],[234,406,236,63,0,71,44,28,18,0,0,0],[244,357,273],[112,119,71,64,143,69,68,95,133],[175,275,212,12,23,17,57,59,44]],"run":[[4,9,4],[2,2,2,1,2,1,0,4,1],[1,1,0,0,0,0,0,1,1,1,0,2,1,0,0,0,1,0,0,0,0,0,2,0,0,1,0],[1,2,1,0,4,0,2,2,3],[1,0,0,0,2,0,0,0,1,0,0,0,0,0,0,0,4,0,1,2,2,1,0,1,0,0,0],[3,6,2,1,3,2],[1,1,0],[1,8,2,1,0,2,1,0,0],[2,7,1,2,2,3,0,0,0,0,0,0],[4,9,3,3,0,0,0,0,1,0,0,0],[4,3,8],[3,2,3,0,1,0,1,0,5],[3,2,7,0,0,0,1,1,1]],"t2":0,"ema":0.0785,"rs":1.954,"rn":20,"pk":{"low_hp":{"k":1,"m":0,"p":56,"r":1,"s":0},"fav_move":{"k":0,"m":0,"p":48,"r":1,"s":0}}}'
+};
+function oldSavePlay(Brain, o) {
+  const b = Brain.create(null), rng = R.RNG.create(o.seed), prng = R.RNG.create(o.seed + 1), sit = R.RNG.create(o.seed + 2);
+  const names = Object.keys(PLAYERS), mem = { i: 0 };
+  let d = newDuel(1);
+  b.beginRun({ days: 0 });
+  for (let i = 0; i < o.turns; i++) {
+    if (i > 0 && i % 60 === 0) b.beginRun({ days: i % 240 === 0 ? 9 : 0 });
+    if (i > 0 && i % 250 === 0) b.forget(0.5);
+    const q = rampQuestion(d, sit, o.modes);
+    const sealed = b.commit(Object.assign({}, q, { rng: rng }));
+    const pm = answer(names[(o.start + Math.floor(i / 150)) % names.length], q, sealed, prng, mem, i);
+    b.observe(q.ctx, q.noTell ? null : sealed.tell, pm, sealed.move);
+    if (resolve(d, pm, sealed.move).over) d = newDuel(d.n % 7 + 1);
+  }
+  return JSON.stringify(b.serialize());
+}
+function brainAt(sha) {
+  const root = path.join(__dirname, '..');
+  let src;
+  try {
+    src = cp.execFileSync('git', ['-C', root, 'show', sha + ':src/ai/brain.js'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (e) { return null; }
+  const box = vm.createContext({});
+  vm.runInContext('globalThis.RIVAL = { MOVES: ["S","G","F"], BEATS: { S: "F", G: "S", F: "G" }, LOSES_TO: { S: "G", G: "F", F: "S" } };', box);
+  vm.runInContext(src, box, { filename: sha + ':src/ai/brain.js' });
+  return vm.runInContext('RIVAL.Brain', box);
+}
+if (process.env.RIVAL_OLD_SAVES === 'print') {
+  for (const sha of Object.keys(OLD_PLAY)) {
+    const B = brainAt(sha);
+    console.log(sha + ' ' + (B ? oldSavePlay(B, OLD_PLAY[sha]) : '(no git history)'));
+  }
+  process.exit(0);
+}
+
 // ================================================================ 0. solver sanity
 section('0. Equilibrium solver');
 (function () {
@@ -227,7 +326,7 @@ section('1. Fairness, determinism, commit does not learn');
     const a = JSON.stringify(brain.commit(Object.assign({}, q0, { rng: r1 })));
     const b2 = JSON.stringify(brain.commit(Object.assign({}, q0, { rng: r2 })));
     if (a !== b2) sameTwice = false;
-    if (a !== outs[0] && Math.abs(JSON.parse(a).pred.S - JSON.parse(outs[0]).pred.S) > 2e-3) cacheSame = false;
+    if (a !== outs[0]) cacheSame = false;                      // the live brain and its reload seal the same, to the bit
     // (c) smuggling the player's move into q is ignored
     for (const pm of MOVES) {
       const r3 = R.RNG.create(1); r3.setState(rs);
@@ -248,7 +347,7 @@ section('1. Fairness, determinism, commit does not learn');
   }
   check('identical sealed for all three player moves (' + n + ' situations)', same3);
   check('commit twice from the same rng state is identical (cache hit = cache miss)', sameTwice);
-  check('reloaded brain commits like the live one (rounding only)', cacheSame);
+  check('reloaded brain commits exactly like the live one (identical sealed, pred and confidence to the bit)', cacheSame);
   check('extra fields on q (pm, playerMove, input) cannot influence commit', sameExtra);
   check('commit works on frozen ctx / payoff / legal lists (no argument mutation)', sameFrozen);
 
@@ -519,6 +618,18 @@ section('3. Serialization');
   check('serialized state is plain JSON with a v field', ser.v === 1 && JSON.stringify(JSON.parse(json)) === json);
   check('size under 12 KB after 5,000 turns and not growing with history', json.length < 12288 && json.length < size1000 * 1.5);
   check('no NaN/null leaked into the serialized state', json.indexOf('null') < 0 && json.indexOf('NaN') < 0);
+  // The save layout is frozen (brain.js, above NE): a new expert appends, it never takes or shifts a slot.
+  const lensOk = function (t) { return Array.isArray(t) && t.length === TABLE_LENS.length && t.every(function (a, e) { return Array.isArray(a) && a.length === TABLE_LENS[e]; }); };
+  check('save layout frozen: keys v,n,runs,w,c,life,run,t2,ema,rs,rn,pk; w is 13 numbers; c, life and run are 13 tables of ' + TABLE_LENS.join(','),
+        Object.keys(ser).join(',') === 'v,n,runs,w,c,life,run,t2,ema,rs,rn,pk' && Array.isArray(ser.w) && ser.w.length === 13 &&
+        ser.w.every(function (x) { return typeof x === 'number' && x > 0; }) && lensOk(ser.c) && lensOk(ser.life) && lensOk(ser.run),
+        Object.keys(ser).join(',') + '; w ' + ser.w.length + '; c ' + ser.c.map(function (a) { return a.length; }).join(','));
+  const pkKeys = Object.keys(ser.pk);
+  check('pk is written in the canonical order (' + pkKeys.length + ' peaks: ' + pkKeys.join(', ') + ')', pkKeys.length >= 2 &&
+        pkKeys.every(function (k, i) { return i === 0 || PEAK_ORDER.indexOf(pkKeys[i - 1]) < PEAK_ORDER.indexOf(k); }));
+  const viaJson = R.Brain.create(JSON.parse(json)).serialize(), direct = R.Brain.create(ser).serialize();
+  check('the live state is already what the save holds: serialize(create(save)) equals the save, number for number and key for key',
+        bitSame(viaJson, ser) && bitSame(direct, ser) && !hasNegZero(ser));
 
   const copy = R.Brain.create(JSON.parse(json));
   const sit = R.RNG.create(55);
@@ -530,32 +641,285 @@ section('3. Serialization');
     const q = { ctx: ctx, payoff: payoffOf(ctx.tension), legalR: legalOf(rB), legalP: legalOf(pB), exploit: 0.7, honestyBase: 0.6 };
     const sa = brain.commit(Object.assign({ rng: R.RNG.create(i + 1) }, q)), sb = copy.commit(Object.assign({ rng: R.RNG.create(i + 1) }, q));
     for (const m of MOVES) maxDiff = Math.max(maxDiff, Math.abs(sa.pred[m] - sb.pred[m]));
-    sealedN++; if (sa.move === sb.move && sa.tell === sb.tell) sealedSame++;
+    sealedN++; if (bitSame(sa, sb)) sealedSame++;
   }
   maxDiff = Math.max(maxDiff, Math.abs(brain.trust() - copy.trust()), Math.abs(brain.honesty(0.7) - copy.honesty(0.7)));
-  console.log('  round trip: max |Δ prediction| = ' + maxDiff.toExponential(2) + ';  identical sealed move+tell in ' + sealedSame + '/' + sealedN + ' commits');
-  check('round trip keeps predictions (max diff < 2e-3) and decisions (≥ 99%)', maxDiff < 2e-3 && sealedSame >= 0.99 * sealedN);
+  console.log('  round trip: max |Δ prediction| = ' + maxDiff.toExponential(2) + ';  identical sealed object in ' + sealedSame + '/' + sealedN + ' commits');
+  check('round trip keeps predictions exactly (max diff 0) and every sealed object to the bit', maxDiff === 0 && sealedSame === sealedN,
+        'max diff ' + maxDiff.toExponential(2) + ', ' + sealedSame + '/' + sealedN);
   check('round trip keeps the dossier', JSON.stringify(brain.dossier()) === JSON.stringify(copy.dossier()));
   const again = JSON.stringify(R.Brain.create(JSON.parse(JSON.stringify(copy.serialize()))).serialize());
   check('serialize → create → serialize is stable', again === JSON.stringify(copy.serialize()));
 
+  // '' when b is reload-exact right now: its save is a byte fixed point, holds no -0, and a brain rebuilt from it
+  // reports and seals exactly as b does (Object.is on every number).
+  function reloadExact(b, seed) {
+    const ser0 = b.serialize(), aj = JSON.stringify(ser0);
+    if (JSON.stringify(R.Brain.create(JSON.parse(aj)).serialize()) !== aj) return 'not a byte fixed point';
+    if (hasNegZero(ser0)) return 'the live state holds a -0';
+    const copy = R.Brain.create(JSON.parse(aj)), sit = R.RNG.create(seed);
+    if (!bitSame(b.dossier(), copy.dossier()) || !Object.is(b.trust(), copy.trust()) || !Object.is(b.honesty(0.6), copy.honesty(0.6)) ||
+        !Object.is(b.runScore(), copy.runScore())) return 'a report differs on reload';
+    for (let i = 0; i < 12; i++) {
+      const pB = sit.chance(0.2), rB = sit.chance(0.2), ctx = randomCtx(sit, pB, rB);
+      const q = { ctx: ctx, payoff: payoffOf(ctx.tension), legalR: legalOf(rB), legalP: legalOf(pB), exploit: sit.next(), honestyBase: sit.next() };
+      if (!bitSame(b.commit(Object.assign({ rng: R.RNG.create(seed + i) }, q)), copy.commit(Object.assign({ rng: R.RNG.create(seed + i) }, q)))) return 'seal ' + i + ' differs on reload';
+    }
+    return '';
+  }
+
   const freshJson = JSON.stringify(R.Brain.create(null).serialize());
   const garbage = [{}, null, { junk: 1 }, undefined, 'hello', 42, [1, 2, 3],
                    { v: 99, n: NaN, w: 'x', c: [1, 2], life: {}, run: [[], null, ['a']], pk: { fav_move: { k: 99, m: -4, p: 'q' }, bogus: 1 }, t2: 12, ema: 'z' },
-                   { w: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], c: [[1e99, -5, NaN]] }];
-  let allFresh = true, allWork = true, why = '';
+                   { w: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], c: [[1e99, -5, NaN]] },
+                   // hand-edited weights and zeros: each must still give a reload-exact brain
+                   { v: 1, w: [0.00004].concat(Array(12).fill(1 / 12)) },           // a stored weight that rounds to 0
+                   { w: [1e6].concat(Array(12).fill(1)) },                            // one huge weight shrinks the rest below 0.0001
+                   { w: Array(4).fill(1e-7).concat([5], Array(8).fill(1e-7)) },     // tiny weights renormalised
+                   { w: Array(13).fill(1e308) },                                      // a sum that overflows
+                   { w: Array(13).fill(1.0099 / 13) },                                // a sum at the edge of the rounding slack
+                   JSON.parse('{"n":-0,"runs":-0.3,"t2":-0,"rn":-0,"ema":-0,"rs":-0,"life":[[-0,1,2]],"run":[[-0.2,0,0]],"c":[[-0,1,1]],' +
+                              '"pk":{"fav_move":{"k":-0,"m":-0,"p":-0.4,"r":-0,"s":-0}}}')];
+  let allFresh = true, allWork = true, why = '', exact = 0, exactWhy = '';
   garbage.forEach(function (g, i) {
     try {
       const b = R.Brain.create(g);
       if (i < 7 && JSON.stringify(b.serialize()) !== freshJson) allFresh = false;
+      const r0 = reloadExact(b, 700 + i);
       const st = simulate({ brain: b, player: 'uniform', turns: 60, seed: 900 + i, exploit: 0.8, honestyBase: 0.5 });
       const js = JSON.stringify(b.serialize());
       if (js.indexOf('null') >= 0 || st.turns !== 60) { allWork = false; why = 'case ' + i; }
       b.dossier(); b.runInsights();
+      const r1 = reloadExact(b, 800 + i);
+      if (!r0 && !r1) exact++; else if (!exactWhy) exactWhy = 'case ' + i + ': ' + (r0 ? r0 + ' (as loaded)' : r1 + ' (after 60 turns)');
     } catch (e) { allWork = false; why = 'case ' + i + ': ' + e; }
   });
   check('create({}), create(null), create({junk:1}), strings, arrays → a fresh brain', allFresh);
   check('garbage fields are sanitised; every such brain plays 60 turns cleanly', allWork, why);
+  check('every garbage or hand-edited save (tiny, huge, overflowing and edge-of-slack weights, -0) gives a reload-exact brain, as loaded and after 60 turns',
+        exact === garbage.length, exact + '/' + garbage.length + (exactWhy ? '; ' + exactWhy : ''));
+
+  // Single-field corruptions of the trained save above, and weights near the rounding slack: every brain they load
+  // is reload-exact before its first observe (the window a reload can fall in).
+  const paths = [];
+  for (let e = 0; e < 13; e++) paths.push(['w', e]);
+  ['n', 'runs', 't2', 'ema', 'rs', 'rn'].forEach(function (k) { paths.push([k]); });
+  [0, 4, 9, 12].forEach(function (e) { paths.push(['c', e, 1]); paths.push(['life', e, 2]); paths.push(['run', e, 0]); });
+  Object.keys(ser.pk).forEach(function (id) { ['k', 'm', 'p', 'r', 's'].forEach(function (f) { paths.push(['pk', id, f]); }); });
+  const vals = [0, -0, -0.3, 4e-6, 4e-5, 1e-300, 1e300, 1e308, -1, 0.49, 7.5, 'x', null, NaN, Infinity];
+  let fuzzN = 0, fuzzOk = 0, fuzzWhy = '';
+  paths.forEach(function (p, pi) {
+    vals.forEach(function (v, vi) {
+      const o = JSON.parse(json);
+      let at = o;
+      for (let j = 0; j < p.length - 1; j++) at = at[p[j]];
+      at[p[p.length - 1]] = v;
+      fuzzN++;
+      let r;
+      try { r = reloadExact(R.Brain.create(o), 1000 + pi * 31 + vi); } catch (e) { r = String(e); }
+      if (!r) fuzzOk++; else if (!fuzzWhy) fuzzWhy = p.join('.') + '=' + String(v) + ': ' + r;
+    });
+  });
+  const band = R.RNG.create(77);
+  let bandOk = 0;
+  for (let i = 0; i < 2000; i++) {
+    const raw = [];
+    let sum = 0;
+    for (let e = 0; e < 13; e++) { raw.push(0.01 + band.next()); sum += raw[e]; }
+    const target = 0.985 + 0.03 * band.next(), w = raw.map(function (x) { return x / sum * target; });
+    if (band.chance(0.3)) w[band.int(13)] = band.next() * 2e-4;
+    const aj = JSON.stringify(R.Brain.create({ w: w }).serialize());
+    if (JSON.stringify(R.Brain.create(JSON.parse(aj)).serialize()) === aj) bandOk++;
+  }
+  console.log('  corrupt saves: ' + fuzzOk + '/' + fuzzN + ' single-field corruptions reload-exact;  ' + bandOk + '/2000 weight sets near the slack a byte fixed point');
+  check('single-field corruptions of a trained save, and weights near the rounding slack or under 0.0001, all load reload-exact',
+        fuzzOk === fuzzN && bandOk === 2000, fuzzOk + '/' + fuzzN + ', ' + bandOk + '/2000' + (fuzzWhy ? '; ' + fuzzWhy : ''));
+})();
+
+// ================================================================ 3b. reload-exact: lockstep
+// A reload must never change what the Rival does next. quant() (brain.js) keeps the live state equal to what its
+// save holds, and serialize() writes one canonical key order. Two measures, both over 2,000-turn games with a
+// beginRun every 40 turns (days >= 7 one time in ten), forget(0.5) every 333, 10% noTell and 10% mimic turns, the
+// local rules model and the scripted players in rotation (125 turns each):
+//   snapshot: every turn a brain rebuilt from the live brain's save answers the same question with the same dice;
+//             predict, the sealed object, the rng draws, dossier, honesty, trust, runScore, habitFor and runInsights
+//             must be bit-equal (Object.is on every number). After every observe the save must be a byte fixed
+//             point (JSON of serialize(create(save)) === JSON of the save) and hold no -0.
+//   chained:  two games on the same dice and player streams; one brain never reloads, the other is rebuilt from its
+//             own save before every turn. Every sealed object, player move and the final save must match.
+section('3b. Reload-exact: lockstep (2,000-turn games: snapshot every turn, chained reload before every turn)');
+(function () {
+  const FULL = process.env.RIVAL_LOCKSTEP === 'full';
+  const TURNS = 2000, SNAP_GAMES = FULL ? 100 : 1, CHAIN_GAMES = FULL ? 100 : 20;
+  const names = Object.keys(PLAYERS);
+  function game(seed) {
+    return { seed: seed, rng: R.RNG.create(seed * 7919 + 13), prng: R.RNG.create(seed * 104729 + 71), sit: R.RNG.create(seed * 31 + 5),
+             mem: { i: 0 }, d: newDuel(1) };
+  }
+  function lifecycle(b, g, i) {
+    if (i > 0 && i % 40 === 0) b.beginRun({ days: g.sit.chance(0.1) ? 8 : 0 });
+    if (i > 0 && i % 333 === 0) b.forget(0.5);
+  }
+  function finish(g, b, q, sealed, i) {
+    const pm = answer(names[Math.floor(i / 125) % names.length], q, sealed, g.prng, g.mem, i);
+    b.observe(q.ctx, q.noTell ? null : sealed.tell, pm, sealed.move);
+    if (resolve(g.d, pm, sealed.move).over) g.d = newDuel(g.d.n % 7 + 1);
+    return pm;
+  }
+  const t0 = Date.now();
+  // --- snapshot
+  const S = { turns: 0, predict: 0, sealed: 0, dice: 0, dossier: 0, honesty: 0, trust: 0, runScore: 0, habitFor: 0, insights: 0, all: 0,
+              fixed: 0, negZero: 0, modes: {}, firstMiss: -1, firstFix: -1 };
+  for (let k = 0; k < SNAP_GAMES; k++) {
+    const g = game(1 + k), live = R.Brain.create(null);
+    live.beginRun({ days: 0 });
+    for (let i = 0; i < TURNS; i++) {
+      lifecycle(live, g, i);
+      const q = rampQuestion(g.d, g.sit, true);
+      const copy = reload(live);
+      const rs = g.rng.state(), r1 = R.RNG.create(1), r2 = R.RNG.create(1);
+      r1.setState(rs); r2.setState(rs);
+      const ok = {
+        predict: bitSame(live.predict(q.ctx, q.legalP), copy.predict(q.ctx, q.legalP)),
+        sealed: false, dice: false,
+        dossier: bitSame(live.dossier(), copy.dossier()),
+        honesty: Object.is(live.honesty(q.honestyBase), copy.honesty(q.honestyBase)),
+        trust: Object.is(live.trust(), copy.trust()),
+        runScore: Object.is(live.runScore(), copy.runScore()),
+        habitFor: bitSame(live.habitFor(q.ctx), copy.habitFor(q.ctx)),
+        insights: bitSame(live.runInsights(), copy.runInsights())
+      };
+      const sL = live.commit(Object.assign({}, q, { rng: r1 })), sC = copy.commit(Object.assign({}, q, { rng: r2 }));
+      ok.sealed = bitSame(sL, sC);
+      ok.dice = r1.state() === r2.state();
+      g.rng.setState(r1.state());
+      S.modes[sL.mode] = (S.modes[sL.mode] || 0) + 1;
+      let all = true;
+      for (const key of Object.keys(ok)) { if (ok[key]) S[key]++; else all = false; }
+      S.turns++;
+      if (all) S.all++; else if (S.firstMiss < 0) S.firstMiss = k * TURNS + i;
+      finish(g, live, q, sL, i);
+      // byte fixed point of the LIVE brain's save after every observe
+      const save = live.serialize(), aj = JSON.stringify(save), bj = JSON.stringify(R.Brain.create(JSON.parse(aj)).serialize());
+      if (aj === bj) S.fixed++; else if (S.firstFix < 0) S.firstFix = k * TURNS + i;
+      if (hasNegZero(save)) S.negZero++;
+    }
+  }
+  const tSnap = Date.now() - t0;
+  console.log('  snapshot, ' + SNAP_GAMES + ' game(s) x ' + TURNS + ' turns (modes ' + JSON.stringify(S.modes) + '): all outputs bit-equal on ' + S.all + '/' + S.turns +
+              (S.firstMiss >= 0 ? ' (first miss at turn ' + S.firstMiss + ')' : '') + ';  ' +
+              ['predict', 'sealed', 'dice', 'dossier', 'honesty', 'trust', 'runScore', 'habitFor', 'insights'].map(function (key) { return key + ' ' + S[key]; }).join(', ') +
+              ';  ' + (tSnap / 1000).toFixed(1) + ' s');
+  console.log('  byte fixed point after every observe: ' + S.fixed + '/' + S.turns + (S.firstFix >= 0 ? ' (first failure at turn ' + S.firstFix + ')' : '') + ';  saves holding -0: ' + S.negZero);
+  check('lockstep (snapshot): a brain rebuilt from the live save agrees bit-for-bit on predict, seal, dice, dossier, honesty, trust, runScore, habitFor, runInsights',
+        S.all === S.turns && S.turns === SNAP_GAMES * TURNS && S.modes.mimic > 0 && S.modes.exploit > 0 && S.modes.mix > 0, S.all + '/' + S.turns);
+  check('byte fixed point after every observe on the live brain (serialize(create(save)) === save as text), never a -0',
+        S.fixed === S.turns && S.negZero === 0, S.fixed + '/' + S.turns + ', -0 in ' + S.negZero);
+
+  // --- chained: a game goes on until the play itself differs (move, stance or player answer), so both the first
+  // bit-level difference (any sealed number, or the dice) and the first different play are measured
+  const t1 = Date.now();
+  let chainTurns = 0, finalSame = 0;
+  const bitAt = [], playAt = [];
+  for (let k = 0; k < CHAIN_GAMES; k++) {
+    const gA = game(101 + k), gB = game(101 + k);
+    const A = R.Brain.create(null);
+    let B = R.Brain.create(null), firstBit = -1, firstPlay = -1;
+    A.beginRun({ days: 0 }); B.beginRun({ days: 0 });
+    for (let i = 0; i < TURNS && firstPlay < 0; i++) {
+      lifecycle(A, gA, i); lifecycle(B, gB, i);
+      B = reload(B);
+      const qA = rampQuestion(gA.d, gA.sit, true), qB = rampQuestion(gB.d, gB.sit, true);
+      const sA = A.commit(Object.assign({}, qA, { rng: gA.rng })), sB = B.commit(Object.assign({}, qB, { rng: gB.rng }));
+      const pA = finish(gA, A, qA, sA, i), pB = finish(gB, B, qB, sB, i);
+      chainTurns++;
+      if (firstBit < 0 && (!bitSame(sA, sB) || gA.rng.state() !== gB.rng.state())) firstBit = i;
+      if (sA.move !== sB.move || sA.tell !== sB.tell || pA !== pB) firstPlay = i;
+    }
+    if (firstBit >= 0) bitAt.push(firstBit);
+    if (firstPlay >= 0) playAt.push(firstPlay);
+    if (firstBit < 0 && firstPlay < 0 && JSON.stringify(A.serialize()) === JSON.stringify(B.serialize()) && bitSame(A.dossier(), B.dossier())) finalSame++;
+  }
+  const spread = function (a) {
+    a.sort(function (x, y) { return x - y; });
+    return a.length ? ' (first at turn min/median/max ' + a[0] + '/' + a[a.length >> 1] + '/' + a[a.length - 1] + ')' : '';
+  };
+  const tChain = Date.now() - t1;
+  console.log('  chained, ' + CHAIN_GAMES + ' games x ' + TURNS + ' turns (' + chainTurns + ' reloads): games whose seal differs to the bit ' + bitAt.length + '/' + CHAIN_GAMES + spread(bitAt) +
+              ';  whose move, stance or answer differs ' + playAt.length + '/' + CHAIN_GAMES + spread(playAt) +
+              ';  identical final save and dossier ' + finalSame + '/' + CHAIN_GAMES + ';  ' + (tChain / 1000).toFixed(1) + ' s' + (FULL ? '' : '  (RIVAL_LOCKSTEP=full: 100 snapshot and 100 chained games)'));
+  check('lockstep (chained): a brain reloaded before every turn never diverges from one never reloaded (' + CHAIN_GAMES + ' games x ' + TURNS + ' turns)',
+        bitAt.length === 0 && playAt.length === 0 && finalSame === CHAIN_GAMES && chainTurns === CHAIN_GAMES * TURNS,
+        bitAt.length + ' differ to the bit, ' + playAt.length + ' in play, ' + finalSame + ' identical at the end');
+
+  // --- where quant() runs: only at the end of create/observe/beginRun/forget, never in commit or a read
+  const code = fs.readFileSync(path.join(SRC, 'ai', 'brain.js'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const where = [], re = /\bquant\(/g;
+  let m;
+  while ((m = re.exec(code))) {
+    const fns = code.slice(0, m.index + 6).match(/function\s+\w+\s*\(/g) || [];
+    where.push(fns.length ? /function\s+(\w+)/.exec(fns[fns.length - 1])[1] : '?');
+  }
+  check('brain.js calls quant() only in create, observe, beginRun and forget (once each)', where.join(',') === 'quant,create,observe,beginRun,forget', where.join(','));
+})();
+
+// ================================================================ 3c. saves written by earlier builds (OLD_PLAY, OLD_SAVES above section 0)
+section('3c. Saves written by earlier builds load and play (' + Object.keys(OLD_PLAY).join(', ') + ')');
+(function () {
+  const REGEN = process.env.RIVAL_OLD_SAVES === 'check';
+  let regen = 0, regenSame = 0;
+  const names = Object.keys(PLAYERS);
+  const fixedOrder = function (txt) {          // the same save with pk in the canonical order
+    const o = JSON.parse(txt), pk = {};
+    for (const id of PEAK_ORDER) if (o.pk[id]) pk[id] = o.pk[id];
+    o.pk = pk;
+    return JSON.stringify(o);
+  };
+  for (const sha of Object.keys(OLD_PLAY)) {
+    const txt = OLD_SAVES[sha];
+    if (typeof txt !== 'string') { check(sha + ': embedded save present', false, 'missing: run RIVAL_OLD_SAVES=print node tools/test_brain.js'); continue; }
+    const B = REGEN ? brainAt(sha) : null;
+    if (B) { regen++; if (oldSavePlay(B, OLD_PLAY[sha]) === txt) regenSame++; }
+    const save = JSON.parse(txt), pkOrder = Object.keys(save.pk);
+    const canonical = pkOrder.every(function (k, i) { return i === 0 || PEAK_ORDER.indexOf(pkOrder[i - 1]) < PEAK_ORDER.indexOf(k); });
+    let loaded = false, lossless = false, plays = false, fixed = false, why = '';
+    try {
+      const b = R.Brain.create(JSON.parse(txt));
+      loaded = true;
+      lossless = JSON.stringify(b.serialize()) === fixedOrder(txt);
+      // then it plays on: 600 turns with every lifecycle call and every boss mode, all legal and finite
+      const g = { rng: R.RNG.create(7), prng: R.RNG.create(8), sit: R.RNG.create(9), mem: { i: 0 } };
+      let d = newDuel(1), bad = 0, fixedN = 0;
+      b.beginRun({ days: 3 });
+      for (let i = 0; i < 600; i++) {
+        if (i === 300) { b.forget(0.5); b.beginRun({ days: 8 }); }
+        const q = rampQuestion(d, g.sit, true);
+        const s = b.commit(Object.assign({}, q, { rng: g.rng }));
+        if (sealedProblems(s, q.legalR, q.legalP).filter(function (x) { return x.indexOf('mode') !== 0; }).length) bad++;
+        const pm = answer(names[i % names.length], q, s, g.prng, g.mem, i);
+        b.observe(q.ctx, q.noTell ? null : s.tell, pm, s.move);
+        const aj = JSON.stringify(b.serialize());
+        if (aj === JSON.stringify(R.Brain.create(JSON.parse(aj)).serialize())) fixedN++;
+        if (resolve(d, pm, s.move).over) d = newDuel(d.n % 7 + 1);
+      }
+      b.dossier(); b.runInsights(); b.habitFor(ctxOf(d));
+      const js = JSON.stringify(b.serialize());
+      plays = bad === 0 && js.indexOf('null') < 0 && js.indexOf('NaN') < 0 && b.serialize().runs === save.runs + 2;
+      fixed = fixedN === 600;
+      why = 'bad seals ' + bad + ', fixed point ' + fixedN + '/600';
+    } catch (e) { why = String(e && e.stack || e); }
+    console.log('  ' + sha + ': ' + txt.length + ' bytes, n ' + save.n + ', runs ' + save.runs + ', pk ' + pkOrder.join(',') + (canonical ? '' : ' (not canonical)'));
+    check(sha + ': its save loads without throwing and nothing is lost (same numbers; only pk is reordered)', loaded && lossless, why);
+    check(sha + ': the loaded brain plays 600 turns (beginRun, forget, noTell, mimic): legal seals, a byte fixed point every turn', plays && fixed, why);
+  }
+  const anyOld = Object.keys(OLD_SAVES).some(function (sha) {
+    const k = Object.keys(JSON.parse(OLD_SAVES[sha]).pk);
+    return k.some(function (id, i) { return i > 0 && PEAK_ORDER.indexOf(k[i - 1]) > PEAK_ORDER.indexOf(id); });
+  });
+  check('at least one old save holds pk out of canonical order (so the reorder path is exercised)', anyOld);
+  if (!REGEN) console.log('  (the embedded text is used as it is; RIVAL_OLD_SAVES=check regenerates it from git history with this harness)');
+  else if (regen) check('the embedded saves are exactly what those builds write (regenerated from git history with this harness)', regenSame === regen, regenSame + '/' + regen);
+  else console.log('  (no git history here: nothing to regenerate)');
 })();
 
 // ================================================================ 4. learning benchmark

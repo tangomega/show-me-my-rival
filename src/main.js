@@ -8,12 +8,13 @@
   function freshSeed() { return ((now() & 0xffffffff) ^ Math.floor(Math.random() * 0x100000000)) >>> 0; }
   // A stored run must be complete enough to resume. Anything else (hand-edited or half-written storage, a save from
   // an older build) is dropped; a current duel or commit of an older shape is dropped alone, so the duel restarts
-  // and the run survives.
+  // and the run survives. A face or phase this build cannot read is repaired by R.Run.repairRun (never dropped).
   function validRun(run) {
     if (!(run && typeof run === 'object' && run.stats && typeof run.stats === 'object' && Array.isArray(run.pBoons) && Array.isArray(run.rBoons))) return false;
     if (run.stage !== 'duel' && run.stage !== 'bonfire') return false;      // 'won' / 'dead' are never resumable
     if (!(run.duelN >= 1 && run.duelN <= 7 && run.pHp >= 0 && run.pMaxHp >= 1)) return false;
     if (run.stage === 'bonfire' && !(run.offer && Array.isArray(run.offer.choices))) return false;
+    R.Run.repairRun(run, G.meta);
     var d = run.duel, q = run.pending && run.pending.sealed;
     if (d && !(d.turn >= 1 && d.tally && d.p && d.r && d.p.status && d.r.status && d.p.status.sealed && d.r.status.sealed &&
                d.p.counters && d.r.counters && d.p.charges && d.r.charges && Array.isArray(d.p.moves) && Array.isArray(d.r.moves) &&
@@ -22,6 +23,17 @@
     }
     if (run.pending && !(q && q.pred && typeof q.move === 'string' && typeof q.tell === 'string')) run.pending = null;
     return true;
+  }
+  // The run to resume from a loaded save (R.Save.data), or null. A run made under newer rules than this build's
+  // (run.req above R.Run.RULES) is parked: moved to the save's single parked slot, kept, never played and never
+  // counted. A parked run this build can read again comes back when no other run is in progress.
+  function loadRun(d) {
+    var run = d.run, pk;
+    if (run && typeof run === 'object' && R.Run.reqOf(run) > R.Run.RULES) { d.parked = run; d.run = run = null; }
+    if (validRun(run)) return run;
+    pk = d.parked;
+    if (pk && typeof pk === 'object' && !Array.isArray(pk) && R.Run.reqOf(pk) <= R.Run.RULES && validRun(pk)) { delete d.parked; return pk; }
+    return null;
   }
 
   // The nearest thing still locked: shown on the death screen as a reason to go again.
@@ -38,14 +50,25 @@
   var G = R.Game = {
     brain: null, meta: null, run: null, rng: null, crng: null, days: 0, last: null,
 
+    // true when the save reached storage. A stale tab (another tab saved after this one loaded) writes nothing.
     save: function () {
+      if (R.Save.stale) return false;
       try {
         var d = R.Save.data;
         d.brain = G.brain.serialize();
         d.meta = G.meta;
         d.run = G.run;
-        R.Save.commit();
-      } catch (e) { /* a storage failure must never stop the game */ }
+        return R.Save.commit();
+      } catch (e) { return false; }              // a storage failure must never stop the game
+    },
+
+    // A stale tab: load the save again as a fresh page would and start over from the title.
+    reboot: function () {
+      load();
+      G.last = null;
+      var st = R.Save.data.settings;
+      if (R.Audio && R.Audio.setMuted && !!R.Audio.muted !== !!st.muted) R.Audio.setMuted(!!st.muted);
+      E.go('title', null, 0);                    // no fade: the old scene must not run on with the new state
     },
 
     hasRun: function () { return !!(G.run && (G.run.stage === 'duel' || G.run.stage === 'bonfire')); },
@@ -185,6 +208,7 @@
 
     resetAll: function () {
       R.Save.reset();
+      if (R.Save.stale) { G.reboot(); return; }  // another tab saved since: its save is not erased from here
       G.brain = R.Brain.create(null);
       G.meta = R.Run.defaultMeta();
       G.run = null; G.last = null; G.days = 0;
@@ -193,19 +217,42 @@
     }
   };
 
-  function boot() {
-    var storage = null, name;
+  // The boot load: the save from storage, the brain, the meta, the run to resume, and fresh dice. A stale tab
+  // reboots through it too.
+  function load() {
+    var storage = null;
     try { storage = window.localStorage; } catch (e) { storage = null; }
     R.Save.init(storage);
     var d = R.Save.data;
-    E = R.Engine;
     G.brain = R.Brain.create(d.brain || null);
     G.meta = (d.meta && typeof d.meta === 'object') ? d.meta : R.Run.defaultMeta();
-    G.run = validRun(d.run) ? d.run : null;
+    G.run = loadRun(d);
     G.days = G.run ? (G.run.daysAway || 0) : 0;
     var seed = freshSeed();
     G.rng = R.RNG.create(seed);
     G.crng = R.RNG.create(seed ^ 0x2545f491);
+  }
+
+  function boot() {
+    var name;
+    E = R.Engine;
+    load();
+
+    // Another tab saved (a storage event) or this tab's next save found a newer generation: R.Save is stale and
+    // writes nothing. The next tap or key press (swallowed: it must not pick a move in the old state) or the page
+    // coming back into view reloads the save. These run before the engine's own listeners (bound in E.start).
+    var keys = [R.Save.KEY, R.Save.GEN_KEY], cap = { capture: true, passive: false };
+    var wake = function (e) {
+      if (!R.Save.stale && !R.Save.check()) return;  // check(): another tab saved and no storage event came
+      try { if (e.stopImmediatePropagation) e.stopImmediatePropagation(); if (e.cancelable && e.preventDefault) e.preventDefault(); } catch (x) { /* ignore */ }
+      G.reboot();
+    };
+    var shown = function () { if (document.visibilityState !== 'hidden' && (R.Save.stale || R.Save.check())) G.reboot(); };
+    window.addEventListener('storage', function (e) { if (!e || e.key === null || keys.indexOf(e.key) >= 0) R.Save.changedElsewhere(); });
+    window.addEventListener('pointerdown', wake, cap);
+    window.addEventListener('touchstart', wake, cap);
+    window.addEventListener('mousedown', wake, cap);
+    window.addEventListener('keydown', wake, cap);
 
     R.Art.init();
     E.init(document.getElementById('game'));
@@ -217,8 +264,9 @@
     else { E.go(first, null, 0.3); E.start(); }
 
     var flush = function () { if (G.brain && G.meta) G.save(); };
-    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(); else shown(); });
     window.addEventListener('pagehide', flush);
+    window.addEventListener('pageshow', shown);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

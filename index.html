@@ -135,8 +135,12 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   'use strict';
 
   var KEY = 'rival.save.v1';
+  // The save's generation: a decimal integer string, bumped after every successful save write. A tab that finds a
+  // generation it did not read or write itself is stale (another tab saved since): it writes nothing from then on.
+  var GEN_KEY = 'rival.save.v1.gen';
   var store = null;      // storage-like object or null
   var mem = null;        // last serialized save (in-memory fallback, also used if setItem throws)
+  var myGen = 0;         // the generation this tab last read or wrote
 
   function defaults() {
     return {
@@ -175,15 +179,39 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     return d;
   }
 
+  // Generations are written as plain decimal integers below GEN_WRAP (after GEN_WRAP - 1 comes 1), so every one this
+  // code writes reads back as the same number.
+  var GEN_WRAP = 1e9;
+  // The stored generation: an integer (0 when missing or garbage, including a value too long to be one this code
+  // wrote), or null when storage cannot be read.
+  function readGen() {
+    var g;
+    try { g = store.getItem(GEN_KEY); } catch (e) { return null; }
+    return typeof g === 'string' && /^\d{1,9}$/.test(g) ? +g : 0;
+  }
+  // false (and stale from then on) when another tab saved since this one last read or wrote. No storage, or a
+  // generation that cannot be read, is memory-only, never stale.
+  function fresh() {
+    if (Save.stale) return false;
+    if (!store) return true;
+    var g = readGen();
+    if (g !== null && g !== myGen) { Save.stale = true; return false; }
+    return true;
+  }
+
   var Save = {
     KEY: KEY,
+    GEN_KEY: GEN_KEY,
     data: defaults(),
     persistent: false,          // true once a real storage read or write has succeeded
+    stale: false,               // another tab saved after this one loaded: nothing is written until a reload
 
     init: function (storageLike) {
       var txt = null;
       store = null;
+      myGen = 0;
       Save.persistent = false;
+      Save.stale = false;
       try {
         if (storageLike && typeof storageLike.getItem === 'function' && typeof storageLike.setItem === 'function') {
           store = storageLike;
@@ -191,24 +219,41 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
           Save.persistent = true;
         }
       } catch (e) { store = null; Save.persistent = false; }
-      if (txt == null) txt = mem;
+      if (store) myGen = readGen() || 0;
+      // The in-memory copy stands in only for storage that cannot be read. Storage that was read and holds no save
+      // (cleared by another tab or by hand) is believed: a stale tab that reboots must not bring its own copy back.
+      if (txt == null && !store) txt = mem;
       var raw = null;
       try { if (typeof txt === 'string' && txt) raw = JSON.parse(txt); } catch (e2) { raw = null; }
       Save.data = repair(raw);
       return Save.data;
     },
 
+    // Re-reads the generation: true when this tab is (now) stale. Never writes.
+    check: function () { return !fresh(); },
+    // Another tab wrote the save (a storage event): stale, unless this tab has no storage to share.
+    changedElsewhere: function () { if (store) Save.stale = true; },
+
     commit: function () {
-      var txt;
+      var txt, cur, next;
+      if (!fresh()) return false;                                            // a newer save from another tab: keep it
       try { txt = JSON.stringify(Save.data); } catch (e) { return false; }   // cyclic data: keep the previous save
       if (typeof txt !== 'string') return false;
       mem = txt;
       if (!store) return false;
-      try { store.setItem(KEY, txt); Save.persistent = true; return true; }
+      // Storage already holds exactly this save: nothing is written and no new generation is taken, so a tab that
+      // saves with nothing new (an idle second tab hidden or closed) never makes another tab stale.
+      try { cur = store.getItem(KEY); } catch (e1) { cur = null; }
+      if (cur === txt) return true;
+      try { store.setItem(KEY, txt); Save.persistent = true; }
       catch (e2) { Save.persistent = false; return false; }                  // quota / private mode: memory only
+      next = myGen + 1 < GEN_WRAP ? myGen + 1 : 1;
+      try { store.setItem(GEN_KEY, String(next)); myGen = next; } catch (e3) { /* the save is written; the generation stays */ }
+      return true;
     },
 
     reset: function () {
+      if (!fresh()) return Save.data;                                        // never erase another tab's newer save
       Save.data = defaults();
       mem = null;
       try { if (store && typeof store.removeItem === 'function') store.removeItem(KEY); } catch (e) { /* ignore */ }
@@ -7032,6 +7077,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   var CAT_NAME = ['counter', 'mirror', 'under'];
 
   // Experts: index, number of keys. 0..9 = E0..E9 (habit), 10..12 = T0..T2 (tell response).
+  // Save layout (frozen): slot e of w, c, life and run is expert e, in this order. w is always written as
+  // exactly 13 numbers (load drops any other length). A future expert never takes or shifts a slot: its
+  // weight goes in a side key of the brain object (`wa`) and its tables are appended after index 12 in c,
+  // life and run; NE grows in memory only. A save without it loads with the new expert at its start state,
+  // and the 13 stored weights keep their ratios to one another.
   var NE = 13, NH = 10;
   var SIZES = [1, 3, 9, 3, 9, 2, 1, 3, 4, 4, 1, 3, 3];
   var E_GLOBAL = 0, E_PREV = 1, E_PREV2 = 2, E_LAST = 3, E_LOW = 5, E_OPEN = 6, E_RPREV = 7,
@@ -7085,10 +7135,28 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   // ---------- small helpers ----------
 
   function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
-  function num(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(x, a, b) : d; }
-  function int(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(Math.round(x), a, b) : d; }
+  // +0 folds a -0 (JSON.parse reads "-0", and Math.round(-0.3) is -0) so a loaded field never holds one.
+  function num(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(x, a, b) + 0 : d; }
+  function int(x, a, b, d) { return (typeof x === 'number' && isFinite(x)) ? clamp(Math.round(x), a, b) + 0 : d; }
   function r3(x) { return Math.round(x * 1000) / 1000; }
   function r4(x) { return Math.round(x * 10000) / 10000; }
+  // A weight as the save holds it: 4 dp and never below 0.0001, because load() rejects a w holding a 0.
+  // Weights in play sit far above it (observe floors them at K.W_FLOOR); only a hand-edited save reaches it.
+  function rw(x) { return Math.max(1e-4, r4(x)); }
+  // Reload-exact state: round every real-valued field to the precision serialize() writes (w by rw(), ema 4 dp,
+  // c and rs 3 dp; +0 folds -0). Run at the end of create (after load), observe, beginRun and forget, never
+  // in commit or any read, so the live brain always equals R.Brain.create(its own save) bit for bit. The
+  // integer fields (n, runs, life, run, t2, rn, pk) are exact already (int() folds -0).
+  function quant(s) {
+    for (var e = 0; e < NE; e++) {
+      s.w[e] = rw(s.w[e]);
+      var c = s.c[e];
+      for (var i = 0; i < c.length; i++) c[i] = r3(c[i]) + 0;
+    }
+    s.ema = r4(s.ema) + 0;
+    s.rs = r3(s.rs) + 0;
+    return s;
+  }
   function mi(m) { var i = MI[m]; return i === undefined ? -1 : i; }
 
   function newTables() {
@@ -7138,13 +7206,16 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     s.n = int(src.n, 0, 1e9, 0);
     s.runs = int(src.runs, 0, 1e9, 0);
     if (Array.isArray(src.w) && src.w.length === NE) {
-      var sum = 0, ok = true, e;
+      var sum = 0, qsum = 0, ok = true, e;
       for (e = 0; e < NE; e++) {
         if (typeof src.w[e] !== 'number' || !isFinite(src.w[e]) || src.w[e] <= 0) { ok = false; break; }
-        sum += src.w[e];
+        sum += src.w[e]; qsum += rw(src.w[e]);
       }
-      if (ok && sum > 0) {
-        var div = Math.abs(sum - 1) < 0.01 ? 1 : sum;          // rounding slack: keep as stored (stable round trip)
+      if (ok && isFinite(sum)) {
+        // Rounding slack: keep the weights as stored when, as quant() leaves them, they sum to 1 within 0.01, so
+        // the save that quant() writes keeps them too (a stable round trip); otherwise renormalise, which quant()
+        // then moves by at most 13 x 0.0001. A sum that overflows is a corrupt w, so the weights stay fresh.
+        var div = Math.abs(qsum - 1) < 0.01 ? 1 : sum;
         for (e = 0; e < NE; e++) s.w[e] = src.w[e] / div;
       }
     }
@@ -7289,7 +7360,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   // ---------- the brain ----------
 
   function create(serialized) {
-    var s = load(serialized);
+    var s = quant(load(serialized));                         // load can return early, so quant here
     var fbState = 0x9e3779b9;
     var fallbackRng = { next: function () {                    // only if the caller forgot q.rng
       fbState = (Math.imul(fbState, 1664525) + 1013904223) >>> 0;
@@ -7575,6 +7646,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
       s.n++;
       trackPeaks(keys, restricted);
+      quant(s);
     }
 
     // --- dossier ---
@@ -7872,17 +7944,25 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       s.run = newTables();
       s.rs = 0; s.rn = 0; s.t2 = 0;
       s.runs++;
+      quant(s);
     }
 
     function forget(f) {
       scaleCounts(num(f, 0, 1, 0.5));
       for (var e = 0; e < NE; e++) s.w[e] = (s.w[e] + 1 / NE) / 2;
+      quant(s);
     }
 
+    // Canonical: every key in one fixed order (pk in PEAK_IDS order, not insertion order), so
+    // serialize(create(serialize(b))) is byte-identical to serialize(b). A new map must do the same.
     function serialize() {
-      var w = [], pk = {}, e, id;
+      var w = [], pk = {}, e, i, id;
       for (e = 0; e < NE; e++) w.push(r4(s.w[e]));
-      for (id in s.pk) { var p = s.pk[id]; pk[id] = { k: p.k, m: p.m, p: p.p, r: p.r, s: p.s }; }
+      for (i = 0; i < PEAK_IDS.length; i++) {
+        id = PEAK_IDS[i];
+        var p = s.pk[id];
+        if (p) pk[id] = { k: p.k, m: p.m, p: p.p, r: p.r, s: p.s };
+      }
       return { v: 1, n: s.n, runs: s.runs, w: w,
                c: writeTables(s.c, false), life: writeTables(s.life, true), run: writeTables(s.run, true),
                t2: s.t2, ema: r4(s.ema), rs: r3(s.rs), rn: s.rn, pk: pk };
@@ -8946,6 +9026,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     { id: 'unsaid', name: 'The Unsaid' }                            // 7: Called Shot in every duel
   ];
   var VIGIL_MAX = VIGIL.length;
+  // The rules a run is made under. A newer build that changes what a stored run means raises it; a build whose
+  // R.Run.RULES is below a run's run.req parks that run (keeps it, never plays it). Read as R.Run.RULES at call time.
+  var RULES = 0;
 
   var NAMES = ['The Nave', 'Vespers', 'The Leak', 'Draught', 'The Wake', 'Blood Moon', 'The Altar'];
   var VARIANTS = ['nave', 'vespers', 'leak', 'draught', 'wake', 'bloodmoon', 'altar'];
@@ -9039,6 +9122,36 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function phaseCount(run) { return bossOf(run).phases.length; }
   function clampStake(v) { v = Math.floor(num(v, 0)); return v < 0 ? 0 : v > VIGIL_MAX ? VIGIL_MAX : v; }
   function stakeOf(run) { return run ? clampStake(run.stake) : 0; }
+  function isObj(o) { return !!o && typeof o === 'object' && !Array.isArray(o); }
+  function hiOf(v) { return typeof v === 'number' && v > 0 && isFinite(v) ? Math.floor(v) : 0; }
+  // The rules a stored run needs (0 for a run made before run.req existed, or a garbage value).
+  function reqOf(run) { var q = run && typeof run === 'object' ? run.req : 0; return typeof q === 'number' && q > 0 ? Math.floor(q) : 0; }
+
+  // A stored run whose face or phase this build cannot read is repaired, never dropped and never silently fought as
+  // another face. A missing run.boss (a run from before the faces) still means The Unmasked. A missing or garbage
+  // run.phase comes back from the duel's own phase, else 1. A face this build does not know is redrawn from the
+  // earned faces on the run's own face stream (the one create() draws from) and becomes meta.bosses.last; in the
+  // final duel that restarts duel 7 at phase 1, and so does a phase past the face's count.
+  // In place. Returns { redrawn, restart }.
+  function repairRun(run, meta) {
+    var out = { redrawn: false, restart: false };
+    if (!isObj(run)) return out;
+    meta = repair(meta);
+    var d = isObj(run.duel) ? run.duel : null, ph = run.phase, atAltar = run.duelN === 7 && run.stage === 'duel';
+    if (typeof ph !== 'number' || !isFinite(ph)) ph = d && typeof d.phase === 'number' && isFinite(d.phase) ? d.phase : 1;
+    run.phase = Math.max(1, Math.floor(ph));
+    if (run.boss !== undefined && run.boss !== null && bossIndex(run.boss) < 0) {
+      var bs = meta.bosses, faces = [], fi;
+      for (fi = 0; fi < bs.max; fi++) faces.push(BOSSES[fi].id);
+      run.boss = faces[R.RNG.create((num(run.seed, 0) ^ 0x7f4a7c15) >>> 0).int(faces.length)];
+      bs.last = run.boss;
+      out.redrawn = true;
+      if (atAltar) out.restart = true;
+    }
+    if (run.phase > phaseCount(run)) { run.phase = 1; if (atAltar) out.restart = true; }
+    if (out.restart) { run.phase = 1; run.duel = null; run.pending = null; }
+    return out;
+  }
 
   // Fill in anything a stored meta is missing (older saves, hand-edited storage). In place.
   function repair(meta) {
@@ -9058,16 +9171,25 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
         else if (v === undefined) meta[name][k] = dv;
       }
     }
-    var vg = meta.vigil;
+    // Shadow high-water keys: vigil.hi and bosses.hi (the most lights / faces ever earned) and vigil.winsX (wins with
+    // more lights out than this build has). They are never clamped or dropped, so a build with fewer lights or faces
+    // that saves this meta cannot lower what a later build reads back; max and wins stay the clamped view it plays.
+    var vg = meta.vigil, wx;
     if (!vg || typeof vg !== 'object') vg = meta.vigil = d.vigil;
-    vg.max = clampStake(vg.max);
+    vg.max = clampStake(Math.max(num(vg.max, 0), hiOf(vg.hi)));
     vg.sel = Math.min(clampStake(vg.sel), vg.max);
     if (!Array.isArray(vg.wins)) vg.wins = [];
+    for (k = VIGIL_MAX + 1; k < vg.wins.length; k++) {
+      wx = Math.max(0, Math.floor(num(vg.wins[k], 0)));
+      if (!(wx > 0)) continue;
+      if (!isObj(vg.winsX)) vg.winsX = {};
+      vg.winsX[String(k)] = Math.max(hiOf(vg.winsX[String(k)]), wx);
+    }
     for (k = 0; k <= VIGIL_MAX; k++) vg.wins[k] = Math.max(0, Math.floor(num(vg.wins[k], 0)));
     vg.wins.length = VIGIL_MAX + 1;
     var bs = meta.bosses;
     if (!bs || typeof bs !== 'object') bs = meta.bosses = d.bosses;
-    bs.max = Math.max(1, Math.min(BOSSES.length, Math.floor(num(bs.max, 1))));
+    bs.max = Math.max(1, Math.min(BOSSES.length, Math.floor(Math.max(num(bs.max, 1), hiOf(bs.hi)))));
     if (!bs.wins || typeof bs.wins !== 'object') bs.wins = {};
     if (bossIndex(bs.last) < 0) bs.last = null;
     return meta;
@@ -9143,7 +9265,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       finished: null,
       stake: stake,                            // the Vigil: how many lights are out for this run
       rivalHead: null,                         // The Empty Hand: the boon the Rival walked in with
-      boss: BOSSES[0].id                       // the face it will wear in duel 7
+      boss: BOSSES[0].id,                      // the face it will wear in duel 7
+      req: R.Run.RULES                         // the rules it is made under: a build below them parks it
     };
     // Which face: any earned one, but not the one from the previous run (its own stream: the run's rng is untouched).
     var bs = meta.bosses, bi = bossIndex(o.boss);
@@ -9284,8 +9407,11 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   }
 
   // Final duel only: the Rival changes into phase k of its face. Keeps the player fighter (boons, counters, charges).
-  function startPhase(run, k) {
-    var s = statsOf(run);
+  // opts.rebuild: phase k is rebuilt for a stored run whose duel was dropped (an older duel shape): the player comes
+  // back from run.pHp with no second phase heal and no heal event; the Rival's per-duel counters and charges start
+  // over, and the seal of the turn in progress is made again.
+  function startPhase(run, k, opts) {
+    var s = statsOf(run), rebuild = !!(opts && opts.rebuild);
     var old = run.duel;
     run.duelN = 7;
     k = Math.max(2, Math.min(phaseCount(run), Math.floor(num(k, 2))));
@@ -9302,7 +9428,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     p.status = { guardBroken: 0, bleed: 0, fortify: 0, focus: 0, sealed: { S: 0, G: 0, F: 0 } };
     p.moves = [];
     p.results = [];
-    var healed = Math.max(0, Math.min(phaseHealOf(run, D), p.maxHp - p.hp));
+    var healed = rebuild ? 0 : Math.max(0, Math.min(phaseHealOf(run, D), p.maxHp - p.hp));
     p.hp += healed;
     r = rivalFighter(run, D);
     if (old) {                                   // same duel: per-duel caps and charges carry over
@@ -9717,14 +9843,14 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     var light = 0, vg = meta.vigil, st = stakeOf(run);
     if (won) {
       vg.wins[st]++;
-      if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; }
+      if (st >= vg.max && vg.max < VIGIL_MAX) { vg.max = st + 1; light = vg.max; vg.hi = Math.max(hiOf(vg.hi), vg.max); }
     }
 
     // The faces: beating the newest earned face earns the next. face = its id, or null.
     var face = null, bs = meta.bosses, bx = bossIndex(bossOf(run).id);
     if (won) {
       bs.wins[BOSSES[bx].id] = num(bs.wins[BOSSES[bx].id], 0) + 1;
-      if (bx === bs.max - 1 && bs.max < BOSSES.length) { bs.max++; face = BOSSES[bs.max - 1].id; }
+      if (bx === bs.max - 1 && bs.max < BOSSES.length) { bs.max++; face = BOSSES[bs.max - 1].id; bs.hi = Math.max(hiOf(bs.hi), bs.max); }
     }
 
     var firstWin = won && m.wins === 1;
@@ -9740,8 +9866,12 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     UNLOCKS: UNLOCKS,
     VIGIL: VIGIL,
     BOSSES: BOSSES,
+    RULES: RULES,
+    bossIndex: bossIndex,
     bossOf: bossOf,
     phaseCount: phaseCount,
+    reqOf: reqOf,
+    repairRun: repairRun,
     startPhase: startPhase,
     nextPhase: nextPhase,
     VIGIL_TUNE: VT,
@@ -11727,6 +11857,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   var OPT_R = { align: 'right' }, OPT_C = { align: 'center' }, OPT_CS = { align: 'center', shadow: 1 }, OPT_CS2 = { align: 'center', shadow: 1, scale: 2 };
   var MUTE_ST = { pressed: false, disabled: false };
   var OPT_P2 = { phase2: true }, BAR_P = { ticks: 0 }, BAR_R = { ticks: 0, flip: true };
+  var ACT_OPT = { disabled: false, pressed: false };              // reused for each active-boon button, every frame
   var ST_SPR = { guardBroken: 'st_guardBroken', bleed: 'st_bleed', fortify: 'st_fortify', focus: 'st_focus' };
   var ACT_SPR = { glimpse: 'act_glimpse', honesty: 'act_honesty', coin: 'act_coin' };
   var DIGIT = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
@@ -11912,9 +12043,12 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   }
 
   // ------------------------------------------------------------------ main flow
-  function* flow(resumed) {
+  // resumed: a stored duel goes on (no intro). rebuilt: a later phase of the final duel was rebuilt from a stored run
+  // whose duel had an older shape; it plays as resumed, with that phase's rule cards shown again.
+  function* flow(resumed, rebuilt) {
     var run = G.run;
-    if (!resumed) yield* intro();
+    if (rebuilt) yield* showCards(S.form.cards);
+    else if (!resumed) yield* intro();
     for (;;) {
       while (!S.duel.over) yield* turn();
       var winner = S.duel.over;
@@ -12021,6 +12155,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       sealed = pend.sealed; called = pend.called || null;
       duel.intel.called = called;
     } else {
+      // A stale tab (another tab saved since) must not seal a turn it cannot save: its stance would be a free look
+      // at a seal that the reboot rolls again. It reboots now, and this scene never runs on.
+      if (R.Save.stale || R.Save.check()) { G.reboot(); yield function () { return false; }; }
       if (R.Combat.callsOf(duel) && duel.turn % 3 === 2 && !tut) called = argmaxMove(brain.predict(ctx, legalP), legalP);
       duel.intel.called = called;
       var q = { ctx: ctx, payoff: R.Combat.payoff(duel), legalR: legalR, legalP: legalP,
@@ -12030,7 +12167,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       if (duel.mimic) q.mimic = R.Combat.ctx(duel, 'r');           // The Reflection: it plays as you would in its seat
       sealed = brain.commit(q);
       run.pending = { sealed: sealed, turn: duel.turn, n: duel.n, phase: duel.phase, called: called };
-      G.save();
+      // The save itself can find the tab stale (another tab saved during the commit): reboot before anything shows.
+      if (!G.save() && R.Save.stale) { G.reboot(); yield function () { return false; }; }
     }
     S.called = called; S.calledText = called ? mname(called).toUpperCase() + '?' : '';
     S.rSigil = 'sealed'; S.rSigilT = 0; S.pSigil = 'gone'; S.glass = null; S.stamp = null;
@@ -12098,7 +12236,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     R.Run.record(run, G.meta, res, sealed);
     run.pending = null;
     if (tut && tut.last) G.meta.seenTutorial = true;
-    G.save();
+    // A tab that went stale since its seal was saved must not show a resolve it cannot save: the reboot replays the
+    // saved seal, and the player would play it again knowing the Rival's move.
+    if (!G.save() && R.Save.stale) { G.reboot(); yield function () { return false; }; }
 
     S.resolving = true;
     yield* present(res, sealed, pm, tensionBefore);
@@ -12400,6 +12540,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function useActive(i) {
     var id = S.actives[i], duel = S.duel;
     if (!S.input || S.only || !(duel.p.charges && duel.p.charges[id] > 0)) { sfx('back'); return; }
+    // a stale tab would show a glimpse or stamp and then lose the spent charge: reboot instead
+    if (R.Save.stale || R.Save.check()) { G.reboot(); return; }
     var r = R.Combat.useActive(duel, id);
     if (!r || !r.ok) { sfx('back'); return; }
     sfx('boon'); E.buzz(10);
@@ -12499,7 +12641,8 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     // active boons
     for (i = 0; i < S.actives.length; i++) {
       var id = S.actives[i], ch = (S.duel.p.charges && S.duel.p.charges[id]) || 0;
-      R.UI.button(g, 4 + i * 26, y + 1, 22, 22, '', { disabled: ch <= 0 || !S.input, pressed: S.pressA === i });
+      ACT_OPT.disabled = ch <= 0 || !S.input; ACT_OPT.pressed = S.pressA === i;
+      R.UI.button(g, 4 + i * 26, y + 1, 22, 22, '', ACT_OPT);
       R.Art.sprite(g, ACT_SPR[(R.Boons.byId[id].active || OPT_C).kind] || 'act_glimpse', 4 + i * 26 + 5, y + 5 + (S.pressA === i ? 1 : 0));
       if (ch > 0) R.Font.draw(g, DIGIT[ch] || '9', 4 + i * 26 + 20, y + 15, 22, OPT_R);
     }
@@ -12553,7 +12696,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       var run = G.run, meta = G.meta;
       layout();
       var resumed = !!(run.duel && !run.duel.over);
-      var duel = resumed ? run.duel : R.Run.startDuel(run);
+      // a stored final duel past phase 1 whose duel was dropped at boot (an older shape): rebuild that phase, not phase 1
+      var rebuilt = !resumed && run.duelN === 7 && (run.phase | 0) > 1 && !run.duel;
+      var duel = resumed ? run.duel : rebuilt ? R.Run.startPhase(run, run.phase, { rebuild: true }) : R.Run.startDuel(run);
       var st = R.Save.data.settings;
       S = {
         duel: duel, duelN: run.duelN, clock: 0, phase2: false, form: null, noStance: false, tutorial: run.duelN === 1 && !meta.seenTutorial,
@@ -12585,7 +12730,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
       S.fx.ambient('ash', 5);
       if (R.Audio) R.Audio.music(S.form.music, 1);
       G.save();
-      E.co(function* () { yield* flow(resumed); });
+      E.co(function* () { yield* flow(resumed, rebuilt); });
     },
     exit: function () {
       E.timeScale = 1;
@@ -13567,12 +13712,13 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   function freshSeed() { return ((now() & 0xffffffff) ^ Math.floor(Math.random() * 0x100000000)) >>> 0; }
   // A stored run must be complete enough to resume. Anything else (hand-edited or half-written storage, a save from
   // an older build) is dropped; a current duel or commit of an older shape is dropped alone, so the duel restarts
-  // and the run survives.
+  // and the run survives. A face or phase this build cannot read is repaired by R.Run.repairRun (never dropped).
   function validRun(run) {
     if (!(run && typeof run === 'object' && run.stats && typeof run.stats === 'object' && Array.isArray(run.pBoons) && Array.isArray(run.rBoons))) return false;
     if (run.stage !== 'duel' && run.stage !== 'bonfire') return false;      // 'won' / 'dead' are never resumable
     if (!(run.duelN >= 1 && run.duelN <= 7 && run.pHp >= 0 && run.pMaxHp >= 1)) return false;
     if (run.stage === 'bonfire' && !(run.offer && Array.isArray(run.offer.choices))) return false;
+    R.Run.repairRun(run, G.meta);
     var d = run.duel, q = run.pending && run.pending.sealed;
     if (d && !(d.turn >= 1 && d.tally && d.p && d.r && d.p.status && d.r.status && d.p.status.sealed && d.r.status.sealed &&
                d.p.counters && d.r.counters && d.p.charges && d.r.charges && Array.isArray(d.p.moves) && Array.isArray(d.r.moves) &&
@@ -13581,6 +13727,17 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     }
     if (run.pending && !(q && q.pred && typeof q.move === 'string' && typeof q.tell === 'string')) run.pending = null;
     return true;
+  }
+  // The run to resume from a loaded save (R.Save.data), or null. A run made under newer rules than this build's
+  // (run.req above R.Run.RULES) is parked: moved to the save's single parked slot, kept, never played and never
+  // counted. A parked run this build can read again comes back when no other run is in progress.
+  function loadRun(d) {
+    var run = d.run, pk;
+    if (run && typeof run === 'object' && R.Run.reqOf(run) > R.Run.RULES) { d.parked = run; d.run = run = null; }
+    if (validRun(run)) return run;
+    pk = d.parked;
+    if (pk && typeof pk === 'object' && !Array.isArray(pk) && R.Run.reqOf(pk) <= R.Run.RULES && validRun(pk)) { delete d.parked; return pk; }
+    return null;
   }
 
   // The nearest thing still locked: shown on the death screen as a reason to go again.
@@ -13597,14 +13754,25 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
   var G = R.Game = {
     brain: null, meta: null, run: null, rng: null, crng: null, days: 0, last: null,
 
+    // true when the save reached storage. A stale tab (another tab saved after this one loaded) writes nothing.
     save: function () {
+      if (R.Save.stale) return false;
       try {
         var d = R.Save.data;
         d.brain = G.brain.serialize();
         d.meta = G.meta;
         d.run = G.run;
-        R.Save.commit();
-      } catch (e) { /* a storage failure must never stop the game */ }
+        return R.Save.commit();
+      } catch (e) { return false; }              // a storage failure must never stop the game
+    },
+
+    // A stale tab: load the save again as a fresh page would and start over from the title.
+    reboot: function () {
+      load();
+      G.last = null;
+      var st = R.Save.data.settings;
+      if (R.Audio && R.Audio.setMuted && !!R.Audio.muted !== !!st.muted) R.Audio.setMuted(!!st.muted);
+      E.go('title', null, 0);                    // no fade: the old scene must not run on with the new state
     },
 
     hasRun: function () { return !!(G.run && (G.run.stage === 'duel' || G.run.stage === 'bonfire')); },
@@ -13744,6 +13912,7 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
 
     resetAll: function () {
       R.Save.reset();
+      if (R.Save.stale) { G.reboot(); return; }  // another tab saved since: its save is not erased from here
       G.brain = R.Brain.create(null);
       G.meta = R.Run.defaultMeta();
       G.run = null; G.last = null; G.days = 0;
@@ -13752,19 +13921,42 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     }
   };
 
-  function boot() {
-    var storage = null, name;
+  // The boot load: the save from storage, the brain, the meta, the run to resume, and fresh dice. A stale tab
+  // reboots through it too.
+  function load() {
+    var storage = null;
     try { storage = window.localStorage; } catch (e) { storage = null; }
     R.Save.init(storage);
     var d = R.Save.data;
-    E = R.Engine;
     G.brain = R.Brain.create(d.brain || null);
     G.meta = (d.meta && typeof d.meta === 'object') ? d.meta : R.Run.defaultMeta();
-    G.run = validRun(d.run) ? d.run : null;
+    G.run = loadRun(d);
     G.days = G.run ? (G.run.daysAway || 0) : 0;
     var seed = freshSeed();
     G.rng = R.RNG.create(seed);
     G.crng = R.RNG.create(seed ^ 0x2545f491);
+  }
+
+  function boot() {
+    var name;
+    E = R.Engine;
+    load();
+
+    // Another tab saved (a storage event) or this tab's next save found a newer generation: R.Save is stale and
+    // writes nothing. The next tap or key press (swallowed: it must not pick a move in the old state) or the page
+    // coming back into view reloads the save. These run before the engine's own listeners (bound in E.start).
+    var keys = [R.Save.KEY, R.Save.GEN_KEY], cap = { capture: true, passive: false };
+    var wake = function (e) {
+      if (!R.Save.stale && !R.Save.check()) return;  // check(): another tab saved and no storage event came
+      try { if (e.stopImmediatePropagation) e.stopImmediatePropagation(); if (e.cancelable && e.preventDefault) e.preventDefault(); } catch (x) { /* ignore */ }
+      G.reboot();
+    };
+    var shown = function () { if (document.visibilityState !== 'hidden' && (R.Save.stale || R.Save.check())) G.reboot(); };
+    window.addEventListener('storage', function (e) { if (!e || e.key === null || keys.indexOf(e.key) >= 0) R.Save.changedElsewhere(); });
+    window.addEventListener('pointerdown', wake, cap);
+    window.addEventListener('touchstart', wake, cap);
+    window.addEventListener('mousedown', wake, cap);
+    window.addEventListener('keydown', wake, cap);
 
     R.Art.init();
     E.init(document.getElementById('game'));
@@ -13776,8 +13968,9 @@ noscript { position: fixed; left: 0; right: 0; top: 45%; text-align: center; fon
     else { E.go(first, null, 0.3); E.start(); }
 
     var flush = function () { if (G.brain && G.meta) G.save(); };
-    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(); else shown(); });
     window.addEventListener('pagehide', flush);
+    window.addEventListener('pageshow', shown);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

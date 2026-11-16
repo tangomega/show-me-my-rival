@@ -17,14 +17,25 @@
 //   pausetap   a tap or key that only ends a pause must not pick a move (KNOWN until P1.6)
 //   parity     the real duel scene and tools/sim.js runChain feed brain.commit identical inputs
 //   coerce     positive control for the Rival-coercion counter (a forged save with an illegal sealed move)
+//   fixtures   every golden save in tools/fixtures/ (written by older builds) boots and resumes in the current one:
+//              the same stage, duel, phase and turn, the same commit where one was pending, no turn start applied
+//              twice, the tutorial, a four-card bonfire, a save between final-duel phases; plus the V1 rebuild, the
+//              run.req park, the unknown-face redraw, the shadow high-water keys, an empty store and memory-only storage
+//   stale      two pages on one storage: the tab that did not save last writes nothing and reloads from storage; an
+//              idle tab writes nothing; garbage generations; a save cleared elsewhere
 //   sealtrace  opt-in: per-seal trace of the commit and G.rng draw counts; prints "SEALTRACE <sha256>"
 //              (FLOW_SEAL_OUT=<file> also writes the trace as JSON)
 // Every page wraps R.Combat.resolve: a Rival move that is not legal at resolve time is a FAIL.
 // KNOWN rows (registry: tools/known.json) print "KNOWN <id> <push>: <text>" once and do not fail the run.
 // require('./tools/test_flow.js') runs nothing and exports the harness (makePage, session, ...).
+// Sources: src/ of this tree; FLOW_SRC=<dir> loads another src/ folder (e.g. one exported with git archive), and
+// FLOW_SHA=<commit> loads src/ of that commit (git show). FLOW_HEAD=a.js,b.js swaps single files for HEAD's.
 'use strict';
 const fs = require('fs'), path = require('path'), vm = require('vm');
-const ROOT = path.resolve(__dirname, '..'), SRC = path.join(ROOT, 'src');
+const ROOT = path.resolve(__dirname, '..');
+const FLOW_SHA = process.env.FLOW_SHA || null;
+const SRC = process.env.FLOW_SRC ? path.resolve(process.env.FLOW_SRC) : path.join(ROOT, 'src');
+function gitText(args) { return require('child_process').execFileSync('git', ['-c', 'core.autocrlf=false'].concat(args), { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 << 20 }); }
 const argv = process.argv.slice(2), flags = argv.filter(a => a.startsWith('--')), nums = argv.filter(a => !a.startsWith('--'));
 const QUICK = flags.includes('--quick'), VERBOSE = flags.includes('--verbose');
 const RUNS = +nums[0] > 0 ? +nums[0] : (QUICK ? 30 : 200), SEED = +nums[1] > 0 ? +nums[1] : 1;
@@ -38,24 +49,8 @@ const PATCHED = flags.includes('--patched');                         // run agai
 // (knownHit), which also FAILs as "stale KNOWN row" once the defect stops reproducing. Remove a row (here and in
 // tools/known.json) in the commit that fixes it.
 const KNOWN_ROWS = {
-  // V1: a duel-7 save of phase k >= 2 whose duel has an older shape (no intel/tally/begun) is dropped at boot by
-  // validRun, and enter() rebuilds it with startDuel, i.e. phase 1; the rebuilt final duel then plays on through
-  // phases 2, 3... below k. Only that exact signature is matched: the 'run.duel.intel/tally/begun' strip of a
-  // duel-7 phase-k save, "phase regressed k -> 1" first, then "k -> j" with j never going back down (per boot),
-  // and the duel's own phase equal to j (run.phase and duel.phase are set together, so a desync is not V1).
-  // `over` may be null, p or r: a phase of the rebuilt duel can end either way.
-  'corrupt-v1-phase-regress': {
-    push: 'P1.1', text: 'old-shape duel-7 save regresses to phase 1 (V1)', boots: {},
-    match(w, msg) {
-      const a = /^oldshape:run\.duel\.intel\/tally\/begun \(duel:7:([2-4]):[pr]?P?\)#\d+$/.exec(w);
-      const b = /^phase regressed ([2-4]) -> ([1-3]) @duel \(duel turn \d+, over (?:null|p|r), duel phase ([1-3]), /.exec(msg);
-      if (!(a && b && a[1] === b[1] && +b[2] < +b[1] && b[3] === b[2])) return false;
-      const j = +b[2], last = this.boots[w];
-      if (last === undefined ? j !== 1 : j < last) return false;    // it must restart at 1 and only move forward
-      this.boots[w] = j;
-      return true;
-    }
-  },
+  // (V1, an old-shape duel-7 save restarting at phase 1, was fixed in P1.1 by the rebuild in duel.js enter(): a
+  // "phase regressed" failure is a plain FAIL again.)
   // O13 (fixed by P1.6): engine.js pDown / keydown end the pause and deliver the same event to the scene.
   'pause-tap-pointer': { push: 'P1.6', text: 'a pointer-down that only ends a pause also picks a move (O13)' },
   'pause-tap-key': { push: 'P1.6', text: 'a key press that only ends a pause also picks a move (O13)' }
@@ -101,20 +96,22 @@ function mulberry(seed) {
 const ORDER_A = ['core/rng.js', 'core/save.js', 'art/palette.js', 'art/pix.js', 'art/font.js'];
 const ORDER_B = ['art/fx.js', 'audio/audio.js', 'text/strings.js', 'text/taunts.js', 'text/dossier.js', 'ai/brain.js',
   'game/boons.js', 'game/combat.js', 'game/run.js', 'core/engine.js'];
-const SCENE_FILES = fs.readdirSync(path.join(SRC, 'scenes')).filter(f => f.endsWith('.js')).sort().map(f => 'scenes/' + f);
+const SCENE_FILES = (FLOW_SHA ? gitText(['ls-tree', '--name-only', FLOW_SHA + ':src/scenes']).split('\n').map(f => f.trim()) : fs.readdirSync(path.join(SRC, 'scenes')))
+  .filter(f => f.endsWith('.js')).sort().map(f => 'scenes/' + f);
 const scripts = {};
 function script(rel) {
-  if (!scripts[rel]) {
-    let code = fs.readFileSync(path.join(SRC, rel), 'utf8');
+  const key = (FLOW_SHA || SRC) + ':' + rel;
+  if (!scripts[key]) {
+    let code = FLOW_SHA ? gitText(['show', FLOW_SHA + ':src/' + rel]) : fs.readFileSync(path.join(SRC, rel), 'utf8');
     if (process.env.FLOW_HEAD && process.env.FLOW_HEAD.split(',').indexOf(rel) >= 0) code = require('child_process').execSync('git show HEAD:src/' + rel, { cwd: ROOT, encoding: 'utf8' });   // A/B against the committed file
     if (PATCHED && (rel === 'main.js' || rel === 'scenes/duel.js')) {
       const res = require('./qa_patches.js').applyTo(rel, code);
       for (const s of res.skipped) console.log('note: patch ' + s.id + ' not applied to ' + rel + ' (' + s.why + ', edit ' + s.n + ')');
       code = res.text;
     }
-    scripts[rel] = new vm.Script(code, { filename: path.join(SRC, rel) });
+    scripts[key] = new vm.Script(code, { filename: path.join(SRC, rel) });
   }
-  return scripts[rel];
+  return scripts[key];
 }
 function inline(name, code) { return new vm.Script(code, { filename: name }); }
 
@@ -184,15 +181,16 @@ const PERF = inline('perf-probe', `
 
 // ---------------------------------------------------------------------------------------------- storage mock
 // mode: 'ok' | 'failWrite' (setItem throws: quota / private mode) | 'failAll' (every call throws) | 'deny' (reading
-// window.localStorage itself throws, as in a sandboxed iframe)
+// window.localStorage itself throws, as in a sandboxed iframe). failKeys: setItem of these keys alone throws.
+// writes / lastBytes count every successful setItem / the size of the last save written (KEY only).
 function makeStore() {
   const st = {
-    map: new Map(), mode: 'ok', writes: 0, failed: 0, lastBytes: 0,
+    map: new Map(), mode: 'ok', writes: 0, failed: 0, lastBytes: 0, failKeys: new Set(),
     api: {
       getItem(k) { if (st.mode === 'failAll') throw new Error('SecurityError'); return st.map.has(k) ? st.map.get(k) : null; },
       setItem(k, v) {
-        if (st.mode !== 'ok') { st.failed++; throw new Error('QuotaExceededError'); }
-        st.writes++; st.lastBytes = String(v).length; st.map.set(k, String(v));
+        if (st.mode !== 'ok' || st.failKeys.has(k)) { st.failed++; throw new Error('QuotaExceededError'); }
+        st.writes++; if (k === KEY) st.lastBytes = String(v).length; st.map.set(k, String(v));
       },
       removeItem(k) { if (st.mode !== 'ok') throw new Error('SecurityError'); st.map.delete(k); }
     },
@@ -348,7 +346,14 @@ function makePage(store, view, opt) {
   page.canvas = game;
   const gameCtx = game.getContext;                                 // keep the visible context: the blind recorder hashes the blit (shake)
   game.getContext = function () { const c = gameCtx.apply(this, arguments); page.vctx = c; return c; };
-  function listen(map) { return function (type, fn) { page.c.listeners++; (map[type] = map[type] || []).push(fn); }; }
+  // A capture listener (third argument true or { capture: true }) runs before the bubble ones, as for an event that
+  // targets an element below window / document.
+  function listen(map) {
+    return function (type, fn, o) {
+      page.c.listeners++;
+      (map[type] = map[type] || []).push({ fn, capture: o === true || !!(o && o.capture) });
+    };
+  }
   const doc = {
     readyState: 'complete', visibilityState: 'visible',
     documentElement: { clientWidth: view.vw, clientHeight: view.vh },
@@ -381,15 +386,24 @@ function makePage(store, view, opt) {
   const ctx = vm.createContext(sb);
   page.ctx = ctx; page.H = H;
   page.scene = () => (page.E ? page.E.sceneName : '(boot)');
+  // Capture listeners first, then the rest; stopImmediatePropagation ends the dispatch, stopPropagation in a capture
+  // listener skips the bubble ones. Returns the event (ev.defaultPrevented, ev.stopped).
   page.fire = function (target, type, ev) {
     const list = (target === 'window' ? page.lw : page.ld)[type];
-    if (!list) return;
     ev = ev || {};
-    if (!ev.preventDefault) ev.preventDefault = function () {};
+    if (!list) return ev;
+    let imm = false, prop = false;
+    ev.defaultPrevented = false; ev.stopped = false;
+    if (!ev.preventDefault) ev.preventDefault = function () { ev.defaultPrevented = true; };
+    ev.stopImmediatePropagation = function () { imm = prop = true; ev.stopped = true; };
+    ev.stopPropagation = function () { prop = true; ev.stopped = true; };
     ev.type = type;
-    for (let i = 0; i < list.length; i++) {
-      try { list[i](ev); } catch (e) { fail('exception in ' + type + ' handler @' + page.scene() + ': ' + (e && e.stack ? e.stack.split('\n').slice(0, 5).join(' | ') : e)); }
+    const order = list.filter(f => f.capture).concat(list.filter(f => !f.capture));
+    for (let i = 0; i < order.length && !imm; i++) {
+      if (prop && !order[i].capture) break;
+      try { order[i].fn(ev); } catch (e) { fail('exception in ' + type + ' handler @' + page.scene() + ': ' + (e && e.stack ? e.stack.split('\n').slice(0, 5).join(' | ') : e)); }
     }
+    return ev;
   };
   page.frame = function (dtMs) {
     if (!page.rafCb) { fail('requestAnimationFrame chain broken @' + page.scene()); return false; }
@@ -607,7 +621,11 @@ function makeMonitor(store) {
     let snap = null;
     try { snap = snapRaw ? JSON.parse(snapRaw) : null; } catch (e) { snap = null; }
     if (!ok(!!snap, 'reload: storage had no parseable save although writes succeed')) { mon.sync(page); return; }
-    ok(J(G.run) === J(snap.run), () => 'reload: R.Game.run differs from the stored run (stage ' + (snap.run && snap.run.stage) + ')');
+    // A run made under newer rules than this build's is parked at every boot until a save stores the move (P1.1).
+    const RR = page.R.Run, parked = !!(snap.run && typeof snap.run === 'object' && RR.reqOf && RR.reqOf(snap.run) > RR.RULES);
+    const want = parked ? null : snap.run;
+    if (parked) ok(J(page.R.Save.data.parked) === J(snap.run), 'reload: a stored run from newer rules must be parked, not played');
+    ok(J(G.run) === J(want), () => 'reload: R.Game.run differs from the stored run (stage ' + (snap.run && snap.run.stage) + '): ' + diffKeys(want, G.run));
     ok(J(G.meta) === J(snap.meta), () => 'reload: R.Game.meta differs from the stored meta: ' + diffKeys(snap.meta, G.meta));
     const m = G.meta.memory;
     ok(m.runs === mon.exp.runs && m.wins === mon.exp.wins && m.deaths === mon.exp.deaths,
@@ -621,7 +639,7 @@ function makeMonitor(store) {
       ok(G.run.stats.turns === mon.turns, () => 'reload: stored stats.turns ' + G.run.stats.turns + ' != live ' + mon.turns + ' (' + before + ')');
       ok(G.run.duelN === mon.duelN, () => 'reload: stored duelN ' + G.run.duelN + ' != live ' + mon.duelN + ' (' + before + ')');
     }
-    mon.after = snap.run ? { run: snap.run, turns: snap.run.stats ? snap.run.stats.turns : 0 } : null;
+    mon.after = want ? { run: want, turns: want.stats ? want.stats.turns : 0 } : null;
   };
   mon.check = function (page, dt) {
     const R = page.R, G = page.G, E = page.E, run = G.run, meta = G.meta;
@@ -802,6 +820,7 @@ function session(o) {
   const reloadP = o.reloadP === undefined ? 1 : o.reloadP;
   let page = makePage(store, o.view || rng.pick(VIEWS), o.pageOpt);
   if (!page.alive) return { page, mon, store, ended: 0 };
+  const writes0 = store.writes;                                     // (boot itself never writes)
   let bot = makeBot(rng, o.style || 'cheat'), ended = 0, frames = 0, runFrames = 0, reloads = 0, runReloads = 0, plan = null, cat = '', lastKey;
   const kinds = {};
   const maxFrames = o.maxFrames || 4e6;
@@ -836,7 +855,10 @@ function session(o) {
     reloads++; runReloads++;
     if (!page.alive) return false;
     bot.held = null; bot.think = -1;
-    mon.reloaded(page, raw, before);
+    // Nothing written since the session's first boot: this boot repeats it (a save of an older or newer shape is
+    // repaired, parked or redrawn the same way again), so its state is adopted rather than compared with storage.
+    if (store.writes === writes0) mon.sync(page);
+    else mon.reloaded(page, raw, before);
     return true;
   }
   where = o.label || 'session';
@@ -1060,14 +1082,48 @@ function corruptTests() {
     ['run.stats extras', o => { if (o.run) o.run.stats = { turns: o.run.stats.turns, moves: o.run.stats.moves, duelTurns: o.run.stats.duelTurns }; }],
     ['run.duel.intel/tally/begun', o => { if (o.run && o.run.duel) { delete o.run.duel.intel; delete o.run.duel.tally; delete o.run.duel.begun; delete o.run.duel.pendingEvents; } }],
     ['run.finished/runNo/daysAway', o => { if (o.run) { delete o.run.finished; delete o.run.runNo; delete o.run.daysAway; delete o.run.relicId; } }],
-    ['v', o => { delete o.v; }]
+    ['v', o => { delete o.v; }],
+    // Every persisted field added since the first release gets a strip (each new field gets one; P1.1 added the last six),
+    // then saves from a newer build: rules this build does not know (the run is parked and survives every save), a
+    // face it does not know (redrawn), shadow high-water keys above its tables (kept), and garbage in each new field.
+    ['meta.vigil', o => { if (o.meta) delete o.meta.vigil; }],
+    ['meta.bosses', o => { if (o.meta) delete o.meta.bosses; }],
+    ['run.stake', o => { if (o.run) delete o.run.stake; }],
+    ['run.boss', o => { if (o.run) delete o.run.boss; }],
+    ['run.phase', o => { if (o.run) delete o.run.phase; }],
+    ['run.req', o => { if (o.run) delete o.run.req; }],
+    ['meta.bosses.hi', o => { if (o.meta && o.meta.bosses) delete o.meta.bosses.hi; }],
+    ['meta.vigil.hi', o => { if (o.meta && o.meta.vigil) delete o.meta.vigil.hi; }],
+    ['meta.vigil.winsX', o => { if (o.meta && o.meta.vigil) delete o.meta.vigil.winsX; }],
+    ['parked', o => { delete o.parked; }],
+    ['newer: run.req=99', o => { if (o.run) o.run.req = 99; }, (res, o) => {
+      const sv = res.store.parsed();
+      if (o.run) ok(sv && JSON.stringify(sv.parked) === JSON.stringify(o.run), 'a run from newer rules must be parked as stored and survive a whole run of saves');
+    }],
+    ['newer: unknown run.boss', o => { if (o.run) o.run.boss = 'face_of_a_later_build'; }],
+    ['newer: hi and winsX above the tables', o => {
+      if (!o.meta) return;
+      const b = o.meta.bosses = o.meta.bosses || {}, v = o.meta.vigil = o.meta.vigil || {};
+      b.hi = 9; b.max = 9; v.hi = 12; v.max = 12;
+      v.wins = (Array.isArray(v.wins) ? v.wins.slice(0, 8) : []).concat([0, 0, 0, 0, 0, 0, 0, 0]).slice(0, 8).concat([3, 1]);
+    }, (res, o) => {
+      const sv = res.store.parsed(), mt = sv && sv.meta;
+      if (o.meta) ok(mt && mt.bosses.hi === 9 && mt.vigil.hi === 12 && mt.vigil.winsX && mt.vigil.winsX['8'] === 3 && mt.vigil.winsX['9'] === 1 && mt.vigil.wins.length === 8 && mt.vigil.max === 7,
+        () => 'shadow high-water keys were lost or not applied: ' + JSON.stringify(mt && { bosses: mt.bosses, vigil: mt.vigil }));
+    }],
+    ['garbage: the new fields', o => {
+      if (o.run) { o.run.req = 'x'; o.run.phase = 'x'; o.run.boss = 7; }
+      if (o.meta) { o.meta.bosses = Object.assign({}, o.meta.bosses, { hi: 'x' }); o.meta.vigil = Object.assign({}, o.meta.vigil, { hi: {}, winsX: 7 }); }
+      o.parked = 'x';
+    }, (res) => { const sv = res.store.parsed(); ok(sv && sv.parked === 'x', 'a parked value this build cannot read must be kept, never deleted'); }]
   ];
   let m = 0;
-  for (const [name, fn] of strips) {
+  for (const [name, fn, after] of strips) {
     const picks = QUICK ? [rng.pick(saves)] : [rng.pick(saves), rng.pick(saves), rng.pick(saves)];
     for (const s of picks) {
       const o = JSON.parse(s.raw); fn(o);
-      bootAndPlay('oldshape:' + name + ' (' + s.tag + ')#' + (m++), JSON.stringify(o), 1);
+      const res = bootAndPlay('oldshape:' + name + ' (' + s.tag + ')#' + (m++), JSON.stringify(o), 1);
+      if (after) after(res, o);
     }
   }
   console.log('corrupt/old saves: ' + garbage.length + ' garbage, ' + cuts + ' truncated, ' + m + ' old-shape boots from ' + saves.length + ' real saves; each then played a full run');
@@ -1082,10 +1138,11 @@ function pauseTests() {
   playUntil(page, store, p => p.E.sceneName === 'duel' && p.R.Scenes.duel.peek() && p.R.Scenes.duel.peek().input, { what: 'first input window' });
   run60(page, 10);
   const a0 = page.audioLog.length, t1 = E.time, w0 = store.writes;
+  page.R.Save.data.flushMark = 1 + (page.R.Save.data.flushMark | 0);   // something new to store (a save with nothing new writes nothing)
   page.setHidden(true);
   ok(E.paused === true, 'E.paused must be true while hidden');
   ok(page.audioLog.slice(a0).indexOf('suspend') >= 0, 'audio must suspend on visibilitychange');
-  ok(store.writes > w0, 'hiding the page must flush a save');
+  ok(store.writes > w0 && store.raw() === JSON.stringify(page.R.Save.data) && JSON.stringify(store.parsed().run) === JSON.stringify(G.run), 'hiding the page must flush a save of the live state');
   run60(page, 30);
   ok(E.time === t1, 'time advanced while hidden');
   page.ts += 600000; clock.ms += 600000;                            // ten minutes away
@@ -2082,12 +2139,593 @@ function sealTraceTests() {
   console.log('seal trace: ' + CFGS.length + ' configs, ' + all.reduce((s, x) => s + x.log.filter(e => e.commit).length, 0) + ' seals, ' + ((Date.now() - t) / 1000).toFixed(1) + ' s');
 }
 
+// ============================================================================================== 15. golden fixtures (P1.1)
+// tools/fixtures/*.json: saves written by the game code of older commits (tools/fixtures/gen.js), each at one reload
+// point: pre (before the turn start), bleed (after the turn start and its bleed tick, before the seal), seal (after
+// it, before the buttons light), input (after the pick and a Candle of Truth reveal, before the resolve), post (after
+// the resolve); the tutorial with a seal pending; a four-card bonfire whose forget was already applied (as it opens
+// and with its cards shown); the final duel between phases (transform).
+// The current build must boot each one with no error, keep every stored meta value, resume at the same stage, duel,
+// phase and turn, keep a pending commit exactly (commitOf), apply a turn start once (the oracle) and never again once
+// saved as done, then play the turn out; a bonfire reopens with the same cards, HP and brain; a save between phases
+// becomes exactly one transform. The same saves, edited, drive the P1.1 repairs: the V1 rebuild of an old-shape
+// duel-7 save, a run from newer rules (parked, then restored), a face this build does not know (redrawn), a phase
+// past the face's count, a stripped run.phase, and shadow high-water keys; plus an empty store and memory-only storage.
+const GEN_KEY = 'rival.save.v1.gen';
+const FIX_DIR = path.join(ROOT, 'tools', 'fixtures');
+function loadFixtures() {
+  let names = [];
+  try { names = fs.readdirSync(FIX_DIR).filter(f => /\.json$/.test(f)).sort(); } catch (e) { names = []; }
+  return names.map(f => ({ file: f, fx: JSON.parse(fs.readFileSync(path.join(FIX_DIR, f), 'utf8')) }));
+}
+// The first path at which a value stored in `a` is gone or different in `b` (repairs may only add), or null.
+function lostIn(a, b, at) {
+  if (a === null || typeof a !== 'object' || Array.isArray(a)) return JSON.stringify(a) === JSON.stringify(b) ? null : at;
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return at;
+  for (const k of Object.keys(a)) { const d = lostIn(a[k], b[k], at + '.' + k); if (d) return d; }
+  return null;
+}
+function bootSave(entries, opt) {
+  const store = makeStore();
+  for (const k in entries) store.map.set(k, entries[k]);
+  return { store, page: makePage(store, VIEWS[2], Object.assign({ ts: 1000 }, opt || {})) };
+}
+// From the title: CONTINUE, then frames until the buttons light. `seen` (a Set) collects every text drawn.
+function continueToInput(page, seen) {
+  waitScene(page, 'title', 200); run60(page, 20);
+  if (!tapLabel(page, 'CONTINUE') || !waitScene(page, 'duel', 300)) return false;
+  page.keepTexts = !!seen;
+  for (let i = 0; i < 2000; i++) {
+    const pk = page.R.Scenes.duel.peek();
+    if (pk && pk.input) { page.keepTexts = false; return true; }
+    if (!page.frame(16.7)) break;
+    if (seen) for (const t of page.lastTexts) seen.add(t);
+  }
+  page.keepTexts = false;
+  return false;
+}
+// Picks a legal move at the open window and runs until the turn resolves. True when it did.
+function playTurnOut(page) {
+  const G = page.G, R = page.R, d = G.run.duel, pk = R.Scenes.duel.peek(), turns0 = G.run.stats.turns;
+  const m = pk.only || R.Combat.legal(d, 'p')[0], b = findBtn(page, MOVE_LABEL[m]);
+  if (!b) return false;
+  page.down(b.x + 5, b.y + 5); page.up(b.x + 5, b.y + 5);
+  for (let i = 0; i < 900 && G.run && G.run.stats.turns === turns0; i++) page.frame(16.7);
+  return !!G.run && G.run.stats.turns === turns0 + 1;
+}
+function sameCommitPoint(sp, sd) { return !!(sp && sd && sp.turn === sd.turn && sp.n === sd.n && sp.phase === sd.phase); }
+function fixtureResume(file, fx, tally) {
+  const raw = fx.store[KEY], snap = JSON.parse(raw), sr = snap.run, sd = sr && sr.duel, e = fx.expect || {};
+  if (!ok(!!(sr && (sd || sr.stage === 'bonfire')), 'fixture ' + file + ' holds no run to resume')) return;
+  ok(e.stage === sr.stage && e.duelN === sr.duelN && e.phase === sr.phase && e.turn === (sd ? sd.turn : null) && e.pending === !!sr.pending, 'fixture ' + file + ': its expect block disagrees with its save');
+  if (sr.stage === 'bonfire') return bonfireResume(file, fx, tally);
+  if (sd.over) {
+    if (ok(sd.over === 'p' && sr.duelN === 7 && sd.phase < oracle.R.Run.phaseCount(sr), 'fixture ' + file + ': a finished duel other than a final-duel phase is not covered')) transformResume(file, fx, tally);
+    return;
+  }
+  if (e.tutorial) tally.tutorial++;
+  const { store, page } = bootSave(fx.store);
+  if (!page.alive) return;
+  const G = page.G, R = page.R;
+  const lost = lostIn(snap.meta, G.meta, 'meta');
+  ok(!lost, () => 'a stored meta value changed at boot: ' + lost);
+  if (!ok(!!G.run && !!G.run.duel, 'the run or its duel was dropped at boot')) return;
+  ok(G.run.stage === sr.stage && G.run.duelN === sr.duelN && G.run.phase === sr.phase && G.run.duel.turn === sd.turn,
+    () => 'resumed at ' + [G.run.stage, G.run.duelN, G.run.phase, G.run.duel.turn] + ', the save was at ' + [sr.stage, sr.duelN, sr.phase, sd.turn]);
+  if (sr.boss === undefined) ok(G.run.boss === undefined && R.Run.bossOf(G.run).id === 'unmasked', 'a run from before the faces must resume as The Unmasked');
+  else ok(G.run.boss === sr.boss, 'the face changed at boot: ' + sr.boss + ' -> ' + G.run.boss);
+  if (!ok(continueToInput(page), 'no input window after CONTINUE')) return;
+  const d = G.run.duel, pend = G.run.pending, sp = sr.pending;
+  if (e.tutorial && sp && sd.turn <= 2) {                            // turns 1-2 of the tutorial allow only the move that beats its seal
+    const pk = R.Scenes.duel.peek();
+    ok(!!pk && pk.only === R.LOSES_TO[sp.sealed.move], () => 'the tutorial did not resume as the tutorial (only ' + (pk && pk.only) + ')');
+  }
+  ok(d.n === sd.n && d.phase === sd.phase && d.turn === sd.turn, () => 'the input window is for duel ' + [d.n, d.phase, d.turn] + ', the save was at ' + [sd.n, sd.phase, sd.turn]);
+  if (sameCommitPoint(sp, sd)) {
+    ok(!!pend && commitOf(pend) === commitOf(sp), () => 'the pending commit changed on resume:\n   ' + commitOf(sp) + '\n   ' + (pend && commitOf(pend)));
+    ok(coreOf(d) === coreOf(sd), () => 'the duel changed on resume: ' + coreOf(sd) + ' -> ' + coreOf(d));
+    if (sp.seen_honesty) ok(!!pend && pend.seen_honesty === true, 'the paid Candle of Truth reveal was lost on resume');
+    tally.commit++;
+  } else {
+    const o = oracle.json(JSON.stringify(sd));
+    oracle.R.Combat.beginTurn(o);
+    ok(d.begun === d.turn && coreOf(d) === coreOf(o), () => 'the turn start was applied twice or wrongly on resume: expected ' + coreOf(o) + ' got ' + coreOf(d));
+    if (sd.begun === sd.turn) {                                       // saved after the turn start: nothing of it runs again
+      ok(coreOf(d) === coreOf(sd), () => 'a turn start saved as done ran again on resume: stored ' + coreOf(sd) + ' got ' + coreOf(d));
+      tally.bleed++;
+    }
+    tally.begin++;
+  }
+  ok(playTurnOut(page), 'the resumed turn did not resolve');
+  const after = store.parsed();
+  ok(after && after.run && after.run.pending === null && after.run.stats.turns === sr.stats.turns + 1, 'the resolve after a resume was not stored');
+  tally[fx.sha] = (tally[fx.sha] || 0) + 1;
+}
+// A bonfire save (four cards, the Ash of Forgetting's forget already applied): it reopens with the same cards and HP,
+// the Rival forgets nothing a second time, and taking a card goes on to the next duel.
+function bonfireResume(file, fx, tally) {
+  const raw = fx.store[KEY], snap = JSON.parse(raw), sr = snap.run, off = sr.offer, e = fx.expect || {}, J = JSON.stringify;
+  ok(!!off && e.cards === off.choices.length && e.applied === !!off.applied && e.shown === !!off.seen, 'fixture ' + file + ': its expect block disagrees with its offer');
+  const { store, page } = bootSave(fx.store);
+  if (!page.alive || !off) return;
+  const G = page.G, R = page.R;
+  const lost = lostIn(snap.meta, G.meta, 'meta');
+  ok(!lost, () => 'a stored meta value changed at boot: ' + lost);
+  if (!ok(!!G.run && G.run.stage === 'bonfire' && J(G.run.offer) === J(off) && G.run.pHp === sr.pHp, 'the bonfire, its offer or the HP changed at boot')) return;
+  const mind = () => J(G.brain.serialize().c);                        // a second forget would shrink these
+  const c0 = mind();
+  ok(c0 === J(snap.brain.c), 'the stored brain tables changed at boot');
+  waitScene(page, 'title', 200); run60(page, 20);
+  if (!ok(tapLabel(page, 'CONTINUE') && waitScene(page, 'bonfire', 300), 'CONTINUE did not reopen the bonfire')) return;
+  const seen = new Set();
+  page.keepTexts = true;
+  for (let i = 0; i < 600; i++) {
+    page.frame(16.7);
+    for (const s of page.lastTexts) seen.add(s);
+    const dos = findBtn(page, 'DOSSIER');
+    if (dos && !dos.disabled) break;                                  // the card choice is open
+  }
+  page.keepTexts = false;
+  const names = off.choices.map(id => R.Boons.byId[id].name.toUpperCase()), words = new Set([...seen].join(' ').toUpperCase().split(/\s+/));   // a card wraps its name
+  ok(names.length === e.cards && names.every(n => n.split(/\s+/).every(w => words.has(w))), () => 'the reopened bonfire should show its ' + names.length + ' cards: ' + names.join(', '));
+  ok(mind() === c0 && J(G.run.offer.choices) === J(off.choices) && G.run.pHp === sr.pHp, 'reopening the bonfire forgot again, changed the cards or healed again');
+  const bot = makeBot(mulberry(7), 'cheat');
+  bot.noise = 0;
+  for (let i = 0; i < 4000 && !(G.run && G.run.stage === 'duel' && G.run.duelN === sr.duelN + 1); i++) { bot.act(page); page.frame(16.7); }
+  const got = G.run ? G.run.pBoons.filter(b => sr.pBoons.indexOf(b) < 0) : [];
+  ok(!!G.run && G.run.stage === 'duel' && G.run.duelN === sr.duelN + 1 && got.length === 1 && off.choices.indexOf(got[0]) >= 0 && mind() === c0,
+    () => 'the resumed bonfire did not end with one offered card taken and nothing forgotten again: ' + J(got));
+  const after = store.parsed();
+  ok(!!after && !!after.run && after.run.duelN === sr.duelN + 1 && J(after.run.pBoons) === J(G.run && G.run.pBoons), 'the card taken at the resumed bonfire was not stored');
+  tally.bonfire++;
+  tally[fx.sha] = (tally[fx.sha] || 0) + 1;
+}
+// A final-duel save between phases (the blow that ended phase k stored, the change not yet): it resumes into phase
+// k + 1 exactly as one transform would make it (the oracle: endDuel, nextPhase, the first turn start), one phase heal.
+function transformResume(file, fx, tally) {
+  const raw = fx.store[KEY], snap = JSON.parse(raw), sr = snap.run, sd = sr.duel;
+  const { store, page } = bootSave(fx.store);
+  if (!page.alive) return;
+  const G = page.G;
+  const lost = lostIn(snap.meta, G.meta, 'meta');
+  ok(!lost, () => 'a stored meta value changed at boot: ' + lost);
+  if (!ok(!!G.run && !!G.run.duel && G.run.duel.over === 'p' && G.run.phase === sr.phase && G.run.duel.phase === sd.phase, 'the save between phases changed at boot')) return;
+  const o = oracle.json(raw), OR = oracle.R.Run;
+  OR.repairRun(o.run, OR.repairMeta(o.meta));
+  OR.endDuel(o.run, o.meta, 'p', null);
+  OR.nextPhase(o.run);
+  oracle.R.Combat.beginTurn(o.run.duel);
+  if (!ok(continueToInput(page), 'no input window after resuming between phases')) return;
+  const d = G.run.duel;
+  ok(G.run.phase === sd.phase + 1 && d.phase === sd.phase + 1 && d.turn === 1, () => 'resumed between phases ' + sd.phase + ' and ' + (sd.phase + 1) + ' at phase ' + d.phase + ' turn ' + d.turn + ' (run.phase ' + G.run.phase + ')');
+  ok(coreOf(d) === coreOf(o.run.duel), () => 'the next phase is not what one transform makes:\n   ' + coreOf(o.run.duel) + '\n   ' + coreOf(d));
+  const sv = store.parsed();
+  ok(!!sv && !!sv.run && sv.run.phase === sd.phase + 1 && !!sv.run.pending && sv.run.pending.phase === sd.phase + 1, 'the next phase and its seal were not stored');
+  ok(playTurnOut(page), 'the first turn of the next phase did not resolve');
+  tally.transform++;
+  tally[fx.sha] = (tally[fx.sha] || 0) + 1;
+}
+function fixtureTests() {
+  where = 'fixtures';
+  const t = Date.now(), all = loadFixtures(), tally = { commit: 0, begin: 0, bleed: 0, tutorial: 0, bonfire: 0, transform: 0 };
+  const shas = new Set(all.map(x => x.fx.sha));
+  // Every commit's set: the tutorial mid-turn, the bonfire (as it opens and with its cards shown), duel 2's turn at
+  // every reload point, the final duel between phases, and the final duel past phase 1 before and after the seal.
+  const NEED = ['d1-seal', 'b1-enter', 'b1-cards', 'd2-pre', 'd2-bleed', 'd2-seal', 'd2-input', 'd2-post', 'd7x-transform', 'd7pN-pre', 'd7pN-seal'];
+  for (const sha of ['6e8a65b', '42ec57c', '0cba25d']) {
+    const have = new Map(all.filter(x => x.fx.sha === sha).map(x => [x.file.slice(sha.length + 1).replace(/\.json$/, '').replace(/^d7p\d+-/, 'd7pN-'), x.fx.expect || {}]));
+    const miss = NEED.filter(n => !have.has(n));
+    ok(!miss.length, () => 'tools/fixtures is missing saves from ' + sha + ': ' + miss.join(', '));
+    const e = n => have.get(n) || {};
+    ok(e('d2-bleed').begun === true && e('d2-bleed').pending === false && e('d2-pre').begun === false && e('d2-pre').pending === false, sha + ': the pre and bleed fixtures must hold a turn before and after its start, with no seal');
+    ok(e('d1-seal').tutorial === true && e('d1-seal').pending === true, sha + ': the d1 fixture must be the tutorial with a seal pending');
+    ok(e('b1-enter').cards === 4 && e('b1-enter').applied === true && e('b1-enter').shown === false && e('b1-cards').shown === true, sha + ': the bonfire fixtures must hold four cards and an applied forget, before and after the cards are shown');
+    ok(e('d7x-transform').over === 'p' && e('d7x-transform').duelN === 7, sha + ': the d7x fixture must be the final duel between phases');
+  }
+  for (const x of all) { where = 'fixtures:' + x.file; fixtureResume(x.file, x.fx, tally); }
+  const by = name => { const x = all.find(q => q.file === name); ok(!!x, 'fixture missing: ' + name); return x ? JSON.parse(x.fx.store[KEY]) : null; };
+  const J = JSON.stringify;
+
+  // V1: a final-duel save past phase 1 whose duel has an older shape (the corrupt section's intel/tally/begun strip).
+  // validRun drops the duel; enter() rebuilds that phase from run.pHp (no second heal), shows its rule cards, no intro.
+  for (const name of ['0cba25d-d7p3-seal.json', '6e8a65b-d7p2-seal.json']) {
+    where = 'fixtures:v1 ' + name;
+    const o = by(name);
+    if (!o) continue;
+    const k = o.run.phase, hp = o.run.pHp;
+    delete o.run.duel.intel; delete o.run.duel.tally; delete o.run.duel.begun; delete o.run.duel.pendingEvents;
+    const { page } = bootSave({ [KEY]: J(o) });
+    if (!page.alive) continue;
+    const G = page.G, R = page.R;
+    ok(G.run && G.run.duel === null && G.run.pending === null && G.run.phase === k, 'V1: validRun should drop the old-shape duel and keep phase ' + k);
+    const seen = new Set();
+    waitScene(page, 'title', 200); run60(page, 20); tapLabel(page, 'CONTINUE');
+    page.keepTexts = true;
+    for (let i = 0; i < 400 && !(page.E.sceneName === 'duel' && G.run.duel); i++) { page.frame(16.7); for (const s of page.lastTexts) seen.add(s); }
+    const d0 = G.run.duel;
+    if (!ok(!!d0, 'V1: the duel scene did not start')) { page.keepTexts = false; continue; }
+    ok(G.run.phase === k && d0.phase === k && d0.n === 7, () => 'V1: the old-shape duel came back at phase ' + d0.phase + ' (run.phase ' + G.run.phase + '), not ' + k);
+    ok(d0.p.hp === hp && !d0.pendingEvents.some(ev => ev.t === 'heal'), () => 'V1: the player came back with ' + d0.p.hp + ' HP, the save had ' + hp + ' (a second phase heal?)');
+    page.keepTexts = false;
+    ok(continueFrames(page, seen), 'V1: no input window in the rebuilt phase');
+    const cards = (R.Run.cfg(G.run, G.run.duel).cards || []).filter(id => R.Text.rules && R.Text.rules[id]).map(id => R.Text.rules[id].name);
+    ok(cards.length > 0 && cards.every(c => seen.has(c)), () => 'V1: the rebuilt phase should show its rule cards (' + cards.join(', ') + ')');
+    ok(!seen.has('DUEL 7'), 'V1: a rebuilt phase must not replay the duel-7 intro');
+    ok(G.run.phase === k && G.run.duel.phase === k && G.run.pending && G.run.pending.phase === k, 'V1: the rebuilt phase did not seal in phase ' + k);
+    ok(playTurnOut(page) && G.run.phase === k, 'V1: the first turn of the rebuilt phase did not resolve in phase ' + k);
+  }
+
+  // run.req above R.Run.RULES: parked, never played, credits nothing, survives every save; restored by a build that
+  // knows those rules once no other run is in progress.
+  {
+    where = 'fixtures:parked';
+    const o = by('0cba25d-d2-seal.json');
+    if (o) {
+      o.run.req = 99;
+      const { store, page } = bootSave({ [KEY]: J(o) });
+      if (page.alive) {
+        const G = page.G, m = G.meta.memory, sm = o.meta.memory;
+        ok(G.run === null && J(page.R.Save.data.parked) === J(o.run), 'run.req 99: the run must be parked as stored, not played');
+        ok(m.runs === sm.runs && m.wins === sm.wins && m.deaths === sm.deaths, 'parking a run must credit nothing');
+        waitScene(page, 'title', 200); run60(page, 20); tapLabel(page, /BEGIN/);
+        for (let i = 0; i < 600 && page.E.sceneName !== 'duel'; i++) { page.frame(16.7); if (page.E.sceneName === 'relic' && findBtn(page, 'CONFIRM')) tapLabel(page, 'CONFIRM'); }
+        const sv = store.parsed();
+        ok(sv && sv.run && sv.run.req === 0 && sv.run.seed !== o.run.seed && J(sv.parked) === J(o.run), 'run.req 99: a new run is stamped req 0 and the parked run survives its saves');
+        sv.run = null;
+        const b2 = bootSave({ [KEY]: J(sv) }, { beforeBoot(p) { p.R.Run.RULES = 99; } });
+        if (b2.page.alive) {
+          ok(J(b2.page.G.run) === J(o.run) && !('parked' in b2.page.R.Save.data), 'a build whose RULES reach run.req must restore the parked run and clear the slot');
+          b2.page.G.save();
+          const s2 = b2.store.parsed();
+          ok(s2 && !('parked' in s2) && J(s2.run) === J(o.run), 'the restored run must be stored as the run, with no parked copy');
+          ok(continueToInput(b2.page) && commitOf(b2.page.G.run.pending) === commitOf(o.run.pending), 'the restored run must resume with its commit');
+        }
+      }
+    }
+  }
+
+  // A face this build does not know: redrawn from the earned faces and recorded as bosses.last. In the final duel that
+  // restarts duel 7 at phase 1; before it, the duel in progress and its commit are kept.
+  for (const [name, final] of [['0cba25d-d7p3-seal.json', true], ['0cba25d-d2-seal.json', false]]) {
+    where = 'fixtures:unknown face ' + name;
+    const o = by(name);
+    if (!o) continue;
+    o.run.boss = 'face_of_a_later_build';
+    const { page } = bootSave({ [KEY]: J(o) });
+    if (!page.alive) continue;
+    const G = page.G, R = page.R, run = G.run, idx = run ? R.Run.BOSSES.findIndex(b => b.id === run.boss) : -1;
+    if (!ok(!!run, 'an unknown face must not drop the run')) continue;
+    ok(idx >= 0 && idx < G.meta.bosses.max && G.meta.bosses.last === run.boss, () => 'the unknown face should be redrawn from the earned ones and become bosses.last: ' + run.boss + ' (last ' + G.meta.bosses.last + ')');
+    if (final) ok(run.phase === 1 && run.duel === null && run.pending === null, 'an unknown face in the final duel restarts duel 7 at phase 1');
+    else ok(run.duel && run.duel.turn === o.run.duel.turn && commitOf(run.pending) === commitOf(o.run.pending), 'an unknown face before duel 7 keeps the duel and its commit');
+    if (ok(continueToInput(page), 'no input window after the redraw')) {
+      const d = G.run.duel;
+      ok(final ? d.n === 7 && d.phase === 1 && d.turn === 1 : d.n === o.run.duel.n && d.turn === o.run.duel.turn, () => 'resumed at duel ' + [d.n, d.phase, d.turn]);
+    }
+  }
+
+  // A phase past the face's count restarts duel 7 at phase 1; a stripped run.phase comes back from the duel's own.
+  {
+    where = 'fixtures:phase';
+    const o = by('0cba25d-d7p3-seal.json');
+    if (o) {
+      const over = JSON.parse(J(o)); over.run.phase = 9;
+      const a = bootSave({ [KEY]: J(over) });
+      if (a.page.alive) ok(a.page.G.run && a.page.G.run.phase === 1 && a.page.G.run.duel === null && a.page.G.run.pending === null, 'a phase past the count must restart duel 7 at phase 1');
+      const gone = JSON.parse(J(o)); delete gone.run.phase;
+      const b = bootSave({ [KEY]: J(gone) });
+      if (b.page.alive) {
+        ok(b.page.G.run && b.page.G.run.phase === o.run.phase, 'a stripped run.phase must come back from the duel (' + o.run.phase + ')');
+        ok(continueToInput(b.page) && commitOf(b.page.G.run.pending) === commitOf(o.run.pending) && b.page.G.run.phase === o.run.phase, 'a stripped run.phase must resume the same commit in the same phase');
+      }
+    }
+  }
+
+  // Shadow high-water keys: a meta from a build with more faces and lights keeps them; this build plays the clamped
+  // view; an older build's lowered max is raised again from hi.
+  {
+    where = 'fixtures:hi';
+    const o = by('0cba25d-d2-pre.json');
+    if (o) {
+      o.meta.bosses.max = 2; o.meta.bosses.hi = 6;                    // an older build lowered max in place, kept hi
+      o.meta.vigil.max = 9; o.meta.vigil.hi = 9; o.meta.vigil.wins = [1, 0, 0, 0, 0, 0, 0, 0, 2, 1];
+      const { store, page } = bootSave({ [KEY]: J(o) });
+      if (page.alive) {
+        const bs = page.G.meta.bosses, vg = page.G.meta.vigil, B = page.R.Run.BOSSES.length, V = page.R.Run.VIGIL.length;
+        ok(bs.max === B && bs.hi === 6, () => 'bosses: max ' + bs.max + ' hi ' + bs.hi + ' (want ' + B + ' and 6)');
+        ok(vg.max === V && vg.hi === 9 && vg.wins.length === V + 1 && J(vg.winsX) === J({ 8: 2, 9: 1 }), () => 'vigil: ' + J(vg));
+        page.G.save();
+        const mt = store.parsed().meta;
+        ok(mt.bosses.hi === 6 && mt.vigil.hi === 9 && J(mt.vigil.winsX) === J({ 8: 2, 9: 1 }), 'the shadow keys must survive a save');
+        const again = bootSave({ [KEY]: store.raw() });
+        if (again.page.alive) ok(J(again.page.G.meta) === J(mt), 'the repair of the shadow keys must be idempotent');
+      }
+    }
+  }
+  // An empty store, and storage that can be read but not written or not used at all (memory only).
+  {
+    where = 'fixtures:empty';
+    const { store, page } = bootSave({});
+    if (page.alive) {
+      waitScene(page, 'title', 200); run60(page, 10);
+      ok(page.G.run === null && J(page.G.meta) === J(page.R.Run.defaultMeta()) && store.writes === 0 && !page.R.Save.stale, 'an empty store must boot to the title with a fresh profile and write nothing');
+    }
+    const x = all.find(q => q.file === '0cba25d-d2-seal.json');
+    for (const mode of x ? ['failWrite', 'failAll'] : []) {
+      where = 'fixtures:memory-only ' + mode;
+      const st = makeStore();
+      st.map.set(KEY, x.fx.store[KEY]); st.mode = mode;
+      const p = makePage(st, VIEWS[2], { ts: 1000 });
+      if (!p.alive) continue;
+      const sr = JSON.parse(x.fx.store[KEY]).run;
+      if (mode === 'failWrite') {                                     // reads work, writes throw: the run resumes and plays on in memory
+        ok(continueToInput(p) && commitOf(p.G.run.pending) === commitOf(sr.pending), 'storage that cannot be written must still resume the stored commit');
+        ok(playTurnOut(p) && st.raw() === x.fx.store[KEY] && p.R.Save.persistent === false && !p.R.Save.stale, 'memory only: the turn must resolve in memory with nothing written and no stale tab');
+      } else {                                                        // every call throws: nothing can be read, a fresh profile in memory
+        waitScene(p, 'title', 200); run60(p, 10);
+        ok(p.G.run === null && J(p.G.meta) === J(p.R.Run.defaultMeta()) && p.R.Save.persistent === false && !p.R.Save.stale, 'storage that cannot be read must boot a fresh profile in memory');
+      }
+    }
+  }
+  where = 'fixtures';
+  console.log('fixtures: ' + all.length + ' golden saves (' + [...shas].map(s => s + ' ' + (tally[s] || 0)).join(', ') + ' resumed and played out): ' + tally.commit + ' with the pending commit kept, ' + tally.begin +
+    ' with one turn start (' + tally.bleed + ' saved after it), ' + tally.tutorial + ' tutorial, ' + tally.bonfire + ' bonfire, ' + tally.transform + ' between phases; V1 rebuild, parked run, unknown face, phase repairs, shadow keys, empty and memory-only storage; ' + ((Date.now() - t) / 1000).toFixed(1) + ' s');
+}
+// Frames until the buttons light (already in the duel scene), collecting drawn texts into `seen`.
+function continueFrames(page, seen) {
+  page.keepTexts = true;
+  for (let i = 0; i < 2000; i++) {
+    const pk = page.R.Scenes.duel.peek();
+    if (pk && pk.input) { page.keepTexts = false; return true; }
+    if (!page.frame(16.7)) break;
+    for (const s of page.lastTexts) seen.add(s);
+  }
+  page.keepTexts = false;
+  return false;
+}
+
+// ============================================================================================== 16. stale second tab (P1.1)
+// Two pages on one storage. The tab that did not save last is stale: R.Save refuses its writes (a storage event, or
+// the generation key rival.save.v1.gen found changed at its next save), and it reloads from storage when it comes
+// back into view or at its next tap or key, which it swallows. A save with nothing new writes nothing (an idle tab
+// never makes another stale), a failing generation write alone is not stale, and a tab without storage never is.
+function staleTests() {
+  where = 'stale';
+  const J = JSON.stringify, t = Date.now();
+  const inputOpen = p => p.E.sceneName === 'duel' && p.R.Scenes.duel.peek() && p.R.Scenes.duel.peek().input;
+  // something new for a tab to save (a save with nothing new writes nothing and takes no generation)
+  const touch = P => { P.R.Save.data.tabMark = 1 + (P.R.Save.data.tabMark | 0); };
+  const store = makeStore(), A = makePage(store, VIEWS[2]);
+  if (!A.alive) return;
+  playUntil(A, store, inputOpen, { what: 'tab A: an input window', seed: 61 });
+  const B = makePage(store, VIEWS[3]);                              // a second tab opens on the same storage
+  if (!B.alive) return;
+  waitScene(B, 'title', 200); run60(B, 10);
+  ok(!A.R.Save.stale && !B.R.Save.stale, 'no tab is stale before another one saved');
+  // an idle second tab hidden and shown again (its flush has nothing new): nothing is written, the first tab stays
+  {
+    const r0 = store.raw(), wi = store.writes, gi = store.map.get(GEN_KEY);
+    B.setHidden(true); B.setHidden(false); run60(B, 3);
+    ok(store.writes === wi && store.raw() === r0 && store.map.get(GEN_KEY) === gi, 'an idle tab\'s flush wrote to storage (writes +' + (store.writes - wi) + ', generation ' + gi + ' -> ' + store.map.get(GEN_KEY) + ')');
+    ok(A.R.Save.check() === false && !A.R.Save.stale && inputOpen(A) && A.G.save() === true && store.writes === wi, 'an idle second tab must not make the playing tab stale');
+  }
+  // (a) B earns a face and saves; A hears it through a storage event
+  B.G.meta.bosses.max = Math.min(B.R.Run.BOSSES.length, B.G.meta.bosses.max + 1);
+  ok(B.G.save() === true, 'G.save must return true when the save reached storage');
+  const raw = store.raw(), w0 = store.writes, gen0 = store.map.get(GEN_KEY);
+  ok(/^\d+$/.test(gen0 || ''), 'the generation key holds an integer: ' + gen0);
+  A.fire('window', 'storage', { key: KEY });
+  ok(A.R.Save.stale === true, 'a storage event for the save must make the other tab stale');
+  A.setHidden(true);                                                 // its flush: visibilitychange + pagehide
+  ok(A.G.save() === false && A.R.Save.commit() === false, 'a stale tab: G.save and R.Save.commit must return false');
+  ok(store.writes === w0 && store.raw() === raw && store.map.get(GEN_KEY) === gen0, 'a stale tab wrote to storage');
+  A.setHidden(false);                                                // back in view: reloads from storage
+  run60(A, 3);
+  let sv = store.parsed();
+  ok(J(A.G.meta) === J(sv.meta) && A.G.meta.bosses.max === B.G.meta.bosses.max, 'after the reload tab A must have the stored meta (the face tab B earned)');
+  ok(J(A.G.run) === J(sv.run), 'after the reload tab A must have the stored run');
+  ok(A.E.sceneName === 'title' && A.R.Save.stale === false, 'a reloaded tab starts from the title and is not stale: ' + A.E.sceneName);
+  // (b) no storage event (a page restored from the back-forward cache): the next save finds a newer generation
+  touch(A);
+  ok(A.G.save() === true && store.map.get(GEN_KEY) !== gen0, 'tab A saves again after its reload');
+  const raw2 = store.raw(), w2 = store.writes;
+  ok(B.G.save() === false && B.R.Save.stale === true, 'without a storage event the next save must find the newer generation and refuse');
+  ok(store.raw() === raw2 && store.writes === w2, 'the refused save wrote something');
+  // (c) a stale tab swallows its next tap: it reloads, and the tap reaches no scene
+  let ev = B.fire('window', 'pointerdown', { pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 10, clientY: 10, cancelable: true });
+  ok(ev.stopped && ev.defaultPrevented && B.R.Save.stale === false, 'a stale tab must swallow the tap that reloads it');
+  B.fire('window', 'pointerup', { pointerId: 1, pointerType: 'touch', button: 0, clientX: 10, clientY: 10, cancelable: true });
+  run60(B, 3);
+  ok(B.E.sceneName === 'title' && J(B.G.meta) === J(store.parsed().meta), 'the swallowed tap must reload tab B from storage');
+  // ... also a tap on a move button (tab B) and a key (tab A) at an open input window: nothing is picked or written.
+  // Tab A falls behind a save of B's and finds out when it hides (its flush is refused) and reloads when it is shown
+  // again.
+  for (const how of ['tap', 'key']) {
+    where = 'stale:' + how;
+    const P = how === 'tap' ? B : A;
+    if (P === A) {
+      touch(B);
+      ok(B.G.save() === true, 'tab B saves after its reload');
+      A.setHidden(true);
+      ok(A.R.Save.stale === true, 'a tab whose flush finds a newer generation must be stale');
+      A.setHidden(false); run60(A, 3);
+      ok(A.R.Save.stale === false && A.E.sceneName === 'title', 'a stale tab shown again must reload from storage');
+    }
+    if (!ok(continueToInput(P), 'no input window to test the swallowed ' + how)) continue;
+    P.fire('window', 'storage', { key: GEN_KEY });
+    const before = store.raw(), turns = P.G.run.stats.turns, bt = findBtn(P, 'STRIKE') || findBtn(P, 'GUARD') || findBtn(P, 'FEINT');
+    ev = how === 'tap' ? P.down(bt.x + 5, bt.y + 5) : P.key('1');
+    if (how === 'tap') P.up(bt.x + 5, bt.y + 5);
+    run60(P, 30);
+    ok(ev && ev.stopped && P.E.sceneName === 'title' && store.raw() === before && P.G.run && P.G.run.stats.turns === turns, () => 'the ' + how + ' on a stale tab must reload it and pick nothing (scene ' + P.E.sceneName + ')');
+  }
+  // (d) a failing generation write alone is not stale, and the next save still writes
+  where = 'stale:gen-write';
+  const s2 = makeStore(), P2 = makePage(s2, VIEWS[2]);
+  if (P2.alive) {
+    run60(P2, 10);
+    s2.failKeys.add(GEN_KEY);
+    touch(P2);
+    ok(P2.G.save() === true && !P2.R.Save.stale && !s2.map.has(GEN_KEY), 'a failed generation write: the save is written and the tab is not stale');
+    touch(P2);
+    const w2b = s2.writes;
+    ok(P2.G.save() === true && !P2.R.Save.stale && s2.writes === w2b + 1, 'a failed generation write: the next save still writes');
+    s2.failKeys.delete(GEN_KEY);
+    touch(P2);
+    ok(P2.G.save() === true && s2.map.get(GEN_KEY) === '1', 'the generation key is written again once it can be: ' + s2.map.get(GEN_KEY));
+  }
+  // (f) a generation this code never writes (garbage, or too long to read back as the same number) reads as 0, and
+  // the last one wraps to 1: a tab is never made stale by its own saves
+  for (const g of ['999999999999999999999', '1e+21', '-3', 'x', '999999999']) {
+    where = 'stale:gen ' + g;
+    const s4 = makeStore();
+    s4.map.set(GEN_KEY, g);
+    const P4 = makePage(s4, VIEWS[2]);
+    if (!P4.alive) continue;
+    run60(P4, 10);
+    const got = [];
+    for (let i = 0; i < 3; i++) { touch(P4); got.push(P4.G.save() + ':' + s4.map.get(GEN_KEY)); }
+    ok(!P4.R.Save.stale && J(got) === J(['true:1', 'true:2', 'true:3']), () => 'stored generation ' + g + ': saves ' + J(got) + (P4.R.Save.stale ? ', and the tab made itself stale' : ''));
+  }
+  // (g) the save cleared elsewhere (another tab, or by hand): the stale tab reboots to what storage holds (nothing),
+  // not to its own copy, and its next save does not bring that copy back
+  {
+    where = 'stale:cleared';
+    const s5 = makeStore(), P5 = makePage(s5, VIEWS[2]);
+    if (P5.alive) {
+      run60(P5, 10);
+      P5.G.meta.memory.runs = 42;
+      ok(P5.G.save() === true && s5.parsed().meta.memory.runs === 42, 'the marked save was not written');
+      s5.map.clear();
+      P5.fire('window', 'storage', { key: null });
+      ok(P5.R.Save.stale === true, 'clearing the storage elsewhere must make the tab stale');
+      P5.setHidden(true);
+      ok(s5.map.size === 0, 'a stale tab wrote its copy back into cleared storage');
+      P5.setHidden(false); run60(P5, 3);
+      ok(!P5.R.Save.stale && P5.E.sceneName === 'title' && P5.G.meta.memory.runs === 0 && P5.G.run === null, 'a tab reloaded after the save was cleared must start fresh (runs ' + P5.G.meta.memory.runs + ')');
+      P5.G.save();
+      ok(!s5.map.has(KEY) || s5.parsed().meta.memory.runs === 0, 'the reloaded tab brought its old copy back into storage');
+    }
+  }
+  // (e) without storage (denied, every call throwing, writes failing) a tab is never stale, even after a storage event
+  for (const mode of ['deny', 'failAll', 'failWrite']) {
+    where = 'stale:' + mode;
+    const s3 = makeStore(); s3.mode = mode;
+    const P3 = makePage(s3, VIEWS[2]);
+    if (!P3.alive) continue;
+    run60(P3, 10);
+    if (mode !== 'failWrite') P3.fire('window', 'storage', { key: KEY });
+    ok(P3.G.save() === false && P3.R.Save.stale === false && s3.map.size === 0, 'storage mode ' + mode + ': memory only, never stale');
+  }
+  // (h) a tab made stale during the presentation (its pick resolved, the next seal not yet made), with no tap and no
+  // hide: it must not seal a turn it cannot save, or its stance would be a free look at a seal the reboot rolls
+  // again. It reboots before the next seal, so no new seal is made and no stance shows. With a storage event,
+  // without one (the check before the seal), and with the other tab saving during the seal itself (the seal's own
+  // save finds the tab stale: it reboots before the stance shows).
+  for (const how of ['event', 'no event', 'during the seal']) {
+    where = 'stale:presentation ' + how;
+    const s6 = makeStore(), P6 = makePage(s6, VIEWS[2]);
+    if (!P6.alive) continue;
+    playUntil(P6, s6, inputOpen, { what: 'the presentation case: an input window', seed: how === 'event' ? 62 : how === 'no event' ? 63 : 64 });
+    if (!ok(inputOpen(P6), 'no input window for the presentation case')) continue;
+    const pk = P6.R.Scenes.duel.peek(), m = pk.only || P6.R.Combat.legal(P6.G.run.duel, 'p')[0], b = findBtn(P6, MOVE_LABEL[m]);
+    const turns0 = P6.G.run.stats.turns;
+    P6.down(b.x + 5, b.y + 5); P6.up(b.x + 5, b.y + 5);
+    for (let i = 0; i < 900 && P6.G.run && P6.G.run.stats.turns === turns0; i++) P6.frame(16.7);
+    if (!ok(P6.G.run && P6.G.run.stats.turns === turns0 + 1 && !P6.G.run.duel.over && !inputOpen(P6), 'the pick did not resolve into a running duel')) continue;
+    const Q = makePage(s6, VIEWS[3]);                                // another tab, on the same storage
+    if (!Q.alive) continue;
+    waitScene(Q, 'title', 200); run60(Q, 10);
+    // a stance shows as the Rival's tell_<move> animation (S.tell itself keeps the last turn's value until then)
+    let seals = 0, told = false, qSaved = null, raw = null, w = 0;
+    const brain = P6.G.brain, commit0 = brain.commit, fighter0 = P6.H.fighter;
+    const otherSaves = () => { touch(Q); qSaved = Q.G.save(); raw = s6.raw(); w = s6.writes; };
+    P6.H.fighter = function (who, name) { if (seals > 0 && /^tell_/.test(String(name))) told = true; return fighter0.apply(this, arguments); };
+    brain.commit = function () {
+      seals++;
+      const r = commit0.apply(this, arguments);
+      if (how === 'during the seal' && seals === 1) otherSaves();
+      return r;
+    };
+    if (how !== 'during the seal') otherSaves();
+    if (how === 'event') P6.fire('window', 'storage', { key: KEY });
+    let opened = false;
+    for (let i = 0; i < 900 && P6.E.sceneName === 'duel'; i++) {
+      if (inputOpen(P6)) { opened = true; break; }
+      P6.frame(16.7);
+    }
+    brain.commit = commit0; P6.H.fighter = fighter0;
+    ok(qSaved === true, 'the other tab saves');
+    ok(!opened && P6.E.sceneName === 'title', () => 'a tab made stale during the presentation must reboot before its next seal, not open an input window (scene ' + P6.E.sceneName + ')');
+    ok(seals === (how === 'during the seal' ? 1 : 0) && !told, () => 'a stale tab sealed ' + seals + ' turn(s)' + (told ? ' and showed a stance' : '') + ' it could not save');
+    ok(s6.raw() === raw && s6.writes === w && !P6.R.Save.stale, 'the rebooted tab wrote to storage or stayed stale');
+    ok(J(P6.G.run) === J(s6.parsed().run), 'after the reboot the tab must hold the stored run');
+  }
+  // (i) a tab that goes stale after its seal is saved and before its pick resolves must not show the resolve: the
+  // reboot replays the saved seal, and the player would play it again knowing the Rival's move. Three ways in: the
+  // other tab saves while a press is held (the event lands between down and up), during the 0.2 s lock-in, or with
+  // no event at all during the input window (the tap finds the newer generation and is swallowed). (j) The same for
+  // a Keyhole held when the event lands: no glimpse, and the charge stays spent nowhere.
+  const openWindow = p => inputOpen(p) && p.G.meta.seenTutorial && !p.R.Scenes.duel.peek().only && p.G.run.pending;
+  for (const how of ['held press', 'lock-in', 'no event', 'keyhole']) {
+    where = 'stale:resolve ' + how;
+    const s7 = makeStore();
+    let P7 = makePage(s7, VIEWS[2]);
+    if (!P7.alive) continue;
+    playUntil(P7, s7, openWindow, { what: 'a post-tutorial input window', seed: 70 + ['held press', 'lock-in', 'no event', 'keyhole'].indexOf(how) });
+    if (!ok(openWindow(P7), 'no post-tutorial input window')) continue;
+    if (how === 'keyhole') {                                          // hand the player a Keyhole and reload on that save
+      const d = P7.G.run.duel;
+      if (d.p.boons.indexOf('keyhole') < 0) d.p.boons.push('keyhole');
+      d.p.charges = d.p.charges || {}; d.p.charges.keyhole = 1;
+      if (P7.G.run.pBoons.indexOf('keyhole') < 0) P7.G.run.pBoons.push('keyhole');
+      P7.G.save();
+      P7 = makePage(s7, VIEWS[2]);
+      if (!ok(P7.alive && continueToInput(P7), 'no input window after the Keyhole reload')) continue;
+      run60(P7, 2);
+    }
+    const X = J(s7.parsed().run.pending && s7.parsed().run.pending.sealed);
+    ok(X !== undefined && J(P7.G.run.pending.sealed) === X, 'tab A holds the stored seal');
+    const turns0 = s7.parsed().run.stats.turns;
+    const shown = [], sig0 = P7.H.sigil;
+    P7.H.sigil = function (x, y, state, move, side) { if (side === 'r' && state === 'open' && shown.indexOf(move) < 0) shown.push(move); return sig0.apply(this, arguments); };
+    const Q = makePage(s7, VIEWS[3]);
+    if (!Q.alive) continue;
+    waitScene(Q, 'title', 200); run60(Q, 10);
+    const other = () => { touch(Q); return Q.G.save(); };
+    let qSaved, ev = null;
+    if (how === 'keyhole') {
+      const kb = P7.buttons.find(q => q.label === '' && q.w === 22 && q.x === 4);
+      if (!ok(!!kb, 'no Keyhole button')) continue;
+      P7.down(kb.x + 5, kb.y + 5); P7.frame(16.7);
+      qSaved = other(); P7.fire('window', 'storage', { key: KEY });
+      P7.up(kb.x + 5, kb.y + 5);
+    } else {
+      const b = findBtn(P7, MOVE_LABEL[P7.R.Combat.legal(P7.G.run.duel, 'p')[0]]);
+      if (how === 'held press') { P7.down(b.x + 5, b.y + 5); P7.frame(16.7); qSaved = other(); P7.fire('window', 'storage', { key: KEY }); P7.up(b.x + 5, b.y + 5); }
+      else if (how === 'lock-in') { P7.down(b.x + 5, b.y + 5); P7.up(b.x + 5, b.y + 5); P7.frame(16.7); P7.frame(16.7); qSaved = other(); P7.fire('window', 'storage', { key: KEY }); }
+      else { qSaved = other(); ev = P7.down(b.x + 5, b.y + 5); P7.up(b.x + 5, b.y + 5); }
+    }
+    for (let i = 0; i < 1500 && P7.E.sceneName === 'duel'; i++) P7.frame(16.7);
+    const st = s7.parsed();
+    ok(qSaved === true, 'the other tab saves');
+    ok(shown.length === 0, () => 'a stale tab showed the Rival\'s sealed move (' + J(shown) + ') for a ' + (how === 'keyhole' ? 'glimpse' : 'resolve') + ' it could not save');
+    ok(P7.E.sceneName === 'title' && !P7.R.Save.stale, () => 'the stale tab must reboot to the title (scene ' + P7.E.sceneName + ')');
+    ok(st.run.stats.turns === turns0 && J(st.run.pending && st.run.pending.sealed) === X, 'the stored run must still hold the same seal, unresolved');
+    if (how === 'no event') ok(ev && ev.stopped, 'with no event, the tap must find the newer generation and be swallowed');
+    if (how === 'keyhole') ok(st.run.duel.p.charges.keyhole === 1, 'the stored Keyhole charge must stay unspent');
+  }
+  where = 'stale';
+  sv = store.parsed();
+  console.log('stale tab: idle second tab, storage event, generation mismatch, swallowed tap and key, failed generation write, garbage and wrapping generations, save cleared elsewhere, deny/failAll/failWrite, stale during the presentation (event, no event, during the seal), stale before the resolve (held press, lock-in, no event) and at a Keyhole; save generation ' + store.map.get(GEN_KEY) + ', ' + ((Date.now() - t) / 1000).toFixed(1) + ' s');
+}
+
 // ============================================================================================== go
 // New sections go after the old ones: every page draws from the shared sysRand stream, so inserting one earlier
 // would change what the later sections play.
 const SECTIONS = {
   soak, long: longSession, storage: storageTests, corrupt: corruptTests, pause: pauseTests, scripted: scriptedReloads, layout: layoutTests, perf: perfProbe, random: randomTests,
-  rngsites: rngSitesTests, blind: blindTests, pausetap: pauseTapTests, parity: parityTests, coerce: coerceTests, sealtrace: sealTraceTests
+  rngsites: rngSitesTests, blind: blindTests, pausetap: pauseTapTests, parity: parityTests, coerce: coerceTests, fixtures: fixtureTests, stale: staleTests, sealtrace: sealTraceTests
 };
 const OPT_IN = ['sealtrace'];                                       // only when named in FLOW_SECTIONS
 function main() {
@@ -2107,7 +2745,7 @@ else {
   // The harness for other tools (P1.1 fixtures and the like). Requiring this file runs no section. Shared state:
   // clock (the wall clock every page sees), the sysRand stream, the failure counters (stats(), setWhere()).
   module.exports = {
-    KEY, VIEWS, SRC, clock, sysRand, oracle, COERCE, KNOWN_ROWS,
+    KEY, GEN_KEY, VIEWS, SRC, clock, sysRand, oracle, COERCE, KNOWN_ROWS, loadFixtures, bootSave, continueToInput, playTurnOut,
     makeStore, makePage, makeBot, makeMonitor, session, commitOf, coreOf, diffKeys, findBtn, run60, tapXY, tapLabel, waitScene, playUntil,
     collectSaves, bootAndPlay, drive, veteranSave, recordFrames, blindRun, blindLive, qCanon, canonV, mulberry, fail, ok, knownHit,
     setWhere(w) { where = w; }, stats: () => ({ fails, checks, known, knownRows: Object.assign({}, knownSeen), where })
