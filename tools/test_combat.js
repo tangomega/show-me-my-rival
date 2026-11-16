@@ -6,15 +6,21 @@ require(path.join(src, 'core', 'rng.js'));
 require(path.join(src, 'game', 'boons.js'));
 require(path.join(src, 'game', 'combat.js'));
 require(path.join(src, 'game', 'run.js'));
+require(path.join(src, 'ai', 'brain.js'));            // only section 5b seals with the real brain
 const R = globalThis.RIVAL;
 const C = R.Combat, B = R.Boons, RUN = R.Run, MOVES = R.MOVES;
 
 const QUICK = process.argv.indexOf('--quick') >= 0;
 let fails = 0, passes = 0;
-const failLog = [];
+const failLog = [], knownRows = [];
 function ok(cond, msg) {
   if (cond) passes++;
   else { fails++; failLog.push(msg); console.log('    FAIL: ' + msg); }
+}
+// A known-open defect scheduled for a later push: one stdout line, not a failure. The id must be registered.
+function known(id, push, text) {
+  knownRows.push(id);
+  console.log('KNOWN ' + id + ' ' + push + ': ' + text);
 }
 function eq(a, b, msg) { ok(a === b, msg + ' (got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b) + ')'); }
 function section(t) { console.log('\n=== ' + t + ' ==='); }
@@ -22,6 +28,27 @@ function pct(a, b) { return b ? (100 * a / b).toFixed(1) + '%' : '  n/a'; }
 function pad(s, n) { s = String(s); while (s.length < n) s += ' '; return s; }
 function lpad(s, n) { s = String(s); while (s.length < n) s = ' ' + s; return s; }
 function rt(o) { return JSON.parse(JSON.stringify(o)); }
+
+// ------------------------------------------------------------------ Rival-coercion detector
+// combat.js replaces an illegal move with legal[0] and leaves a {t:'note', side, text:'illegal move replaced'}
+// event (coerce is private, so it is observed from outside). A resolve of a SEALED Rival move counts as a
+// coercion when the move was not legal for the Rival at that moment, when the note fires, or when the move
+// resolved is not the one sealed. Only seal resolves go through here: unit tests that coerce the player on
+// purpose, and the {unchecked:true} payoff comparisons, do not.
+const COERCE = { seals: 0, rival: 0, first: null };
+function sealResolve(d, pm, rm, ctr, where) {
+  const lr = d.over ? null : C.legal(d, 'r');
+  const res = C.resolve(d, pm, rm);
+  ctr.seals++;
+  const noted = res.events.some(e => e.t === 'note' && e.side === 'r');
+  const coerced = noted || (lr !== null && (lr.indexOf(rm) < 0 || res.rm !== rm));
+  ctr.last = coerced;
+  if (coerced) {
+    ctr.rival++;
+    if (!ctr.first) ctr.first = where + ': sealed ' + rm + ', legal [' + lr + '], resolved ' + res.rm + (noted ? ', note fired' : '');
+  }
+  return res;
+}
 
 // ------------------------------------------------------------------ helpers
 function mk(pB, rB, o) {
@@ -756,68 +783,160 @@ T('relic_liars_coin', () => {
   console.log('  checklist: ' + pass + '/' + B.list.length + ' PASS');
 })();
 
-// ================================================================== 3. payoff == resolve
-section('3. payoff(duel) vs resolve on 300 random mid-duel states');
+// ================================================================== 3. payoff == resolve, in the real intel order
+// What the Rival is handed at the seal (scenes/duel.js turn()): beginTurn; duel.intel.called on Called Shot
+// turns (callsOf && turn % 3 === 2); payoff; commit. honest, pred and coin are written only after the player
+// picks, right before resolve. So at the seal the intel is {called, honest:null, pred:null, coin:false}, and
+// every payoff cell must equal resolve under exactly that intel. Hooks that read honest / pred / coin are
+// therefore not priced (DESIGN ruling 5); how often they would change a cell is counted, report-only.
+section('3. payoff(duel) vs resolve in the real intel order on 2,000 random states');
 (function () {
   const rng = R.RNG.create(20261113);
   const pPool = B.list.filter(b => !b.relic && b.who !== 'rival').map(b => b.id);
   const rPool = B.list.filter(b => !b.relic && b.who !== 'player').map(b => b.id);
   const relics = B.list.filter(b => b.relic).map(b => b.id);
-  let states = 0, cells = 0, bad = 0, mutated = 0, tries = 0, withIllegal = 0, phase2 = 0;
+  const FRESH = JSON.stringify({ called: null, honest: null, pred: null, coin: false });
+
+  // Static guard: every hook that reads duel.intel, by field. A new reader is unpriced at the seal, so it
+  // must be named in ruling 5 before it ships. liars_tally only counts (it changes no value).
+  // The scan does not depend on the hook's parameter name, and a hook that calls a module-level helper of
+  // boons.js which itself reads intel (other than intel() itself) is reported as '(via <helper>)'.
+  const READS = { painted_smile: 'honest', liars_tally: 'honest', hungry_mask: 'pred', broken_pattern: 'pred', coin_of_fools: 'coin' };
+  const INTEL_TEXT = /\.\s*intel\b|\[\s*['"]intel['"]\s*\]|\bintel\s*\(/;
+  const helpers = (function () {
+    const text = require('fs').readFileSync(path.join(src, 'game', 'boons.js'), 'utf8').replace(/\r\n?/g, '\n');
+    const bodies = {}, re = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
+    let m;
+    while ((m = re.exec(text))) {                 // named function declarations, body found by brace matching
+      let depth = 1, i = re.lastIndex;
+      for (; i < text.length && depth > 0; i++) { if (text[i] === '{') depth++; else if (text[i] === '}') depth--; }
+      bodies[m[1]] = text.slice(re.lastIndex, i - 1);
+    }
+    const out = [];
+    let grew = true;
+    while (grew) {                                // helpers that read intel, directly or through another helper
+      grew = false;
+      for (const name in bodies) {
+        if (name === 'intel' || out.indexOf(name) >= 0) continue;
+        const body = bodies[name];
+        if (INTEL_TEXT.test(body) || out.some(h => new RegExp('\\b' + h + '\\s*\\(').test(body))) { out.push(name); grew = true; }
+      }
+    }
+    return out;
+  })();
+  const found = {};
+  B.list.forEach(b => {
+    for (const h in b.hooks) {
+      const s = String(b.hooks[h]), add = f => { (found[b.id] = found[b.id] || {})[f] = 1; };
+      let m;
+      const viaHelper = /\bintel\s*\(\s*[\w$.]+\s*\)\s*\.\s*(\w+)/g, direct = /\.\s*intel\s*\.\s*(\w+)/g;
+      while ((m = viaHelper.exec(s))) add(m[1]);
+      while ((m = direct.exec(s))) add(m[1]);
+      // any intel access left once the plain field reads are removed (kept whole, indexed, aliased) is reported
+      if (INTEL_TEXT.test(s.replace(viaHelper, '').replace(direct, ''))) add('(whole object)');
+      helpers.forEach(fn => { if (new RegExp('\\b' + fn.replace(/\$/g, '\\$') + '\\s*\\(').test(s)) add('(via ' + fn + ')'); });
+    }
+  });
+  const readerIds = Object.keys(found).concat(Object.keys(READS)).filter((id, i, a) => a.indexOf(id) === i).sort();
+  readerIds.forEach(id => {
+    const got = Object.keys(found[id] || {}).sort().join(','), want = READS[id] || '';
+    if (got !== want) {
+      const extra = Object.keys(found[id] || {}).filter(f => f !== want);
+      ok(false, extra.length ? 'boon ' + id + ' reads duel.intel.' + extra.join('/') + ": add it to ruling 5's unpriced list and this table"
+                             : 'boon ' + id + ' no longer reads duel.intel.' + want + ': update this table and ruling 5');
+    } else passes++;
+  });
+  console.log('  intel readers (static scan of every boon hook): ' + readerIds.map(id => id + ':' + Object.keys(found[id] || {}).join('/')).join(', '));
+  // the readers that change a value; coin_of_fools is measured on its own (the coin is thrown during the window)
+  const VALUE_READERS = ['painted_smile', 'hungry_mask', 'broken_pattern'];
+
+  let states = 0, cells = 0, bad = 0, mutated = 0, tries = 0, withIllegal = 0, later = 0, calledTurns = 0, notFresh = 0;
+  let cleanCells = 0, cleanPostBad = 0;
+  const unpriced = { smile: { n: 0, d: 0 }, pred: { n: 0, d: 0 }, coin: { n: 0, d: 0 } };
   function sub(pool, n) { return rng.shuffle(pool.slice()).slice(0, n); }
-  while (states < 300 && tries < 5000) {
+  // one cell resolved on a copy, valued with the payoff formula (combat.js); the break turns are read from the
+  // fighters' status, not from the result, so the result's own bookkeeping is checked too
+  function cell(snap, pm, rm, intel) {
+    const c = JSON.parse(snap);
+    if (intel) c.intel = JSON.parse(JSON.stringify(intel));
+    const hpP = c.p.hp, hpR = c.r.hp;
+    const gbP = Math.max(0, c.p.status.guardBroken - 1), gbR = Math.max(0, c.r.status.guardBroken - 1);
+    const res = C.resolve(c, pm, rm, { unchecked: true });
+    let v = res.dmgP - res.dmgR + res.healR - res.healP
+      + 0.86 * Math.max(0, c.p.status.guardBroken - gbP) - 0.86 * Math.max(0, c.r.status.guardBroken - gbR);
+    if (c.over === 'r') v += 8;
+    if (c.over === 'p') v -= 8;
+    return { c: c, res: res, v: v, hpP: hpP, hpR: hpR };
+  }
+  while (states < 2000 && tries < 40000) {
     tries++;
     const pB = sub(pPool, rng.int(8)), rB = sub(rPool.filter(x => pB.indexOf(x) < 0), rng.int(7));
     if (rng.chance(0.5)) pB.unshift(rng.pick(relics));
-    const n = 1 + rng.int(7), ph = n === 7 && rng.chance(0.5) ? 2 : 1;
+    const n = rng.chance(0.25) ? 7 : 1 + rng.int(6), ph = n === 7 ? 1 + rng.int(4) : 1;     // a quarter in the final duel, any phase
     const pMax = 12, rMax = 6 + rng.int(6);
-    const d = mk(pB, rB, { n: n, phase: ph, pMax: pMax, pHp: 3 + rng.int(10), rMax: rMax, rHp: 2 + rng.int(rMax - 1) });
+    // rules as R.Run sets them: later phases get a tension floor 0..3; Called Shot is live in 40% of fights
+    // (a phase rule, or the seventh light from duel 2 on)
+    const d = C.newDuel({ n: n, phase: ph, floor: ph >= 2 ? rng.int(4) : 0, calls: rng.chance(0.4),
+                          p: C.newFighter(pMax, 3 + rng.int(10), pB), r: C.newFighter(rMax, 2 + rng.int(rMax - 1), rB) });
     const k = rng.int(9);
-    for (let t = 0; t < k && !d.over; t++) {
+    for (let t = 0; t < k && !d.over; t++) {     // a played history, intel written as the scene writes it
       C.beginTurn(d);
       if (d.over) break;
       const lp = C.legal(d, 'p'), lr = C.legal(d, 'r');
-      d.intel.honest = rng.chance(0.6); d.intel.pred = simplex(rng, lp);
-      if (ph === 2 && rng.chance(0.4)) d.intel.called = rng.pick(lp);
+      if (C.callsOf(d) && d.turn % 3 === 2) d.intel.called = rng.pick(lp);
       if (d.p.charges.coin_of_fools > 0 && rng.chance(0.3)) C.useActive(d, 'coin_of_fools');
+      d.intel.honest = rng.chance(0.6); d.intel.pred = simplex(rng, lp);
       C.resolve(d, rng.pick(lp), rng.pick(lr));
     }
     if (d.over) continue;
     C.beginTurn(d);
     if (d.over) continue;
-    // the state the brain would see, with random intel written by the "scene"
-    if (rng.chance(0.7)) d.intel.honest = rng.chance(0.5);
-    if (rng.chance(0.7)) d.intel.pred = simplex(rng, C.legal(d, 'p'));
-    if (ph === 2 && rng.chance(0.5)) d.intel.called = rng.pick(C.legal(d, 'p'));
-    if (rng.chance(0.2)) d.intel.coin = true;
+    // the seal: intel is fresh, then the call (if any), then payoff. Never honest / pred / coin.
+    if (JSON.stringify(d.intel) !== FRESH) notFresh++;
+    if (C.callsOf(d) && d.turn % 3 === 2) { d.intel.called = rng.pick(C.legal(d, 'p')); calledTurns++; }
     const snap = JSON.stringify(d);
     const pay = C.payoff(d);
     if (JSON.stringify(d) !== snap) mutated++;
     states++;
-    if (ph === 2) phase2++;
-    if (C.legal(d, 'p').length < 3 || C.legal(d, 'r').length < 3) withIllegal++;
+    if (ph >= 2) later++;
+    const lpNow = C.legal(d, 'p');
+    if (lpNow.length < 3 || C.legal(d, 'r').length < 3) withIllegal++;
+    // what the scene writes after the pick (the coin only when a charge is thrown, measured separately)
+    const post = { called: d.intel.called, honest: rng.chance(0.5), pred: simplex(rng, lpNow), coin: false };
+    const has = id => d.p.boons.indexOf(id) >= 0 || d.r.boons.indexOf(id) >= 0;
+    const smile = has('painted_smile'), predR = has('hungry_mask') || has('broken_pattern');
+    const clean = !VALUE_READERS.some(has);
+    const coin = d.p.boons.indexOf('coin_of_fools') >= 0 && d.p.charges.coin_of_fools > 0;
     MOVES.forEach(rm => MOVES.forEach(pm => {
-      const c = JSON.parse(snap);
-      const gbP = Math.max(0, c.p.status.guardBroken - 1), gbR = Math.max(0, c.r.status.guardBroken - 1);
-      const hpP = c.p.hp, hpR = c.r.hp;
-      const res = C.resolve(c, pm, rm, { unchecked: true });
-      let v = res.dmgP - res.dmgR + res.healR - res.healP
-        + 0.86 * Math.max(0, c.p.status.guardBroken - gbP) - 0.86 * Math.max(0, c.r.status.guardBroken - gbR);
-      if (c.over === 'r') v += 8;
-      if (c.over === 'p') v -= 8;
+      const a = cell(snap, pm, rm, null), c = a.c, res = a.res;
       cells++;
       const savedP = res.events.some(e => e.t === 'saved' && e.side === 'p'), savedR = res.events.some(e => e.t === 'saved' && e.side === 'r');
-      const consistent = (c.over === 'r' || savedP || hpP - c.p.hp === res.dmgP - res.healP) && (c.over === 'p' || savedR || hpR - c.r.hp === res.dmgR - res.healR);
-      if (!(Math.abs(v - pay[rm][pm]) < 1e-9) || !consistent || res.pm !== pm || res.rm !== rm) {
+      const consistent = (c.over === 'r' || savedP || a.hpP - c.p.hp === res.dmgP - res.healP) && (c.over === 'p' || savedR || a.hpR - c.r.hp === res.dmgR - res.healR);
+      if (!(Math.abs(a.v - pay[rm][pm]) < 1e-9) || !consistent || res.pm !== pm || res.rm !== rm) {
         bad++;
-        if (bad <= 5) console.log('    mismatch pm=' + pm + ' rm=' + rm + ' payoff=' + pay[rm][pm] + ' resolve=' + v + ' boons P[' + pB + '] R[' + rB + ']');
+        if (bad <= 5) console.log('    mismatch pm=' + pm + ' rm=' + rm + ' payoff=' + pay[rm][pm] + ' resolve=' + a.v + ' boons P[' + d.p.boons + '] R[' + d.r.boons + ']');
       }
+      // the same cell under the post-pick intel
+      const differs = !(Math.abs(cell(snap, pm, rm, post).v - pay[rm][pm]) < 1e-9);
+      if (clean) {
+        cleanCells++;
+        if (differs) { cleanPostBad++; if (cleanPostBad <= 3) console.log('    post-pick mismatch without a reader: pm=' + pm + ' rm=' + rm + ' boons P[' + d.p.boons + '] R[' + d.r.boons + ']'); }
+      }
+      if (smile) { unpriced.smile.n++; if (differs) unpriced.smile.d++; }
+      if (predR) { unpriced.pred.n++; if (differs) unpriced.pred.d++; }
+      if (coin) { unpriced.coin.n++; if (!(Math.abs(cell(snap, pm, rm, Object.assign({}, post, { coin: true })).v - pay[rm][pm]) < 1e-9)) unpriced.coin.d++; }
     }));
   }
-  eq(states, 300, 'generated 300 states');
-  eq(bad, 0, 'payoff cells that differ from resolve');
+  eq(states, 2000, 'generated 2,000 states');
+  eq(notFresh, 0, 'intel at the seal is fresh {called:null, honest:null, pred:null, coin:false} after beginTurn');
+  eq(bad, 0, 'payoff cells that differ from resolve under the seal-time intel');
   eq(mutated, 0, 'payoff calls that mutated the duel');
-  console.log('  ' + states + ' states (' + phase2 + ' in phase 2, ' + withIllegal + ' with an illegal move on some side), ' + cells + ' cells: ' + bad + ' mismatches, ' + mutated + ' mutations');
+  eq(cleanPostBad, 0, 'without painted_smile/hungry_mask/broken_pattern the payoff equals resolve under the post-pick intel {called, honest, pred, coin:false}');
+  console.log('  ' + states + ' states (' + later + ' in phases 2-4, ' + calledTurns + ' Called Shot seals, ' + withIllegal + ' with an illegal move on some side), ' + cells +
+              ' cells: ' + bad + ' mismatches, ' + mutated + ' mutations, ' + notFresh + ' stale intel;  post-pick, no reader: ' + cleanPostBad + ' of ' + cleanCells + ' cells differ');
+  console.log('INFO unpriced-intel: cells whose value changes once the post-pick intel is written (ruling 5, report-only): painted_smile ' +
+              unpriced.smile.d + '/' + unpriced.smile.n + ', pred readers (hungry_mask, broken_pattern) ' + unpriced.pred.d + '/' + unpriced.pred.n +
+              ', coin_of_fools thrown ' + unpriced.coin.d + '/' + unpriced.coin.n);
 
   // timing on a heavy late state
   const d = mk(pPool.slice(0, 7), rPool.filter(x => pPool.slice(0, 7).indexOf(x) < 0).slice(0, 6), { pMax: 200, rMax: 200 });
@@ -885,8 +1004,9 @@ function playRun(S, seed, o) {
       const pm = rng.pick(lp);
       d.intel.honest = sealed.honest; d.intel.pred = sealed.pred;
       const hpP = d.p.hp;
-      const res = C.resolve(d, pm, S.run.pending.sealed.move);
+      const res = sealResolve(d, pm, S.run.pending.sealed.move, COERCE, 'playRun');
       if (res.pm !== pm) bad('legal move was replaced');
+      if (COERCE.last) bad('the Rival sealed move was replaced at resolve');
       RUN.record(S.run, S.meta, res, sealed);
       if (o.onTurn) o.onTurn(d, res, hpP);
       check(d);
@@ -1305,6 +1425,230 @@ section('4d. Faces: every boss walks its phases with the rules its table gives')
   ok(cr.prev1 === 'F' && cr.prev2 === 'G' && cr.prevR === 'F' && cr.last === 'C' && cp.prev2 === 'S' && cr.pHp === cd.r.hp && cr.rHp === cd.p.hp, 'ctx from the Rival seat mirrors the fighters');
 }
 
+// ================================================================== 4e. never-losing turns by source
+// Rule 6 at the level of single states (feel-10 C2). Random states that real play reaches in every phase of
+// every face at stakes 0 and 7, built from the real tables (innate boons, copyBoons, fortify, floor, calls,
+// stance and mimic all come from RUN.cfg). For each side, a move is never-losing when (a) nothing the foe may
+// still play beats it, or (b) it can lose the exchange but no cell costs it a hit point. Each such cell gets one
+// source. Designed, short-lived sources are reported: guard_break_r/p (1-2 turns), one-turn seals (no_encores,
+// sealing_wax), fortify2 (absorbs one hit), save (a once-per-run lethal save, at 1 HP). A source that a phase
+// rule creates (tagged floor3 / called / mimic / other), a status with 3+ turns left (any tag), or a save that
+// can fire again can repeat, and fails. (hp1_rupture_floor and the stamp sources need a live turn's public
+// information: the sim's rule-6 probe, not this state-level check.)
+section('4e. Never-losing turns by source: 500 random reachable states per face phase, stakes 0 and 7');
+{
+  const LOSES_TO = R.LOSES_TO;
+  const SOURCES = ['guard_break_r', 'guard_break_p', 'seal', 'fortify2', 'save', 'floor3', 'called', 'mimic', 'other'];
+  // A cell can repeat when it lasts 3+ turns, whatever its source: a phase rule (left Infinity), a seal or a
+  // guard break with 3+ turns left, or a save that can fire again. Designed sources last 1-2 turns.
+  const repeats = c => c.left >= 3;
+  function ruleTag(d) { return C.floorOf(d) >= 3 ? 'floor3' : d.intel && d.intel.called ? 'called' : d.mimic ? 'mimic' : 'other'; }
+  // every never-losing (side, move) cell of a duel at the seal: { side, move, level, tag, left (turns it lasts) }
+  function neverLosing(d) {
+    const out = [];
+    ['p', 'r'].forEach(X => {
+      const Y = X === 'p' ? 'r' : 'p', LY = C.legal(d, Y), sY = d[Y].status;
+      C.legal(d, X).forEach(m => {
+        const o = LOSES_TO[m];                  // the one move that beats m
+        if (LY.indexOf(o) < 0) {                // (a) the foe cannot play it this turn
+          let tag, left;
+          if (o === 'G' && sY.guardBroken > 0) { tag = 'guard_break_' + Y; left = sY.guardBroken; }
+          else if (sY.sealed[o] > 0) { left = sY.sealed[o]; tag = left <= 2 ? 'seal' : 'other'; }
+          else { tag = ruleTag(d); left = Infinity; }
+          out.push({ side: X, move: m, level: 'exchange', tag: tag, left: left });
+          return;
+        }
+        let lost = false, absorbed = false, saved = false, savesAgain = false;   // (b) every cell against the foe's legal moves, on a copy
+        for (const om of LY) {
+          const pm = X === 'p' ? m : om, rm = X === 'p' ? om : m;
+          const c = C.clone(d);
+          c.pendingEvents = [];
+          const before = c[X].hp;
+          const res = C.resolve(c, pm, rm, { unchecked: true });
+          if (c[X].hp < before) { lost = true; break; }
+          if (res.events.some(e => e.t === 'status' && e.side === X && e.id === 'fortify' && e.op === 'consume')) absorbed = true;
+          if (res.events.some(e => e.t === 'saved' && e.side === X)) {
+            saved = true;
+            // A save is short-lived only if it is once per run: it must spend a spent_* counter (run.js carries
+            // exactly those across duels), and with that counter already spent the same cell must not save again.
+            const spent = Object.keys(c[X].counters).filter(k => k.indexOf('spent_') === 0 && c[X].counters[k] && !d[X].counters[k]);
+            if (!spent.length) savesAgain = true;
+            else {
+              const c2 = C.clone(d);
+              c2.pendingEvents = [];
+              spent.forEach(k => { c2[X].counters[k] = 1; });
+              if (C.resolve(c2, pm, rm, { unchecked: true }).events.some(e => e.t === 'saved' && e.side === X)) savesAgain = true;
+            }
+          }
+        }
+        if (lost) return;
+        if (saved) out.push({ side: X, move: m, level: 'hp', tag: 'save', left: savesAgain ? Infinity : 1 });
+        else if (absorbed && d[X].status.fortify >= 2) out.push({ side: X, move: m, level: 'hp', tag: 'fortify2', left: 1 });
+        else out.push({ side: X, move: m, level: 'hp', tag: ruleTag(d), left: Infinity });
+      });
+    });
+    return out;
+  }
+
+  const N = 500, BO = RUN.BOSSES;
+  const rng = R.RNG.create(4242017);
+  const pPool = B.list.filter(b => !b.relic && b.who !== 'rival').map(b => b.id);
+  const rPool = B.list.filter(b => !b.relic && b.who !== 'player').map(b => b.id);
+  const relics = B.list.filter(b => b.relic).map(b => b.id);
+  const sub = (pool, n) => rng.shuffle(pool.slice()).slice(0, n);
+  const meta = allMeta(); meta.vigil.max = 7; meta.bosses.max = 4;
+  const total = {}; SOURCES.forEach(s => { total[s] = 0; });
+  let flagged = 0, firstFlag = null, states = 0, shortRows = 0;
+  const t0 = Date.now();
+  console.log('  never-losing cells by source (per state: either side, every legal move); rule-driven = floor3 + called + mimic + other');
+  BO.forEach(b => [0, 7].forEach(stake => {
+    for (let k = 1; k <= b.phases.length; k++) {
+      const cnt = {}; SOURCES.forEach(s => { cnt[s] = 0; });
+      let n = 0, tries = 0, calledN = 0, brokenN = 0, sealN = 0, hpLow = 0;
+      while (n < N && tries < N * 20) {
+        tries++;
+        const run = RUN.create(meta, { seed: 1 + rng.int(1e9), now: 1.7e12, boss: b.id, anyBoss: true, stake: stake, anyStake: true,
+                                       relicId: rng.chance(0.6) ? rng.pick(relics) : null });
+        // what six bonfires may have given each side by duel 7 (the Rival sometimes holds a seal boon)
+        sub(pPool.filter(id => run.pBoons.indexOf(id) < 0 && run.rBoons.indexOf(id) < 0), rng.int(7)).forEach(id => run.pBoons.push(id));
+        if (rng.chance(0.3)) { const s = rng.pick(['no_encores', 'sealing_wax']); if (run.rBoons.indexOf(s) < 0) run.rBoons.push(s); }
+        sub(rPool.filter(id => run.pBoons.indexOf(id) < 0 && run.rBoons.indexOf(id) < 0), Math.max(0, rng.int(7) - run.rBoons.length)).forEach(id => run.rBoons.push(id));
+        run.duelN = 7;
+        let d = RUN.startDuel(run);
+        for (let j = 1; j < k; j++) { d.over = 'p'; RUN.endDuel(run, meta, 'p', null); d = RUN.nextPhase(run); }
+        // hit points anywhere in range, often in the 1-4 band where a floor-3 hit is lethal; fortify 0-3 either side
+        d.p.hp = rng.chance(0.35) ? 1 + rng.int(Math.min(4, d.p.maxHp)) : 1 + rng.int(d.p.maxHp);
+        d.r.hp = rng.chance(0.35) ? 1 + rng.int(Math.min(4, d.r.maxHp)) : 1 + rng.int(d.r.maxHp);
+        if (rng.chance(0.25)) d.p.status.fortify = rng.int(4);
+        if (rng.chance(0.25)) d.r.status.fortify = rng.int(4);
+        // 0-5 played turns with the intel the scene writes; the last one often breaks a guard (either side)
+        const T = rng.int(6);
+        for (let t = 0; t < T && !d.over; t++) {
+          C.beginTurn(d);
+          if (d.over) break;
+          const lp = C.legal(d, 'p'), lr = C.legal(d, 'r');
+          if (C.callsOf(d) && d.turn % 3 === 2) d.intel.called = rng.pick(lp);
+          let pm = rng.pick(lp), rm = rng.pick(lr);
+          if (t === T - 1) {
+            const u = rng.next();
+            if (u < 0.3 && lp.indexOf('F') >= 0 && lr.indexOf('G') >= 0) { pm = 'F'; rm = 'G'; }
+            else if (u < 0.6 && lr.indexOf('F') >= 0 && lp.indexOf('G') >= 0) { pm = 'G'; rm = 'F'; }
+          }
+          if (d.p.charges.coin_of_fools > 0 && rng.chance(0.2)) C.useActive(d, 'coin_of_fools');
+          d.intel.honest = rng.chance(0.5); d.intel.pred = simplex(rng, lp);
+          C.resolve(d, pm, rm);
+        }
+        if (d.over) continue;
+        C.beginTurn(d);
+        if (d.over) continue;
+        if (C.callsOf(d) && d.turn % 3 === 2) { d.intel.called = rng.pick(C.legal(d, 'p')); calledN++; }   // the seal
+        n++;
+        if (d.p.status.guardBroken > 0 || d.r.status.guardBroken > 0) brokenN++;
+        if (MOVES.some(m => d.p.status.sealed[m] > 0)) sealN++;
+        if (d.p.hp <= 4 || d.r.hp <= 4) hpLow++;
+        neverLosing(d).forEach(c => {
+          cnt[c.tag]++; total[c.tag]++;
+          if (repeats(c)) {
+            flagged++;
+            if (!firstFlag) firstFlag = b.id + ' stake ' + stake + ' phase ' + k + ': ' + (c.side === 'p' ? 'player ' : 'Rival ') + c.move + ' (' + c.level + ', ' + c.tag + ', ' + c.left + ' turns)';
+          }
+        });
+      }
+      states += n;
+      if (n < N) shortRows++;
+      const rule = cnt.floor3 + cnt.called + cnt.mimic + cnt.other;
+      console.log('    ' + pad(b.id, 11) + ' s' + stake + ' p' + k + ' ' + pad(b.phases[k - 1].name, 15) + lpad(n, 4) + ' states (broken ' + lpad(brokenN, 3) + ', sealed ' + lpad(sealN, 3) +
+                  ', called ' + lpad(calledN, 3) + ', hp<=4 ' + lpad(hpLow, 3) + ')   gb_r ' + lpad(cnt.guard_break_r, 3) + '  gb_p ' + lpad(cnt.guard_break_p, 3) +
+                  '  seal ' + lpad(cnt.seal, 3) + '  fortify2 ' + lpad(cnt.fortify2, 3) + '  save ' + lpad(cnt.save, 3) + '  rule-driven ' + rule);
+    }
+  }));
+  eq(shortRows, 0, 'every face phase reached ' + N + ' states');
+  console.log('  ' + states + ' states in ' + (Date.now() - t0) + ' ms;  totals: ' + SOURCES.map(s => s + ' ' + total[s]).join(', '));
+  eq(flagged, 0, 'no never-losing cell in a class that can repeat for 3+ turns (a phase rule, a status with 3+ turns left, a save that fires again)' + (firstFlag ? ' (first: ' + firstFlag + ')' : ''));
+  // controls: a guard break is designed and short; a Feint sealed for 99 turns under floor 3 must be caught
+  const gb = C.newDuel({ n: 7, phase: 2, floor: 1, p: C.newFighter(12, 12, []), r: C.newFighter(7, 7, []) });
+  gb.r.status.guardBroken = 1;
+  C.beginTurn(gb);
+  const gbl = neverLosing(gb);
+  ok(gbl.some(c => c.side === 'p' && c.move === 'S' && c.tag === 'guard_break_r') && !gbl.some(repeats), 'control: Strike into a broken guard is tagged guard_break_r and is not flagged');
+  const neg = C.newDuel({ n: 7, phase: 4, floor: 3, p: C.newFighter(12, 12, []), r: C.newFighter(4, 4, []) });
+  neg.r.status.sealed.F = 99;
+  C.beginTurn(neg);
+  ok(neverLosing(neg).some(c => c.side === 'p' && c.move === 'G' && repeats(c)), "negative control: floor 3 with the Rival's Feint sealed for 99 turns flags the player's Guard");
+  const gb3 = C.newDuel({ n: 7, phase: 2, floor: 1, p: C.newFighter(12, 12, []), r: C.newFighter(7, 7, []) });
+  gb3.r.status.guardBroken = 3;
+  C.beginTurn(gb3);
+  ok(neverLosing(gb3).some(c => c.side === 'p' && c.move === 'S' && c.tag === 'guard_break_r' && repeats(c)), 'negative control: a guard break with 3 turns left is flagged');
+  // saves: an unspent Last Candle at 1 HP is designed (once per run); a save that fires again must be flagged.
+  // Two stand-in boons are registered in the in-memory table for this check only (combat looks hooks up by id).
+  const saveDuel = ids => { const d = C.newDuel({ n: 7, phase: 2, floor: 1, p: C.newFighter(12, 1, ids), r: C.newFighter(7, 7, []) }); C.beginTurn(d); return neverLosing(d).filter(c => c.side === 'p' && c.tag === 'save'); };
+  const lc = saveDuel(['last_candle']);
+  ok(lc.length > 0 && !lc.some(repeats), 'control: an unspent Last Candle at 1 HP is tagged save and is not flagged (' + lc.length + ' cells)');
+  const STUB = { name: 'test stub', desc: '', rarity: 'common', who: 'player', relic: false, tags: [], unlock: null, active: null };
+  B.byId.test_save_every_time = Object.assign({ id: 'test_save_every_time', hooks: { onLethal: x => { if (x.self.hp <= 0) x.self.hp = 1; } } }, STUB);
+  B.byId.test_save_ignores_spent = Object.assign({ id: 'test_save_ignores_spent', hooks: { onLethal: x => { if (x.self.hp <= 0) { x.self.counters.spent_test_save = 1; x.self.hp = 1; } } } }, STUB);
+  try {
+    const every = saveDuel(['test_save_every_time']), ign = saveDuel(['test_save_ignores_spent']);
+    ok(every.length > 0 && every.every(repeats), 'negative control: a lethal save that spends nothing is flagged (' + every.length + ' cells)');
+    ok(ign.length > 0 && ign.every(repeats), 'negative control: a lethal save that ignores its own spent_ counter is flagged (' + ign.length + ' cells)');
+  } finally { delete B.byId.test_save_every_time; delete B.byId.test_save_ignores_spent; }
+}
+
+// ================================================================== 4f. Liar's Coin per final duel
+// The relic stamps the stance TRUE/FALSE on turn 1 "of each duel". combat.js info().coinTurn1 (and the relic's
+// turn-start event) have no phase gate, so every phase of the final duel is stamped: a free never-losing turn
+// per phase (B08, fixed in P1.2). Any other extra stamp is a failure. Each phase is walked for TURNS turns with
+// both fighters' health held above any one exchange, so a stamp on any later turn is seen too.
+section("4f. Liar's Coin: at most one stamp per final duel");
+{
+  const TURNS = 12;
+  const lines = [], other = [];
+  let phase1 = 0, walks = 0, laterStamps = 0, shortPhases = 0, phaseWalks = 0;
+  RUN.BOSSES.forEach(b => {
+    const per = [];
+    [0, 7].forEach(stake => {
+      const meta = allMeta(); meta.vigil.max = 7; meta.bosses.max = 4;
+      const run = RUN.create(meta, { seed: 31, now: 1.7e12, boss: b.id, stake: stake, relicId: 'relic_liars_coin' });
+      if (run.pBoons.indexOf('relic_liars_coin') < 0) run.pBoons.unshift('relic_liars_coin');
+      run.duelN = 7;
+      const rng = R.RNG.create(77 + stake);
+      let d = RUN.startDuel(run);
+      const stamps = [];
+      walks++;
+      for (let k = 1; k <= b.phases.length; k++) {
+        let turns = 0;
+        phaseWalks++;
+        for (let t = 0; t < TURNS && !d.over; t++) {
+          d.p.hp = 99; d.r.hp = 99;                 // above any one exchange: the walk lives through TURNS turns of every phase
+          const evs = C.beginTurn(d);
+          if (d.over) break;
+          turns++;
+          const coin = C.info(d).coinTurn1, ev = evs.some(e => e.t === 'info' && e.id === 'relic_liars_coin');
+          if (coin !== ev) other.push(b.id + ' stake ' + stake + ' phase ' + k + ' turn ' + d.turn + ': info().coinTurn1 ' + coin + ' but turn-start event ' + ev);
+          if (coin || ev) stamps.push({ k: k, turn: d.turn });
+          C.resolve(d, rng.pick(C.legal(d, 'p')), rng.pick(C.legal(d, 'r')));
+        }
+        if (turns < TURNS) shortPhases++;
+        if (k < b.phases.length) { d.over = 'p'; RUN.endDuel(run, meta, 'p', null); d = RUN.nextPhase(run); }
+      }
+      if (stamps.some(s => s.k === 1 && s.turn === 1)) phase1++;
+      stamps.forEach((s, i) => {
+        if (s.turn !== 1) other.push(b.id + ' stake ' + stake + ': stamp on phase ' + s.k + ' turn ' + s.turn);
+        else if (stamps.slice(0, i).some(p => p.k === s.k)) other.push(b.id + ' stake ' + stake + ': two stamps in phase ' + s.k);
+        else if (s.k > 1) laterStamps++;        // B08: turn 1 of a later phase
+      });
+      per.push(new Set(stamps.map(s => s.k)).size + '/' + b.phases.length);
+    });
+    lines.push(b.id + ' ' + per.join(' '));
+  });
+  console.log('  stamped phases per final duel (stake 0, stake 7): ' + lines.join(', ') + ';  ' + phaseWalks + ' phases walked, ' + TURNS + ' turns each');
+  eq(shortPhases, 0, 'every final-duel phase was walked for ' + TURNS + ' turns');
+  eq(phase1, walks, 'phase 1 turn 1 of the final duel is stamped');
+  ok(other.length === 0, "Liar's Coin stamps only on turn 1, once per phase, info() and the turn-start event agree" + (other.length ? ': ' + other.slice(0, 3).join('; ') : ''));
+  if (laterStamps > 0) known('coin-stamp-every-phase', 'P1.2', "Liar's Coin stamps turn 1 of every final-duel phase (B08)");
+  else ok(false, 'stale KNOWN row coin-stamp-every-phase: remove it from tools/known.json in the fixing commit (and make 4f assert one stamp per final duel)');
+}
+
 // ================================================================== 5. smoke sim
 section('5. Smoke sim: uniform-random player vs uniform-random Rival');
 (function () {
@@ -1408,6 +1752,135 @@ section('5. Smoke sim: uniform-random player vs uniform-random Rival');
     if (i % 3 === 2) { console.log(line); line = ''; }
   });
   if (line) console.log(line);
+})();
+
+// ================================================================== 5b. Rival seals are never replaced
+// The stand-in seal of playRun picks from legal(duel, 'r'), so its counter is only a floor. The meaningful
+// check seals with the real brain, called exactly as scenes/duel.js turn() calls it: beginTurn, the Called
+// Shot pick, payoff, then commit with force (scripted duel 1), noTell (no stance) and mimic from the phase
+// rules; the player's pick, the post-pick intel, resolve, observe, record. Every face, stakes 0 and 7, whole
+// runs and runs that start in each final-duel phase. Any seal that resolve replaces is a coercion.
+section('5b. Rival seals are never replaced at resolve (stand-in seals of 4 and 5, then the real brain)');
+(function () {
+  // the detector itself: a Guard sealed into a broken guard is replaced and counted once; a player move is not
+  const ctl = { seals: 0, rival: 0, first: null };
+  let d = mk(); d.r.status.guardBroken = 2; C.beginTurn(d);
+  sealResolve(d, 'S', 'G', ctl, 'control');
+  eq(ctl.rival, 1, 'positive control: a Rival Guard resolved while its guard is broken counts as one coercion');
+  d = mk(); d.p.status.guardBroken = 2; C.beginTurn(d);
+  sealResolve(d, 'G', 'S', ctl, 'control');
+  eq(ctl.rival, 1, 'a replaced player move is not a Rival coercion');
+  ok(COERCE.seals > 1000, 'stand-in seals of sections 4 and 5 were routed through the coercion detector (' + COERCE.seals + ')');
+  eq(COERCE.rival, 0, 'Rival coercions over ' + COERCE.seals + ' stand-in seals in sections 4 and 5' + (COERCE.first ? ' (first: ' + COERCE.first + ')' : ''));
+  console.log('  detector control: ' + ctl.rival + ' coercion counted of 1 planted;  stand-in seals (sections 4 and 5): ' + COERCE.seals + ', Rival coercions ' + COERCE.rival);
+
+  const TUT = { 1: { force: { move: 'S', tell: 'S' }, only: 'G', observe: false },          // scenes/duel.js tutorialBeat
+                2: { force: { move: 'G', tell: 'G' }, only: 'F', observe: false },
+                3: { force: { move: 'F', tell: 'S' }, only: null, observe: true, last: true } };
+  const argmax = (pred, legal) => { let best = legal[0]; for (let i = 1; i < legal.length; i++) if (pred[legal[i]] > pred[best]) best = legal[i]; return best; };
+  const pPool = B.list.filter(b => !b.relic && b.who !== 'rival').map(b => b.id);
+  const rPool = B.list.filter(b => !b.relic && b.who !== 'player').map(b => b.id);
+  const BC = { seals: 0, rival: 0, first: null };
+  const seen = { force: 0, noTell: 0, mimic: 0, exploit: 0, mix: 0, called: 0, coin: 0, forceNoTell: 0, sealedIllegal: 0 };
+  const phasesHit = {};
+
+  function brainRun(meta, brain, seed, boss, stake, startPhase) {
+    const rng = R.RNG.create(seed), grng = R.RNG.create((seed ^ 0x5bd1e995) >>> 0);   // the player's dice, G.rng
+    const owned = RUN.relics(meta).map(b => b.id), now = 1.7e12 + seed * 1000;
+    const run = RUN.create(meta, { seed: seed, relicId: owned.length && rng.chance(0.5) ? rng.pick(owned) : null, now: now,
+                                   boss: boss, anyBoss: true, stake: stake, anyStake: true, dossier: stake >= 4 ? brain.dossier() : null });
+    brain.beginRun({ days: run.daysAway || 0 });
+    if (startPhase) {                          // straight into the final duel, with what six bonfires might have given
+      const free = id => run.pBoons.indexOf(id) < 0 && run.rBoons.indexOf(id) < 0;
+      rng.shuffle(pPool.filter(free)).slice(0, rng.int(7)).forEach(id => run.pBoons.push(id));
+      rng.shuffle(rPool.filter(free)).slice(0, Math.max(0, 6 - run.rBoons.length)).forEach(id => run.rBoons.push(id));
+      run.duelN = 7;
+      RUN.startDuel(run);
+      for (let j = 1; j < startPhase; j++) { run.duel.over = 'p'; RUN.endDuel(run, meta, 'p', null); RUN.nextPhase(run); }
+    }
+    function fight() {
+      const duel = run.duel;
+      let turns = 0;
+      for (;;) {
+        C.beginTurn(duel);
+        if (duel.over) break;
+        const tut = run.duelN === 1 && !meta.seenTutorial ? TUT[duel.turn] || null : null;
+        const ctx = C.ctx(duel), legalP = C.legal(duel, 'p'), legalR = C.legal(duel, 'r'), cfg = RUN.cfg(run, duel);
+        let called = null;
+        if (C.callsOf(duel) && duel.turn % 3 === 2 && !tut) called = argmax(brain.predict(ctx, legalP), legalP);
+        duel.intel.called = called;
+        const q = { ctx: ctx, payoff: C.payoff(duel), legalR: legalR, legalP: legalP, exploit: cfg.exploit, honestyBase: cfg.honesty, rng: grng };
+        if (tut && tut.force) q.force = tut.force;
+        if (duel.stance === 'none') q.noTell = true;
+        if (duel.mimic) q.mimic = C.ctx(duel, 'r');
+        const sealed = brain.commit(q);
+        if (q.force) seen.force++;
+        if (q.noTell) seen.noTell++;
+        if (q.force && q.noTell) seen.forceNoTell++;
+        if (called) seen.called++;
+        if (!q.force) seen[sealed.mode] = (seen[sealed.mode] || 0) + 1;
+        if (legalR.indexOf(sealed.move) < 0) seen.sealedIllegal++;
+        if (duel.n === 7) phasesHit[boss + '.' + duel.phase] = 1;
+        // the player's window: the tutorial's one allowed move, sometimes the Coin of Fools, otherwise any legal move
+        let pm = rng.pick(legalP), coin = false;
+        if (tut && tut.only && legalP.indexOf(tut.only) >= 0) pm = tut.only;
+        else if (!tut && duel.p.charges.coin_of_fools > 0 && rng.chance(0.15) && C.useActive(duel, 'coin_of_fools').ok) {
+          coin = true; seen.coin++;
+          pm = grng.pick(C.legal(duel, 'p'));
+        }
+        duel.intel.honest = sealed.honest; duel.intel.pred = sealed.pred; duel.intel.coin = coin;
+        const res = sealResolve(duel, pm, sealed.move, BC, boss + ' stake ' + stake + ' seed ' + seed + ' duel ' + duel.n + '.' + duel.phase + ' turn ' + duel.turn + ' (' + (q.force ? 'force' : sealed.mode) + ')');
+        if (!tut || tut.observe) brain.observe(ctx, duel.stance === 'none' ? null : sealed.tell, pm, sealed.move);
+        RUN.record(run, meta, res, sealed);
+        if (tut && tut.last) meta.seenTutorial = true;
+        if (++turns > 200) throw new Error('duel over 200 turns');
+        if (duel.over) break;
+      }
+      return duel.over;
+    }
+    let first = true;
+    for (;;) {
+      if (!(first && startPhase)) RUN.startDuel(run);
+      first = false;
+      let winner = fight();
+      while (winner === 'p' && run.duelN === 7 && run.phase < RUN.phaseCount(run)) {
+        RUN.endDuel(run, meta, 'p', null);
+        RUN.nextPhase(run);
+        winner = fight();
+      }
+      RUN.endDuel(run, meta, winner, brain.dossier());
+      if (run.stage !== 'bonfire') break;
+      run.offer.events.forEach(e => { if (e.t === 'forget') brain.forget(e.n || 0.5); });
+      if (!RUN.pick(run, rng.pick(run.offer.choices), meta)) throw new Error('draft refused');
+    }
+    run.stats.score = brain.runScore();
+    RUN.finish(run, meta, now + 300000);
+  }
+
+  const FULL = QUICK ? 6 : 16, PER_PHASE = QUICK ? 4 : 10;
+  let runs = 0, errs = 0, firstErr = null;
+  const t0 = Date.now();
+  RUN.BOSSES.forEach((b, bi) => [0, 7].forEach(stake => {
+    const meta = allMeta(); meta.vigil.max = 7; meta.bosses.max = 4;     // seenTutorial is false: run 1 plays the scripted duel 1
+    const brain = R.Brain.create(null);
+    const starts = [];
+    for (let i = 0; i < FULL; i++) starts.push(0);
+    for (let k = 1; k <= b.phases.length; k++) for (let i = 0; i < PER_PHASE; i++) starts.push(k);
+    starts.forEach((k, i) => {
+      const seed = 880000 + bi * 10000 + stake * 1000 + i;
+      try { brainRun(meta, brain, seed, b.id, stake, k); runs++; }
+      catch (e) { errs++; if (!firstErr) firstErr = String(e && e.stack || e) + ' (seed ' + seed + ')'; }
+    });
+  }));
+  const allPhases = RUN.BOSSES.reduce((a, b) => a + b.phases.length, 0), hit = Object.keys(phasesHit).length;
+  console.log('  ' + runs + ' runs, ' + BC.seals + ' real-brain seals in ' + (Date.now() - t0) + ' ms: force ' + seen.force + ', noTell ' + seen.noTell + ', mimic ' + seen.mimic +
+              ', exploit ' + seen.exploit + ', mix ' + seen.mix + '; Called Shot ' + seen.called + ', coin throws ' + seen.coin + ';  final-duel phases sealed in ' + hit + '/' + allPhases);
+  eq(errs, 0, 'real-brain runs with an exception' + (firstErr ? ': ' + firstErr : ''));
+  eq(seen.sealedIllegal, 0, 'brain.commit sealed a move outside the legalR it was given');
+  eq(BC.rival, 0, 'Rival coercions over ' + BC.seals + ' real-brain seals' + (BC.first ? ' (first: ' + BC.first + ')' : ''));
+  eq(seen.forceNoTell, 0, 'a scripted (force) seal never has noTell');
+  ok(seen.force >= 3 && seen.noTell > 0 && seen.mimic > 0 && seen.called > 0 && hit === allPhases,
+     'coverage: force, noTell, mimic and Called Shot seals, every final-duel phase (' + hit + '/' + allPhases + ')');
 })();
 
 // ================================================================== 6. dangerous combos
@@ -1550,6 +2023,7 @@ section('6. Dangerous combos (those measurable without the brain)');
 // ================================================================== summary
 console.log('\n=== SUMMARY ===');
 console.log('  assertions passed: ' + passes + ', failed: ' + fails);
+if (knownRows.length) console.log('  known-open (not failures, each fixed in a later push): ' + knownRows.length + ' (' + knownRows.join(', ') + ')');
 if (fails) {
   failLog.slice(0, 30).forEach(f => console.log('  - ' + f));
   process.exit(1);

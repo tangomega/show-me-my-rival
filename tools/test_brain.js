@@ -2,9 +2,15 @@
 // Exit code 1 on any failed check. Uses a tiny local model of the duel rules (DESIGN §4):
 // HP 12 vs 10, tension, guard break, Rupture chip. No boons, no phase 2.
 'use strict';
+const fs = require('fs');
 const path = require('path');
-require(path.join(__dirname, '..', 'src', 'core', 'rng.js'));
-require(path.join(__dirname, '..', 'src', 'ai', 'brain.js'));
+const SRC = path.join(__dirname, '..', 'src');
+require(path.join(SRC, 'core', 'rng.js'));
+require(path.join(SRC, 'ai', 'brain.js'));
+// The run tables, only for section 1c (which duels can hide the stance). Pure modules; the brain does not read them.
+require(path.join(SRC, 'game', 'boons.js'));
+require(path.join(SRC, 'game', 'combat.js'));
+require(path.join(SRC, 'game', 'run.js'));
 const R = globalThis.RIVAL;
 const MOVES = R.MOVES, BEATS = R.BEATS, LOSES_TO = R.LOSES_TO;
 
@@ -271,6 +277,114 @@ section('1. Fairness, determinism, commit does not learn');
         fz.move === 'G' && fz.tell === 'S' && fz.honest === false && fr.state() === fs && fz2.move === 'F' && fz2.tell === 'F' && fz2.honest === true);
 })();
 
+// ================================================================ 1b. the boss modes keep the seal blind
+// Section 1 covers exploit / mix only. The Blank (q.noTell) and the Reflection (q.mimic) take their own
+// branches in commit(), so each gets the same proof: the sealed output AND the number of dice it rolls are
+// a function of q alone. Every commit runs on a fresh copy of the same brain from the same rng state; the
+// three copies differ only in the player move smuggled into q, q.ctx and q.mimic.
+section('1b. noTell and mimic: the seal ignores the player move (400 situations per mode)');
+(function () {
+  const N = 400;
+  const MODES = [{ name: 'noTell', noTell: true }, { name: 'mimic', mimic: true }, { name: 'noTell+mimic', noTell: true, mimic: true }];
+  const stray = function (o, pm) { return Object.assign({}, o, { pm: pm, playerMove: pm, input: pm }); };
+  MODES.forEach(function (M) {
+    const brain = trained('win-stay/lose-shift', 300, 5);
+    const rng = R.RNG.create(99), sit = R.RNG.create(1234);
+    let n = 0, same3 = 0, draws3 = 0, sameStray = 0, sameTwice = 0, frozen = 0, tellOk = 0, modeOk = 0;
+    const drawHist = {}, why = [];
+    for (let i = 0; i < N; i++) {
+      const pB = sit.chance(0.2), rB = sit.chance(0.2);
+      const ctx = randomCtx(sit, pB, rB);
+      const q0 = { ctx: ctx, payoff: i % 3 === 0 ? randomPayoff(sit) : payoffOf(ctx.tension),
+                   legalR: legalOf(rB), legalP: legalOf(pB), exploit: sit.next(), honestyBase: sit.next() };
+      if (M.noTell) q0.noTell = true;
+      if (M.mimic) q0.mimic = randomCtx(sit, rB, pB);            // the Rival's own seat: its guard is the "player" guard
+      const snap = JSON.stringify(brain.serialize()), rs = rng.state();
+      // one sealed commit on a fresh copy, counting every draw from the dice
+      const seal = function (q) {
+        const b = R.Brain.create(JSON.parse(snap)), r = R.RNG.create(1);
+        r.setState(rs);
+        let draws = 0;
+        const next = r.next;
+        r.next = function () { draws++; return next(); };
+        const sealed = b.commit(Object.assign({}, q, { rng: r }));
+        return { b: b, sealed: sealed, json: JSON.stringify(sealed), draws: draws, end: r.state() };
+      };
+      const base = seal(q0);
+      const outs = MOVES.map(function (pm) {
+        const q = stray(q0, pm);
+        q.ctx = stray(q0.ctx, pm);
+        if (q0.mimic) q.mimic = stray(q0.mimic, pm);
+        const o = seal(q);
+        o.b.observe(ctx, M.noTell ? null : o.sealed.tell, pm, o.sealed.move);    // then the player's move is known
+        return o;
+      });
+      if (outs[0].json === outs[1].json && outs[1].json === outs[2].json) same3++;
+      else if (why.length < 3) why.push('#' + i + ' ' + outs.map(function (o) { return o.sealed.move + '/' + o.sealed.tell; }).join(' '));
+      if (outs[0].draws === outs[1].draws && outs[1].draws === outs[2].draws && outs[0].end === outs[1].end && outs[1].end === outs[2].end) draws3++;
+      if (outs.every(function (o) { return o.json === base.json && o.draws === base.draws && o.end === base.end; })) sameStray++;
+      drawHist[base.draws] = (drawHist[base.draws] || 0) + 1;
+      // twice from the same state, and on frozen arguments (nothing is mutated)
+      const fq = { ctx: Object.freeze(Object.assign({}, ctx)), payoff: q0.payoff, legalR: Object.freeze(q0.legalR.slice()),
+                   legalP: Object.freeze(q0.legalP.slice()), exploit: q0.exploit, honestyBase: q0.honestyBase };
+      if (q0.noTell) fq.noTell = true;
+      if (q0.mimic) fq.mimic = Object.freeze(Object.assign({}, q0.mimic));
+      for (const m of MOVES) Object.freeze(fq.payoff[m]);
+      Object.freeze(fq.payoff);
+      if (seal(q0).json === base.json) sameTwice++;
+      try { if (seal(fq).json === base.json) frozen++; } catch (e) { if (why.length < 3) why.push('frozen: ' + e.message); }
+      const s = base.sealed;
+      if (q0.legalR.indexOf(s.move) >= 0 && q0.legalR.indexOf(s.tell) >= 0 && s.honest === (s.move === s.tell) &&
+          (!M.noTell || (s.tell === s.move && s.honest === true))) tellOk++;
+      if (M.mimic ? s.mode === 'mimic' : (s.mode === 'mix' || s.mode === 'exploit')) modeOk++;
+      // advance the live brain so later situations differ
+      const live = brain.commit(Object.assign({}, q0, { rng: rng }));
+      brain.observe(ctx, M.noTell ? null : live.tell, sit.pick(q0.legalP), live.move);
+      n++;
+    }
+    const hist = Object.keys(drawHist).map(function (k) { return k + ' draws x' + drawHist[k]; }).join(', ');
+    console.log('  ' + pad(M.name, 13) + ' situations ' + n + ';  dice per commit: ' + hist);
+    check(M.name + ': identical sealed for all three player moves (' + n + ' situations)', same3 === n, same3 + '/' + n + (why.length ? '; ' + why.join(' | ') : ''));
+    check(M.name + ': identical rng draw count for all three player moves', draws3 === n, draws3 + '/' + n);
+    check(M.name + ': stray pm/playerMove/input on q, q.ctx and q.mimic cannot influence commit', sameStray === n, sameStray + '/' + n);
+    check(M.name + ': commit twice is identical, and works on frozen ctx / mimic / payoff / legal lists', sameTwice === n && frozen === n, sameTwice + '/' + n + ', frozen ' + frozen + '/' + n);
+    if (M.noTell) check(M.name + ': tell === move and honest on every non-force commit', tellOk === n, tellOk + '/' + n);
+    else check(M.name + ': move and tell legal, honest flag consistent', tellOk === n, tellOk + '/' + n);
+    if (M.mimic) check(M.name + ': mode is mimic on every commit', modeOk === n, modeOk + '/' + n);
+    else check(M.name + ': mode is mix or exploit on every commit', modeOk === n, modeOk + '/' + n);
+  });
+})();
+
+// ================================================================ 1c. force and noTell never meet
+// commit()'s force path (the scripted tutorial) does not apply noTell: force {move:G, tell:S} with noTell
+// still seals honest:false. That is safe only while the tutorial (the one caller of force) runs in duel 1
+// and duel 1 always shows a stance. Both halves are checked here.
+section('1c. The scripted first duel (force) never meets a hidden stance (noTell)');
+(function () {
+  const RUN = R.Run;
+  const bad = [], hidden = [];
+  let cells = 0;
+  RUN.BOSSES.forEach(function (b) {
+    for (let s = 0; s <= RUN.VIGIL.length; s++) {
+      const run = RUN.create(RUN.defaultMeta(), { seed: 11, now: 1.7e12, boss: b.id, anyBoss: true, stake: s, anyStake: true });
+      const c = RUN.cfg(run, { n: 1, phase: 1 });
+      const d = RUN.startDuel(run);
+      cells++;
+      if (run.duelN !== 1 || c.stance === 'none' || d.stance === 'none') bad.push(b.id + ' stake ' + s);
+      for (let n = 2; n <= 6; n++) if (RUN.cfg(run, { n: n, phase: 1 }).stance === 'none') hidden.push('duel ' + n + ' ' + b.id + ' stake ' + s);
+    }
+  });
+  console.log('  ' + cells + ' face x stake cells;  duels 2-6 that hide the stance: ' + (hidden.length ? hidden.join(', ') : 'none'));
+  check('duel 1 shows a stance for every face at every stake 0..' + RUN.VIGIL.length + ' (R.Run.cfg and startDuel)', bad.length === 0 && cells === RUN.BOSSES.length * (RUN.VIGIL.length + 1), bad.join(', '));
+  // the scene side of the premise: q.force comes only from the tutorial, and the tutorial runs only in duel 1
+  const scene = fs.readFileSync(path.join(SRC, 'scenes', 'duel.js'), 'utf8');
+  const tutGate = /tutorial:\s*run\.duelN === 1 && !meta\.seenTutorial/.test(scene);
+  const forceSets = scene.match(/q\.force\s*=/g) || [];
+  const forceFromTut = /if \(tut && tut\.force\) q\.force = tut\.force;/.test(scene);
+  check('scenes/duel.js sets q.force only from the tutorial beat, and the tutorial only in duel 1 (re-verify 1c if this moved)',
+        tutGate && forceSets.length === 1 && forceFromTut, 'tutorial gate ' + tutGate + ', q.force writes ' + forceSets.length + ', from tutorial ' + forceFromTut);
+})();
+
 // ================================================================ 2. legal moves
 section('2. Legal-move and numerical safety (2,000 random situations per case)');
 (function () {
@@ -334,6 +448,58 @@ section('2. Legal-move and numerical safety (2,000 random situations per case)')
     if (JSON.stringify(b.serialize()).indexOf('null') >= 0) { ok = false; why = 'NaN leaked into state'; }
   } catch (e) { ok = false; why = String(e && e.stack || e); }
   check('garbage q / ctx / payoff never throws and never yields NaN or illegal output', ok, why);
+})();
+
+// ================================================================ 2b. dominated moves by mode
+// A Rival move is strictly dominated when another legal move of its own does better against EVERY legal
+// player move, in the payoff matrix the Rival was handed. Pinned generator and seeds: the rate depends on
+// both (near-tie rows leave the equilibrium solver some mass), so they are part of the test.
+// mix and noTell must seal no dominated move at these seeds (the output is deterministic; both measure 0).
+// exploit cannot be 0 without a brain change: its softmax keeps every move's equilibrium weight plus
+// K.EQ_PRIOR_FLOOR as its prior, so it seals a dominated move now and then (2 of these 2,000 seals, gaps of
+// 0.02-0.6 HP; 0.015-0.04% over 20,000 seals at other seeds). It keeps the feel-10 C1 bound of 0.5%.
+// noTell seals take either branch (about half each), so a change to the dice order may move a seal into the
+// exploit tail: re-measure at other seeds before loosening its bound.
+section('2b. Dominated moves by mode (2,000 random payoffs with a strictly dominated Rival row, per mode)');
+(function () {
+  const SEALS = 2000;
+  const BOUND = { mix: 0, exploit: 0.005, noTell: 0 };
+  function strictlyDominated(V, r, lr, lp) {
+    return lr.some(function (r2) { return r2 !== r && lp.every(function (p) { return V[r2][p] > V[r][p]; }); });
+  }
+  const out = {};
+  ['mix', 'exploit', 'noTell', 'mimic'].forEach(function (mode) {
+    const sit = R.RNG.create(5100), rng = R.RNG.create(5200);
+    const brain = R.Brain.create(null);
+    function subset() { const a = MOVES.slice(); if (sit.chance(0.6)) a.splice(sit.int(3), 1); return a; }
+    let n = 0, tries = 0, dom = 0, badMode = 0, illegal = 0;
+    const modes = {};
+    while (n < SEALS && tries < 100000) {
+      tries++;
+      const legalR = subset(), legalP = subset(), V = randomPayoff(sit);
+      if (!legalR.some(function (r) { return strictlyDominated(V, r, legalR, legalP); })) continue;
+      const ctx = randomCtx(sit, legalP.indexOf('G') < 0, legalR.indexOf('G') < 0);
+      const q = { ctx: ctx, payoff: V, legalR: legalR, legalP: legalP,
+                  exploit: mode === 'mix' ? 0 : mode === 'exploit' ? 1 : sit.next(), honestyBase: sit.next(), rng: rng };
+      if (mode === 'noTell') q.noTell = true;
+      if (mode === 'mimic') q.mimic = randomCtx(sit, legalR.indexOf('G') < 0, legalP.indexOf('G') < 0);
+      const s = brain.commit(q);
+      n++;
+      modes[s.mode] = (modes[s.mode] || 0) + 1;
+      if (legalR.indexOf(s.move) < 0 || legalR.indexOf(s.tell) < 0) illegal++;
+      if (strictlyDominated(V, s.move, legalR, legalP)) dom++;
+      if (mode === 'noTell' ? (s.mode !== 'mix' && s.mode !== 'exploit') : s.mode !== mode) badMode++;
+      brain.observe(ctx, mode === 'noTell' ? null : s.tell, sit.pick(legalP), s.move);
+    }
+    out[mode] = { n: n, dom: dom };
+    console.log('  ' + pad(mode, 8) + lpad(n, 5) + ' seals (' + tries + ' payoffs drawn), modes ' + JSON.stringify(modes) + ':  dominated ' + dom + ' (' + (100 * dom / Math.max(1, n)).toFixed(2) + '%)');
+    check('dominated moves by mode: ' + mode + ' seals legal moves in the mode it was asked for (' + n + ' seals)', n === SEALS && illegal === 0 && badMode === 0,
+          'n ' + n + ', illegal ' + illegal + ', wrong mode ' + badMode);
+    if (mode !== 'mimic') check('dominated moves by mode: ' + mode + (BOUND[mode] ? ' <= ' + (100 * BOUND[mode]) + '%' : ' none'), n > 0 && dom <= BOUND[mode] * n, dom + ' of ' + n);
+  });
+  // The Reflection samples the player's own habits without a dominance filter (brain.js mimic branch).
+  // Report-only until the filter lands; it becomes an assertion then.
+  console.log('INFO c1-mimic-dominated: ' + (100 * out.mimic.dom / Math.max(1, out.mimic.n)).toFixed(1) + '% (fix P1.2, B18/V6)');
 })();
 
 // ================================================================ 3. serialization
