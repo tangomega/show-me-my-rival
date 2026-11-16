@@ -9,6 +9,19 @@
 // chosen moments: mid-turn after the Rival committed, between the pick and the reveal, between a lethal blow and
 // the next screen, on the bonfire, during the phase-2 transformation, on the death / victory / credits screens.
 // exit 1 on any failure.
+//
+// Sections (FLOW_SECTIONS=a,b picks some; the default runs all but the opt-in ones):
+//   soak long storage corrupt pause scripted layout perf random   the original flow tests
+//   rngsites   static: src/scenes reads the gameplay rng only at the commit and the Coin of Fools pick
+//   blind      the frames and sounds before the pick do not depend on which lie was sealed (?debug on and off)
+//   pausetap   a tap or key that only ends a pause must not pick a move (KNOWN until P1.6)
+//   parity     the real duel scene and tools/sim.js runChain feed brain.commit identical inputs
+//   coerce     positive control for the Rival-coercion counter (a forged save with an illegal sealed move)
+//   sealtrace  opt-in: per-seal trace of the commit and G.rng draw counts; prints "SEALTRACE <sha256>"
+//              (FLOW_SEAL_OUT=<file> also writes the trace as JSON)
+// Every page wraps R.Combat.resolve: a Rival move that is not legal at resolve time is a FAIL.
+// KNOWN rows (registry: tools/known.json) print "KNOWN <id> <push>: <text>" once and do not fail the run.
+// require('./tools/test_flow.js') runs nothing and exports the harness (makePage, session, ...).
 'use strict';
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const ROOT = path.resolve(__dirname, '..'), SRC = path.join(ROOT, 'src');
@@ -17,30 +30,58 @@ const QUICK = flags.includes('--quick'), VERBOSE = flags.includes('--verbose');
 const RUNS = +nums[0] > 0 ? +nums[0] : (QUICK ? 30 : 200), SEED = +nums[1] > 0 ? +nums[1] : 1;
 const KEY = 'rival.save.v1';
 
-// Defects in files this test's author may not edit (reported to the lead with a patch). A failure whose message
-// matches one of these is printed as KNOWN-OPEN and does not fail the run. Delete an entry once its patch is in
-// (the patches are in tools/qa_patches.js; `--patched` runs this whole test against them applied in memory).
-const PATCHED = flags.includes('--patched');                         // run against tools/out/qa_patches.js applied in memory
-const KNOWN_OPEN = true ? [] : [   // patches P1-P5 are applied in source; nothing is known-open
-  /boot accepted a malformed run/,                                // main.js validRun            -> qa_patches P1
-  /console\.error @duel: TypeError: Cannot read properties of undefined \(reading 'rivalHp'\)/,   // same root cause (P1)
-  /\[oldshape:run\.duel\.intel\/tally\/begun.*(reading 'lost[PR]'|soft-lock: no progress .* @duel|could not finish a run)/,   // pre-tally duel resumed (P1)
-  /text off screen \([-\d]+\.\.\d+\) @duel/,                      // duel.js float clamp         -> P2
-  /per-frame allocation in duel/,                                 // duel.js draw literals       -> P2 + P3 (+ P4 for the ledger)
-  /boon ledger does not list/,                                    // duel.js overlay overflow    -> P4
-  /button outside the safe area @duel/,                           // duel.js has no resize()     -> P4
-  /reveal was lost by the reload/                                 // duel.js S.glass / S.stamp   -> P5
-];
+const PATCHED = flags.includes('--patched');                         // run against tools/qa_patches.js applied in memory
+
+// Known-open defects that a later push fixes. Ids are registered in tools/known.json (shared protocol): each row
+// prints exactly one line "KNOWN <id> <push>: <text>" and is not a failure. A row with `match` turns matching
+// failures into that row; every other failure still fails. Rows without `match` are raised by their section
+// (knownHit), which also FAILs as "stale KNOWN row" once the defect stops reproducing. Remove a row (here and in
+// tools/known.json) in the commit that fixes it.
+const KNOWN_ROWS = {
+  // V1: a duel-7 save of phase k >= 2 whose duel has an older shape (no intel/tally/begun) is dropped at boot by
+  // validRun, and enter() rebuilds it with startDuel, i.e. phase 1; the rebuilt final duel then plays on through
+  // phases 2, 3... below k. Only that exact signature is matched: the 'run.duel.intel/tally/begun' strip of a
+  // duel-7 phase-k save, "phase regressed k -> 1" first, then "k -> j" with j never going back down (per boot),
+  // and the duel's own phase equal to j (run.phase and duel.phase are set together, so a desync is not V1).
+  // `over` may be null, p or r: a phase of the rebuilt duel can end either way.
+  'corrupt-v1-phase-regress': {
+    push: 'P1.1', text: 'old-shape duel-7 save regresses to phase 1 (V1)', boots: {},
+    match(w, msg) {
+      const a = /^oldshape:run\.duel\.intel\/tally\/begun \(duel:7:([2-4]):[pr]?P?\)#\d+$/.exec(w);
+      const b = /^phase regressed ([2-4]) -> ([1-3]) @duel \(duel turn \d+, over (?:null|p|r), duel phase ([1-3]), /.exec(msg);
+      if (!(a && b && a[1] === b[1] && +b[2] < +b[1] && b[3] === b[2])) return false;
+      const j = +b[2], last = this.boots[w];
+      if (last === undefined ? j !== 1 : j < last) return false;    // it must restart at 1 and only move forward
+      this.boots[w] = j;
+      return true;
+    }
+  },
+  // O13 (fixed by P1.6): engine.js pDown / keydown end the pause and deliver the same event to the scene.
+  'pause-tap-pointer': { push: 'P1.6', text: 'a pointer-down that only ends a pause also picks a move (O13)' },
+  'pause-tap-key': { push: 'P1.6', text: 'a key press that only ends a pause also picks a move (O13)' }
+};
 
 // ---------------------------------------------------------------------------------------------- failures
 let fails = 0, known = 0, checks = 0, where = 'init';
-const seenFail = new Set();
+const seenFail = new Set(), knownSeen = {};
+function knownHit(id) {
+  const row = KNOWN_ROWS[id];
+  if (!row) { fail('unregistered KNOWN row ' + id); return; }
+  if (!knownSeen[id]) { knownSeen[id] = 0; console.log('KNOWN ' + id + ' ' + row.push + ': ' + row.text); }
+  knownSeen[id]++; known++;
+}
 function fail(msg) {
-  const isKnown = KNOWN_OPEN.some(re => re.test('[' + where + '] ' + msg));
+  for (const id in KNOWN_ROWS) {
+    if (KNOWN_ROWS[id].match && KNOWN_ROWS[id].match(where, msg)) {
+      const vk = 'known|' + where + '|' + msg.slice(0, 60);
+      if (VERBOSE && !seenFail.has(vk)) { seenFail.add(vk); console.log('  (' + id + ') [' + where + '] ' + msg); }
+      knownHit(id);
+      return;
+    }
+  }
   const k = where.replace(/[#\d].*$/, '') + '|' + msg.replace(/\d+/g, '#').slice(0, 90);
   if (seenFail.has(k)) return;
   seenFail.add(k);
-  if (isKnown) { known++; console.log('KNOWN-OPEN [' + where + '] ' + msg); return; }
   fails++;
   console.log('FAIL [' + where + '] ' + msg);
   if (fails > 60) { console.log('too many failures, stopping'); process.exit(1); }
@@ -181,10 +222,38 @@ function newCounters() {
   return { wrap: 0, createElement: 0, getContext: 0, fresh: 0, str: 0, arr: 0, json: 0, listeners: 0, vibrate: 0, texts: 0, fillRect: 0, drawImage: 0, save: 0, sfx: 0, type: 0 };
 }
 
+// Rival-coercion counter. Every page wraps R.Combat.resolve (the scene calls it through the object, duel.js turn()):
+// the Rival's move must be legal when the exchange resolves and must be the move that resolves. coerce() inside
+// combat.js is private, so this watches its trace instead: a {t:'note', side:'r'} event, or res.rm !== rm.
+// page.coerceExpected > 0 lets a positive control (section coerce) count exactly that many as expected.
+const COERCE = { resolves: 0, rival: 0, player: 0, expected: 0 };
+function instrument(page) {
+  const Cb = page.R && page.R.Combat;
+  if (!Cb || typeof Cb.resolve !== 'function') return;
+  const real = Cb.resolve;
+  Cb.resolve = function (duel, pm, rm, opts) {
+    const live = !!(duel && !duel.over && duel.r && !(opts && opts.unchecked));
+    const lr = live ? Cb.legal(duel, 'r') : null, at = live ? duel.n + '.' + duel.phase + ' turn ' + duel.turn : '';
+    const res = real.apply(this, arguments);
+    COERCE.resolves++;
+    const ev = (res && res.events) || [];
+    if (ev.some(e => e && e.t === 'note' && e.side === 'p')) COERCE.player++;
+    if (live && (ev.some(e => e && e.t === 'note' && e.side === 'r') || lr.indexOf(rm) < 0 || res.rm !== rm)) {
+      if (page.coerceExpected > 0) { page.coerceExpected--; COERCE.expected++; }
+      else {
+        COERCE.rival++;
+        fail('the Rival sealed move ' + rm + ' was replaced at resolve by ' + (res && res.rm) + ' (legal ' + lr.join(',') + ', duel ' + at + ')');
+      }
+    }
+    return res;
+  };
+}
+
 function makePage(store, view, opt) {
   opt = opt || {};
+  const ts0 = 1000 + Math.floor(sysRand() * 1e6);                 // always drawn, so opt.ts does not shift the stream
   const page = {
-    store, view, ts: 1000 + Math.floor(sysRand() * 1e6), frameNo: 0, rafCb: null, timeouts: [], tid: 0,
+    store, view, ts: typeof opt.ts === 'number' ? opt.ts : ts0, frameNo: 0, rafCb: null, timeouts: [], tid: 0, coerceExpected: 0,
     lw: {}, ld: {}, c: newCounters(), buttons: [], bubbleLines: 0, dbg: null, maxDbg: { t: 0, c: 0, w: 0 },
     audioLog: [], seenOpts: new WeakSet(), trackFresh: false, alive: true, pointer: null, hidden: false, landscape: false,
     lastTexts: [], keepTexts: false, layoutChecks: opt.layoutChecks !== false
@@ -277,6 +346,8 @@ function makePage(store, view, opt) {
   function mkCanvas() { return { width: 300, height: 150, style: {}, getContext() { page.c.getContext++; return mkCtx(); } }; }
   const game = mkCanvas(), probe = { style: {} };
   page.canvas = game;
+  const gameCtx = game.getContext;                                 // keep the visible context: the blind recorder hashes the blit (shake)
+  game.getContext = function () { const c = gameCtx.apply(this, arguments); page.vctx = c; return c; };
   function listen(map) { return function (type, fn) { page.c.listeners++; (map[type] = map[type] || []).push(fn); }; }
   const doc = {
     readyState: 'complete', visibilityState: 'visible',
@@ -364,6 +435,7 @@ function makePage(store, view, opt) {
     for (const f of ORDER_B) { script(f).runInContext(ctx); if (f === 'audio/audio.js') FAKE_AUDIO.runInContext(ctx); }
     for (const f of SCENE_FILES) script(f).runInContext(ctx);
     page.R = vm.runInContext('RIVAL', ctx);
+    instrument(page);
     if (opt.beforeBoot) opt.beforeBoot(page);
     script('main.js').runInContext(ctx);                          // boots: document.readyState is 'complete'
   } catch (e) {
@@ -1372,10 +1444,672 @@ function randomTests() {
   ok(a.length > 30 && a === b, 'the Rival\'s commits depend on Math.random beyond the seed:\n   ' + a + '\n   ' + b);
 }
 
+// ============================================================================================== shared by 9-14
+const crypto = require('crypto');
+const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+function canonV(v) {                                                // object keys sorted at every depth
+  if (Array.isArray(v)) return v.map(canonV);
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v).sort()) o[k] = canonV(v[k]); return o; }
+  return v;
+}
+// The brain.commit input as one canonical string (the dice state is taken before the commit draws).
+function qCanon(q) {
+  const c = Object.assign({}, q, { rng: q.rng && typeof q.rng.state === 'function' ? q.rng.state() : null, noTell: !!q.noTell, mimic: q.mimic || null, force: q.force || null });
+  return JSON.stringify(canonV(JSON.parse(JSON.stringify(c))));
+}
+const RNG_INV = 0xdc58aa5d;                                         // mulberry32 adds 0x6d2b79f5 per draw: this is its inverse mod 2^32
+const MOVE_LABEL = { S: 'STRIKE', G: 'GUARD', F: 'FEINT' };
+function veteranSave(stake) {                                       // every unlock, every face earned, the Vigil at `stake`
+  const O = oracle.R.Run, meta = O.defaultMeta();
+  O.UNLOCKS.forEach(u => { meta.unlocked[u.id] = true; });
+  meta.seenTutorial = true; meta.bosses.max = O.BOSSES.length; meta.vigil.max = O.VIGIL.length; meta.vigil.sel = stake || 0;
+  return JSON.stringify({ v: 1, settings: { muted: false, haptics: true, mask: 'porcelain', arena: 'cathedral' }, brain: null, meta, run: null });
+}
+
+// Deterministic driver: one page plays cfg.runs runs to the end. Nothing in it reads time or cosmetic output, and
+// a run's seed never depends on presentation time (the clock is pinned on the title and relic screens, Math.random
+// is the constant 0.5 outside a run), so the gameplay is a function of cfg alone.
+//   cfg = { clock0, runs, veteran?, stake?, face?, pre?:[boon ids], relic?, coin?, noise?, dt?, skips?, view?, qHash? }
+//   face / pre / relic are test-only injection through R.Run.create (the face drawn, boons granted at the start).
+// At each input window the bot plays the tutorial's only move, else the move that beats the sealed one on three
+// turns of four and the one it beats on the fourth (falling back to the first legal move); with cfg.coin it throws
+// the Coin of Fools on turn 2 when all three moves are open. hk.onInput(x) sees the window first; hk.stop() ends.
+// Returns { log, frames, page, store, ended }: log = one entry per turn
+//   { run, face, stake, n, ph, t, tut, commit: commitOf(pending), dCommit, dSeal, dWindow, pm, coin[, qHash] }
+// (G.rng draws: dCommit from the last resolve to the frame run.pending appears, dSeal from then until the buttons
+// light, dWindow from then until the resolve) and one per bonfire { run, draft, pick, rival }.
+function drive(cfg, hk) {
+  hk = hk || {};
+  const store = makeStore();
+  if (cfg.veteran) store.map.set(KEY, veteranSave(cfg.stake));
+  const saveMs = clock.ms;
+  clock.ms = cfg.clock0;
+  const noise = mulberry(cfg.noise || 1);
+  let menu = true;
+  const page = makePage(store, cfg.view || VIEWS[2], {
+    ts: 1000, search: cfg.search || '',
+    randomTrap: () => (menu || !cfg.noise) ? 0.5 : noise(),
+    beforeBoot(p) {
+      const R = p.R, K = R.SceneKit;
+      p.cardsDrawn = [];                                             // boon cards drawn this frame: { id, x, y, w, h }
+      if (K && typeof K.card === 'function') {
+        const kc = K.card;
+        K.card = function (g, x, y, w, h, info) { if (info && info.id) p.cardsDrawn.push({ id: info.id, x: x | 0, y: y | 0, w, h }); return kc.apply(this, arguments); };
+      }
+      if (cfg.face || cfg.pre || cfg.relic) {
+        const create = R.Run.create;
+        R.Run.create = function (meta, o) {
+          const oo = Object.assign({}, o);
+          if (cfg.face) { oo.boss = cfg.face; oo.anyBoss = true; }
+          if (cfg.relic) oo.relicId = cfg.relic;
+          const run = create.call(this, meta, oo);
+          for (const id of cfg.pre || []) if (run.pBoons.indexOf(id) < 0) run.pBoons.push(id);
+          return run;
+        };
+      }
+      if (cfg.qHash) {
+        const bc = R.Brain.create;
+        R.Brain.create = function () {
+          const b = bc.apply(this, arguments), c = b.commit;
+          b.commit = function (q) {
+            const d = p.G && p.G.run && p.G.run.duel;
+            p.lastQ = { key: d ? d.n + '.' + d.phase + '.' + d.turn : '', hash: sha(qCanon(q)).slice(0, 16) };
+            return c.apply(this, arguments);
+          };
+          return b;
+        };
+      }
+      if (hk.beforeBoot) hk.beforeBoot(p);
+    }
+  });
+  const out = { log: [], frames: 0, page, store, ended: 0 };
+  if (!page.alive) { clock.ms = saveMs; return out; }
+  const G = page.G, R = page.R, E = page.E, log = out.log;
+  let rngObj = null, s0 = 0, runIdx = 0, lastKey = null, lastTurns = -1, open = null, sealKey = null, sealRec = null, k = 0, frames = 0, inBonfire = false;
+  let draftWant = null, bonfireFrames = 0;
+  const since = () => { if (!rngObj) return 0; const s1 = rngObj.state(), n = Math.imul((s1 - s0) >>> 0, RNG_INV) >>> 0; s0 = s1; return n; };
+  const tap = (x, y) => { page.down(x, y); page.up(x, y); };
+  const tapB = b => tap(b.x + 5, b.y + 5);
+  for (; frames < (cfg.maxFrames || 400000); frames++) {
+    const sc0 = E.sceneName;
+    menu = !G.hasRun();
+    if (menu && (sc0 === 'title' || sc0 === 'relic')) clock.ms = cfg.clock0 + runIdx * 3.6e6;
+    page.cardsDrawn.length = 0;
+    if (!page.frame(menu ? 33.4 : (cfg.dt || 33.4))) break;
+    if (G.rng !== rngObj) { rngObj = G.rng; s0 = rngObj ? rngObj.state() : 0; }   // a new run (main.js newRun) or boot
+    const run = G.run, key = run ? run.seed + ':' + run.runNo : null;
+    if (key !== lastKey) {
+      if (lastKey) out.ended++;
+      if (key) { runIdx++; lastTurns = run.stats.turns; open = null; sealKey = null; }
+      lastKey = key;
+      if (!key && out.ended >= (cfg.runs || 1)) break;
+    }
+    if (hk.stop && hk.stop()) break;
+    const sc = E.sceneName, d = run && run.duel, pend = run && run.pending;
+    if (open && run && run.stats.turns !== lastTurns) {             // the open turn resolved
+      open.pm = d ? d.p.moves[d.p.moves.length - 1] : null;
+      open.dWindow = since();
+      log.push(open); open = null; lastTurns = run.stats.turns;
+    }
+    if (run && run.stage === 'bonfire') { inBonfire = true; if (run.offer && run.offer.choices) draftWant = run.offer.choices[0]; }
+    else if (inBonfire && run && run.stage === 'duel') {
+      inBonfire = false;
+      ok(draftWant !== null && run.pBoons.indexOf(draftWant) >= 0, () => 'drive: the bonfire draft took ' + run.pBoons[run.pBoons.length - 1] + ', not the first offered boon ' + draftWant);
+      draftWant = null;
+      log.push({ run: runIdx, draft: run.duelN - 1, pick: run.pBoons[run.pBoons.length - 1], rival: run.rBoons[run.rBoons.length - 1] });
+    }
+    const sealed = !!(pend && d && pend.turn === d.turn && pend.n === d.n && pend.phase === d.phase);
+    if (sealed && !open) {
+      const kk = runIdx + ':' + d.n + ':' + d.phase + ':' + d.turn;
+      if (sealKey !== kk) {                                          // the frame the seal appeared in
+        sealKey = kk;
+        sealRec = { run: runIdx, face: run.boss, stake: run.stake, n: d.n, ph: d.phase, t: d.turn, tut: d.n === 1 && !G.meta.seenTutorial && d.turn <= 3, commit: commitOf(pend), dCommit: since() };
+        if (cfg.qHash) sealRec.qHash = page.lastQ && page.lastQ.key === d.n + '.' + d.phase + '.' + d.turn ? page.lastQ.hash : null;
+      }
+    }
+    const pk = sc === 'duel' ? R.Scenes.duel.peek() : null;
+    if (pk && pk.input && sealed && !open && sealRec) {               // the buttons lit
+      open = sealRec; sealRec = null;
+      open.dSeal = since(); open.coin = false;
+      if (hk.onInput) hk.onInput({ page, run, d, pend, pk });
+      const lp = R.Combat.legal(d, 'p');
+      if (!pk.only && cfg.coin && d.p.charges && d.p.charges.coin_of_fools > 0 && lp.length === 3 && d.turn === 2) {
+        const acts = page.buttons.filter(q => q.label === '' && q.w === 22 && !q.disabled);
+        if (acts.length) { tapB(acts[0]); if (d.intel && d.intel.coin) { open.coin = true; continue; } }
+      }
+      let want = pk.only;
+      if (!want) { const rm = pend.sealed.move; want = (k++ % 4 === 3) ? R.BEATS[rm] : R.LOSES_TO[rm]; if (lp.indexOf(want) < 0) want = lp[0]; }
+      const b = findBtn(page, MOVE_LABEL[want]);
+      if (b) tapB(b);
+      continue;
+    }
+    if (cfg.skips && sc === 'duel' && !(pk && pk.input) && frames % 5 === 0) tap(90, E.safe.top + 120);
+    if (sc === 'title') { const b = findBtn(page, /BEGIN|CONTINUE/); if (b && frames % 7 === 0) tapB(b); }
+    else if (sc === 'relic') { const b = findBtn(page, 'CONFIRM'); if (b && frames % 7 === 0) tapB(b); }
+    else if (sc === 'bonfire') {
+      // The draft is the first offered boon, found by its id among the cards drawn this frame, so the layout of the
+      // cards cannot change what is taken. Before the cards show, a tap anywhere only hurries the intro.
+      if (++bonfireFrames > 6000) { fail('drive: stuck on the bonfire (no card for the first offered boon ' + draftWant + ' was drawn)'); break; }
+      const okb = findBtn(page, 'CONFIRM');
+      if (okb && !okb.disabled) tapB(okb);
+      else if (frames % 9 === 0) {
+        const card = draftWant ? page.cardsDrawn.filter(c => c.id === draftWant)[0] : null;
+        if (card) tap(card.x + (card.w >> 1), card.y + (card.h >> 1));
+        else tap(90, E.safe.top + 90);
+      }
+    } else if (sc !== 'duel' && frames % 11 === 0) tap(90, E.safe.top + 90);
+    if (sc !== 'bonfire') bonfireFrames = 0;
+  }
+  out.frames = frames;
+  clock.ms = saveMs;
+  return out;
+}
+
+// Recorder for the blind test: every R.Art / R.UI / Font / audio call (the harness has no pixels), the
+// buffer-context calls, the blit to the visible canvas (screen shake offsets), the engine's juice calls (shake,
+// flash, hit-stop, haptics) with their arguments and every vibration pattern, hashed per frame.
+// take() returns '<sha256 first 16 hex>:<calls>' and clears the log. While rec.on is false nothing is logged (the
+// live path turns it on when it swaps: frames before that point cannot differ).
+const REC_H = ['text', 'fighter', 'sprite', 'sigil', 'bg', 'panel', 'button', 'bubble', 'bar', 'audio'];
+const REC_G = ['fillRect', 'drawImage', 'clearRect', 'strokeRect', 'fillText', 'putImageData', 'translate', 'scale', 'setTransform', 'arc', 'rect', 'moveTo', 'lineTo'];
+const REC_V = ['fillRect', 'drawImage', 'clearRect', 'putImageData', 'setTransform', 'translate', 'scale'];
+const REC_E = ['shake', 'flash', 'hitStop', 'buzz'];
+function recordFrames(page) {
+  const log = [], rec = { on: true };
+  const js = a => { try { return JSON.stringify(a); } catch (e) { return String(a); } };
+  const args = a => Array.prototype.slice.call(a).map(x => (x && typeof x === 'object' && !Array.isArray(x)) ? x.width + 'x' + x.height : x);
+  for (const n of REC_H) {
+    const f = page.H[n];
+    page.H[n] = function () { if (rec.on) log.push(n + js(Array.prototype.slice.call(arguments))); return f.apply(this, arguments); };
+  }
+  const ctxs = [[page.E && page.E.g, REC_G, ''], [page.vctx, REC_V, 'v.']];
+  for (const [g, names, tag] of ctxs) {
+    if (!g) continue;
+    for (const n of names) {
+      const f = g[n];
+      g[n] = function () { if (rec.on) log.push(tag + n + js([g.fillStyle, g.globalAlpha, args(arguments)])); return f.apply(this, arguments); };
+    }
+  }
+  const E = page.E;
+  if (E) for (const n of REC_E) {
+    const f = E[n];
+    if (typeof f === 'function') E[n] = function () { if (rec.on) log.push('E.' + n + js(args(arguments))); return f.apply(this, arguments); };
+  }
+  const nav = page.ctx && page.ctx.navigator;
+  if (nav && typeof nav.vibrate === 'function') {
+    const f = nav.vibrate;
+    nav.vibrate = function () { if (rec.on) log.push('vibrate' + js(Array.prototype.slice.call(arguments))); return f.apply(this, arguments); };
+  }
+  rec.take = function () { const h = sha(log.join('\n')).slice(0, 16) + ':' + log.length; log.length = 0; return h; };
+  return rec;
+}
+
+// ============================================================================================== 9. static: where scenes read G.rng
+// The gameplay dice (G.rng) may be read by a scene only for the Rival's commit (turn(): `rng: G.rng` in the
+// brain.commit query) and for the Coin of Fools pick (useActive(): `S.choice = G.rng.pick(...)`). Every other
+// scene randomness uses G.crng. Read from disk (not through script(), so FLOW_HEAD cannot mask it); content
+// anchored, the current line numbers are printed. Outside src/scenes, G.rng is only assigned (main.js).
+function rngSitesTests() {
+  where = 'rngsites';
+  const READ = /\.rng\b|\[\s*['"]rng['"]\s*\]|\{[^}]*\brng\b[^}]*\}\s*=\s*(?:G|R\.Game)\b/;
+  const COMMIT = /\brng:\s*G\.rng\b/, COIN = /\bS\.choice\s*=\s*G\.rng\.pick\(/;
+  const sites = [];
+  for (const f of fs.readdirSync(path.join(SRC, 'scenes')).filter(x => x.endsWith('.js')).sort()) {
+    const lines = fs.readFileSync(path.join(SRC, 'scenes', f), 'utf8').replace(/\r\n?/g, '\n').split('\n');
+    lines.forEach((t, i) => { if (READ.test(t)) sites.push({ at: 'scenes/' + f + ':' + (i + 1), file: 'scenes/' + f, kind: COMMIT.test(t) ? 'commit' : COIN.test(t) ? 'coin' : null }); });
+  }
+  const list = sites.map(s => s.at + (s.kind ? ' (' + s.kind + ')' : '')).join(', ');
+  const good = sites.length === 2 && sites.every(s => s.file === 'scenes/duel.js') && sites.some(s => s.kind === 'commit') && sites.some(s => s.kind === 'coin');
+  ok(good, 'src/scenes reads the gameplay rng outside the two allowed sites (commit dice in turn(), Coin of Fools pick in useActive()): ' + (list || 'none found'));
+  console.log('G.rng sites in src/scenes: ' + (list || 'none'));
+  // the rest of src: G.rng / Game.rng is only written, by main.js (newRun and boot)
+  const others = [], walk = dir => {
+    for (const f of fs.readdirSync(path.join(SRC, dir)).sort()) {
+      const rel = dir ? dir + '/' + f : f;
+      if (fs.statSync(path.join(SRC, rel)).isDirectory()) { if (rel !== 'scenes') walk(rel); continue; }
+      if (!rel.endsWith('.js')) continue;
+      fs.readFileSync(path.join(SRC, rel), 'utf8').replace(/\r\n?/g, '\n').split('\n').forEach((t, i) => {
+        if (/\bG\.rng\b|\bGame\.rng\b/.test(t)) others.push({ at: rel + ':' + (i + 1), write: rel === 'main.js' && /\bG\.rng\s*=[^=]/.test(t) });
+      });
+    }
+  };
+  walk('');
+  const reads = others.filter(o => !o.write);
+  ok(reads.length === 0 && others.length > 0, () => 'G.rng is read outside src/scenes (only main.js may assign it): ' + reads.map(o => o.at).join(', '));
+  console.log('G.rng writers outside src/scenes: ' + others.filter(o => o.write).map(o => o.at).join(', '));
+}
+
+// ============================================================================================== 10. the screen is blind to the seal
+// At an input window with a shown, lying stance, the Rival's sealed move is one of the two non-tell moves. Nothing
+// the player can see or hear before the pick may depend on which one: the frames (every recorded draw call) and
+// the audio calls must hash identically when only sealed.move is swapped (honest stays false), with ?debug off
+// and on. Resume path: the stored save is swapped and booted. Live path: brain.commit is wrapped and the first
+// lying commit is swapped as it is sealed. Controls: a glimpsed move and a different tell must change the frames.
+// Samples come from deterministic runs with test-only injection (face, boons, relic) so that every stance-showing
+// phase of every face, a mimic lie, a Called Shot turn and the Ledger / Tally / Liar's Coin stamp are covered.
+function blindTests() {
+  where = 'blind';
+  const t = Date.now();
+  const WANT = ['duels 1-6', 'unmasked:1', 'unmasked:2', 'three_faced:1', 'three_faced:2', 'hours:1', 'hours:2', 'hours:3', 'hours:4',
+    'reflection:1', 'reflection:2', 'reflection:3', 'mimic', 'called', 'ledger', 'tally', 'coin stamp'];
+  const CFGS = [
+    { name: 'unmasked s7 + Stolen Ledger', clock0: 1.86e12, veteran: true, stake: 7, face: 'unmasked', pre: ['stolen_ledger'] },
+    { name: 'three_faced s0 + Liar\'s Tally', clock0: 1.861e12, veteran: true, stake: 0, face: 'three_faced', pre: ['liars_tally'] },
+    { name: 'hours s0 + Liar\'s Coin', clock0: 1.862e12, veteran: true, stake: 0, face: 'hours', relic: 'relic_liars_coin' },
+    { name: 'reflection s0', clock0: 1.863e12, veteran: true, stake: 0, face: 'reflection' }
+  ];
+  const covered = new Set(), samples = [], liveStarts = {};
+  for (const c of CFGS) {
+    let lastWin = null;
+    drive(c, {
+      onInput(x) {
+        const R = x.page.R, d = x.d, s = x.pend.sealed;
+        const wk = x.run.seed + ':' + x.run.runNo + ':' + d.n + ':' + d.phase, here = x.page.store.raw();
+        const prev = lastWin && lastWin.key === wk && lastWin.turn === d.turn - 1 ? lastWin.raw : null;   // this fight's previous window
+        lastWin = { key: wk, turn: d.turn, raw: here };
+        if (x.pk.only || d.stance === 'none' || s.honest !== false || x.pend.seen_glimpse) return;
+        const lies = R.MOVES.filter(m => m !== s.tell), lr = R.Combat.legal(d, 'r');
+        if (!lies.every(m => lr.indexOf(m) >= 0)) return;
+        const cats = blindCats(R, x.run, d, x.pend.called);
+        for (const q of liveKeys(cats)) {                              // starts for the live path: one turn earlier, then this window
+          const l = liveStarts[q] = liveStarts[q] || [];
+          if (l.length < 3) l.push({ prev, raw: here });
+        }
+        if (cats.every(q => covered.has(q))) return;
+        const raw = x.page.store.raw(), o = raw && JSON.parse(raw);
+        if (!(o && o.run && o.run.pending && commitOf(o.run.pending) === commitOf(x.pend))) { fail('blind: the stored save does not hold the open turn\'s seal'); return; }
+        const other = lies.filter(m => m !== s.move)[0];
+        o.run.pending.sealed.move = other;
+        cats.forEach(q => covered.add(q));
+        samples.push({ raw, raw2: JSON.stringify(o), cats, label: x.run.boss + ' duel ' + d.n + '.' + d.phase + ' turn ' + d.turn + ' tell ' + s.tell + ' sealed ' + s.move + '/' + other });
+      }
+    });
+  }
+  const missing = WANT.filter(q => !covered.has(q));
+  ok(missing.length === 0, 'blind: no lying input window was reached for ' + missing.join(', '));
+  let compared = 0, live = 0;
+  const clockSave = clock.ms;
+  samples.forEach((s, i) => {
+    const n = i === 0 ? 1100 : 300;                                   // the first sample also covers the 14 s idle heckle
+    for (const debug of [false, true]) {
+      const a = blindRun(s.raw, debug, n), b = blindRun(s.raw2, debug, n), at = firstDiff(a.hashes, b.hashes);
+      ok(a.inputAt >= 0 && a.inputAt === b.inputAt, () => 'blind: the input window did not open in the same frame (' + s.label + ': ' + a.inputAt + ' / ' + b.inputAt + ')');
+      ok(at === -1, () => 'frames before the pick differ when only the sealed lie changes (' + s.label + ', frame ' + at + ' of ' + a.hashes.length + ', input at ' + a.inputAt + ', debug ' + debug + ')');
+      compared++;
+    }
+  });
+  if (samples.length) {                                             // the recorder must see what does change
+    const s = samples[0], g1 = JSON.parse(s.raw), g2 = JSON.parse(s.raw2);
+    g1.run.pending.seen_glimpse = true; g2.run.pending.seen_glimpse = true;
+    const ga = blindRun(JSON.stringify(g1), false, 300), gb = blindRun(JSON.stringify(g2), false, 300), gat = firstDiff(ga.hashes, gb.hashes);
+    ok(gat >= 0, 'control: a glimpsed sealed move must change the frames');
+    const t1 = JSON.parse(s.raw), sl = t1.run.pending.sealed;
+    sl.tell = oracle.R.MOVES.filter(m => m !== sl.tell && m !== sl.move)[0];
+    const ta = blindRun(s.raw, false, 300), tb = blindRun(JSON.stringify(t1), false, 300), tat = firstDiff(ta.hashes, tb.hashes);
+    ok(tat >= 0, 'control: a different tell must change the frames');
+    console.log('blind controls: a glimpsed move differs from frame ' + gat + ' (input at ' + ga.inputAt + '), a different tell from frame ' + tat);
+  }
+  // Live path: turn()'s commit branch (a resumed turn takes the pending branch instead). For each category below,
+  // a fight in that category is resumed one turn before a lying window (else at it) and the first lying commit of
+  // that category is swapped as it is sealed.
+  const LIVE_WANT = ['duels 1-6'].concat(oracle.R.Run.BOSSES.map(b => 'final:' + b.id), ['mimic', 'called']);
+  const liveCov = new Set(), liveLabels = [];
+  for (const want of LIVE_WANT) {
+    if (liveCov.has(want)) continue;
+    const has = cats => liveKeys(cats).indexOf(want) >= 0;
+    let done = false;
+    for (const st of liveStarts[want] || []) {
+      for (const start of [st.prev, st.raw]) {
+        if (done || !start) continue;
+        const la0 = blindLive(start, false, false, has);
+        if (!la0.target) continue;                                   // that fight ended before such a lie was sealed
+        const pair = [[la0, blindLive(start, true, false, has)], [blindLive(start, false, true, has), blindLive(start, true, true, has)]];
+        pair.forEach((p, j) => {
+          const [la, lb] = p, at = firstDiff(la.hashes, lb.hashes);
+          ok(!!lb.swapped && JSON.stringify(la.target) === JSON.stringify(lb.target) && la.inputAt >= 0, () => 'blind live: the swapped commit was not reached the same way (' + JSON.stringify(la.target) + ' / ' + JSON.stringify(lb.target) + ')');
+          ok(at === -1, () => 'frames before the pick differ when only the sealed lie changes (live, ' + JSON.stringify(la.target) + ', frame ' + at + ', debug ' + (j === 1) + ')');
+          compared++;
+        });
+        liveKeys(la0.target.cats).forEach(q => liveCov.add(q));
+        liveLabels.push('duel ' + la0.target.n + '.' + la0.target.phase + ' turn ' + la0.target.turn + ' [' + la0.target.cats.join(', ') + ']');
+        live++; done = true;
+      }
+      if (done) break;
+    }
+  }
+  const liveMissing = LIVE_WANT.filter(q => !liveCov.has(q));
+  ok(liveMissing.length === 0, 'blind live: no lying commit was swapped as it was sealed in ' + liveMissing.join(', '));
+  clock.ms = clockSave;
+  console.log('blind: ' + samples.length + ' lying windows (' + WANT.filter(q => covered.has(q)).join(', ') + '), ' + live + ' live swaps (' +
+    LIVE_WANT.filter(q => liveCov.has(q)).join(', ') + '), ' + compared + ' frame-stream comparisons with ?debug off and on, ' + ((Date.now() - t) / 1000).toFixed(1) + ' s');
+  if (VERBOSE) { samples.forEach(s => console.log('  ' + s.label + ' [' + s.cats.join(', ') + ']')); liveLabels.forEach(s => console.log('  live ' + s)); }
+}
+// Blind-test categories of a lying window or commit (the same names as WANT), and the keys the live path covers.
+function blindCats(R, run, d, called) {
+  const inf = R.Combat.info(d), cats = [d.n === 7 ? run.boss + ':' + d.phase : 'duels 1-6'];
+  if (d.mimic) cats.push('mimic');
+  if (called) cats.push('called');
+  if (inf.ledger) cats.push('ledger'); else if (inf.tally) cats.push('tally');
+  if (inf.coinTurn1 && d.turn === 1) cats.push('coin stamp');
+  return cats;
+}
+function liveKeys(cats) { return cats.map(q => /^(\w+):\d+$/.test(q) ? 'final:' + q.split(':')[0] : q); }
+function firstDiff(a, b) { const n = Math.min(a.length, b.length); for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i; return a.length === b.length ? -1 : n; }
+function blindPage(raw, debug) {
+  clock.ms = 1.9e12;
+  const store = makeStore(); store.map.set(KEY, raw);
+  return makePage(store, VIEWS[2], { randomTrap: mulberry(4242), search: debug ? '?debug' : '', ts: 5000 });
+}
+// Resume path: boot the save, CONTINUE, then `frames` frames with the input window open and no pick.
+function blindRun(raw, debug, frames) {
+  const page = blindPage(raw, debug), out = { hashes: [], inputAt: -1 };
+  if (!page.alive) return out;
+  const rec = recordFrames(page), step = () => { page.frame(16.7); out.hashes.push(rec.take()); };
+  for (let i = 0; i < 400 && page.E.sceneName !== 'title'; i++) step();
+  for (let i = 0; i < 20; i++) step();
+  const b = findBtn(page, /CONTINUE/);
+  if (!b) { fail('blind: no CONTINUE on the title'); return out; }
+  page.down(b.x + 5, b.y + 5); step(); page.up(b.x + 5, b.y + 5); step();
+  for (let i = 0; i < frames; i++) {
+    step();
+    const pk = page.E.sceneName === 'duel' ? page.R.Scenes.duel.peek() : null;
+    if (out.inputAt < 0 && pk && pk.input) out.inputAt = out.hashes.length - 1;
+  }
+  return out;
+}
+// Live path: resume, play on with a fixed script, and (swap) seal the other lie on the first lying commit whose two
+// lies are both legal and whose blind categories pass want(cats) (any when omitted). Frames are hashed from that
+// commit (nothing before it can differ) until 300 frames after that turn's buttons light.
+function blindLive(raw, swap, debug, want) {
+  const page = blindPage(raw, debug), out = { hashes: [], target: null, swapped: false, inputAt: -1 };
+  if (!page.alive) return out;
+  const G = page.G, real = G.brain.commit;
+  G.brain.commit = function (q) {
+    const s = real.apply(this, arguments);
+    if (!out.target && !q.force && !q.noTell && s.honest === false) {
+      const lies = ['S', 'G', 'F'].filter(m => m !== s.tell);
+      const d = G.run.duel, cats = blindCats(page.R, G.run, d, d.intel && d.intel.called);
+      if (lies.every(m => q.legalR.indexOf(m) >= 0) && (!want || want(cats))) {
+        out.target = { n: d.n, phase: d.phase, turn: d.turn, tell: s.tell, move: s.move, cats };
+        rec.on = true;
+        if (swap) { out.swapped = true; return Object.assign({}, s, { move: lies.filter(m => m !== s.move)[0] }); }
+      }
+    }
+    return s;
+  };
+  const rec = recordFrames(page), step = () => { page.frame(16.7); out.hashes.push(rec.take()); };
+  rec.on = false;
+  for (let i = 0; i < 400 && page.E.sceneName !== 'title'; i++) step();
+  for (let i = 0; i < 20; i++) step();
+  const cb = findBtn(page, /CONTINUE/);
+  if (!cb) return out;
+  page.down(cb.x + 5, cb.y + 5); step(); page.up(cb.x + 5, cb.y + 5); step();
+  let tail = -1, lastTurn = -1;
+  for (let i = 0; i < 20000; i++) {
+    step();
+    if (tail >= 0) { if (--tail === 0) break; continue; }
+    const pk = page.E.sceneName === 'duel' ? page.R.Scenes.duel.peek() : null, run = G.run;
+    if (pk && pk.input && run && run.pending) {
+      const d = run.duel;
+      if (out.target && d.n === out.target.n && d.turn === out.target.turn && d.phase === out.target.phase) { out.inputAt = out.hashes.length - 1; tail = 300; continue; }
+      if (run.stats.turns !== lastTurn) {
+        lastTurn = run.stats.turns;
+        const open = page.buttons.filter(q => /STRIKE|GUARD|FEINT/.test(q.label) && !q.disabled), b = open[(run.stats.turns * 7) % open.length];
+        if (b) { page.down(b.x + 4, b.y + 4); step(); page.up(b.x + 4, b.y + 4); }
+      }
+    } else if (!run || /bonfire|death|victory|credits/.test(page.E.sceneName)) break;
+  }
+  return out;
+}
+
+// ============================================================================================== 11. a tap that only ends a pause
+// After a blur the game is paused; the next pointer-down or key press ends the pause. It must not also press a
+// button: the player cannot see what is under the finger behind the PAUSED banner. Today engine.js delivers that
+// same event to the scene (O13, P1.6), so each case prints its KNOWN row; any other outcome is a FAIL, and once
+// the move is no longer picked the row is stale (FAIL until it is removed here and in tools/known.json).
+function pauseTapTests() {
+  where = 'pausetap';
+  const clockSave = clock.ms;
+  clock.ms = 1.87e12;
+  const store = makeStore(), page = makePage(store, VIEWS[5], { randomTrap: mulberry(9001), ts: 1000 });
+  if (!page.alive) { clock.ms = clockSave; return; }
+  const E = page.E, G = page.G, R = page.R;
+  const free = p => p.E.sceneName === 'duel' && p.R.Scenes.duel.peek() && p.R.Scenes.duel.peek().input && !p.R.Scenes.duel.peek().only && p.G.run.pending;
+  const kinds = [
+    ['pause-tap-pointer', 'a pointer-down', (m, b) => { page.down(b.x + 10, b.y + 10); page.frame(16.7); page.up(b.x + 10, b.y + 10); }],
+    ['pause-tap-key', 'a key press', m => page.key(m === 'S' ? '1' : m === 'G' ? '2' : '3')]
+  ];
+  const seen = [];
+  for (const [id, what, press] of kinds) {
+    if (!playUntil(page, store, free, { what: 'a free input window (' + what + ')', seed: 61 + seen.length })) break;
+    run60(page, 10);
+    const turns = G.run.stats.turns, lp = R.Combat.legal(G.run.duel, 'p').filter(m => !!findBtn(page, MOVE_LABEL[m]) && !findBtn(page, MOVE_LABEL[m]).disabled);
+    if (!ok(lp.length > 0, 'pausetap: no open move button')) break;
+    const m = lp[lp.length - 1], btn = Object.assign({}, findBtn(page, MOVE_LABEL[m]));   // where the button was before the pause
+    page.fire('window', 'blur', {});
+    run60(page, 5);
+    if (!ok(E.paused === true, 'pausetap: blur must pause the game')) break;
+    press(m, btn);
+    run60(page, 90);
+    const n = G.run ? G.run.stats.turns - turns : -1, d = G.run && G.run.duel, last = d && d.p.moves.length ? d.p.moves[d.p.moves.length - 1] : null;
+    ok(E.paused === false, what + ' must end the pause');
+    if (n === 1 && last === m) knownHit(id);                          // today: the move under the finger / key is picked
+    else if (n === 0) fail('stale KNOWN row ' + id + ': remove it from tools/known.json in the fixing commit (and assert that ' + what + ' that only ends a pause picks no move)');
+    else fail(what + ' that ends a pause changed behaviour in an unexpected way: ' + n + ' turn(s) resolved, last player move ' + last + ', pressed ' + m);
+    seen.push(id + ' ' + n);
+  }
+  clock.ms = clockSave;
+  console.log('pausetap: ' + seen.map(s => s.replace(/ (\d+)$/, ': $1 move picked')).join(', '));
+}
+
+// ============================================================================================== 12. sim-scene commit parity (feel-10 C4)
+// The real duel scene and tools/sim.js fight() must hand brain.commit the same input for the same history. The
+// scene's inputs are recorded (sim.commitInput on the scene's q, before the commit draws), with the run seeds,
+// clocks, relics, stakes, moves (or 'coin'), drafts and finish times; runChain replays them as a script and logs
+// its own. One page per stake, no reloads (boot reseeds G.rng). Faces are drawn naturally from the meta; each
+// face must finish at least one run in its last phase. The Coin of Fools is granted and thrown at stake 0.
+function parityTests() {
+  where = 'parity';
+  let sim = null;
+  try { sim = require(path.join(__dirname, 'sim.js')); } catch (e) { fail('parity: tools/sim.js cannot be required: ' + (e && e.message)); return; }
+  if (!sim || typeof sim.runChain !== 'function' || typeof sim.commitInput !== 'function') { fail('parity: tools/sim.js does not export runChain and commitInput'); return; }
+  const t = Date.now(), faces = oracle.R.Run.BOSSES.map(b => b.id), MAXR = 12, lines = [];
+  for (const stake of [0, 7]) {
+    where = 'parity:' + (stake ? 'vigil' : 'plain') + '-s' + stake;     // fail() dedupes on where up to its first digit
+    const rec = { commits: [], runs: [], firstMeta: null, coins: 0 }, covered = {};
+    let cur = null, coinNext = false;
+    const cfg = { clock0: 1.88e12 + stake * 1e10, veteran: true, stake, runs: MAXR, skips: true, coin: stake === 0, pre: stake === 0 ? ['coin_of_fools'] : null };
+    drive(cfg, {
+      beforeBoot(p) {
+        const R = p.R;
+        const bc = R.Brain.create;
+        R.Brain.create = function () {
+          const b = bc.apply(this, arguments), c = b.commit;
+          b.commit = function (q) { rec.commits.push(sim.commitInput(q)); return c.apply(this, arguments); };
+          return b;
+        };
+        const rc = R.Run.create;
+        R.Run.create = function (m, o) {
+          if (rec.firstMeta === null) rec.firstMeta = JSON.stringify(m);
+          const run = rc.apply(this, arguments);
+          cur = { seed: o.seed, now: o.now, relicId: o.relicId || null, stake: o.stake, moves: [], drafts: [], finishNow: null, boss: run.boss, commitStart: rec.commits.length, commitEnd: -1, end: null };
+          rec.runs.push(cur);
+          return run;
+        };
+        const ua = R.Combat.useActive;
+        R.Combat.useActive = function () { const r = ua.apply(this, arguments); if (r && r.ok && r.kind === 'coin') coinNext = true; return r; };
+        const rr = R.Run.record;
+        R.Run.record = function (run, m, res) {
+          if (cur && res && res.pm) { cur.moves.push(coinNext ? 'coin' : res.pm); if (coinNext) rec.coins++; }
+          coinNext = false;
+          return rr.apply(this, arguments);
+        };
+        const rp = R.Run.pick;
+        R.Run.pick = function (run, id) { const r = rp.apply(this, arguments); if (r && cur) cur.drafts.push(id); return r; };
+        const rf = R.Run.finish;
+        R.Run.finish = function (run, m, now) {
+          if (cur && cur.finishNow === null) {
+            cur.finishNow = now; cur.commitEnd = rec.commits.length;
+            cur.end = { n: run.duelN, phase: run.phase, last: R.Run.phaseCount(run), stage: run.stage };
+            if (run.duelN === 7 && run.phase === cur.end.last) covered[run.boss] = true;
+          }
+          return rf.apply(this, arguments);
+        };
+      },
+      stop: () => faces.every(f => covered[f]) && rec.runs.length && rec.runs[rec.runs.length - 1].finishNow !== null
+    });
+    const fin = rec.runs.filter(r => r.finishNow !== null);
+    if (!ok(fin.length > 0 && rec.firstMeta, 'parity: the scene finished no run')) continue;
+    fin.forEach(r => ok(r.moves.length === r.commitEnd - r.commitStart, () => 'parity: run with seed ' + r.seed + ' resolved ' + r.moves.length + ' exchanges for ' + (r.commitEnd - r.commitStart) + ' commits'));
+    const script = { runs: fin.map(r => ({ seed: r.seed, now: r.now, finishNow: r.finishNow, stake: r.stake, relicId: r.relicId, moves: r.moves, drafts: r.drafts })) };
+    // The sim's own brain is watched too (host realm, restored right after): if the replay throws because it went
+    // another way, the commits it made up to there still locate the first difference.
+    const HR = globalThis.RIVAL, realCreate = HR && HR.Brain && HR.Brain.create, seen = [];
+    let out = null, err = null;
+    if (realCreate) HR.Brain.create = function () { const b = realCreate.apply(this, arguments), c = b.commit; b.commit = function (q) { seen.push(sim.commitInput(q)); return c.apply(this, arguments); }; return b; };
+    try {
+      out = sim.runChain({ bot: 'script', tag: 'parity', seed: 0, idx: 0, runs: fin.length, unlocks: 'natural', meta: JSON.parse(rec.firstMeta), script,
+        commitLog: true, noTiming: true, pre: cfg.pre ? { p: cfg.pre.slice(), r: [] } : null });
+    } catch (e) { err = String(e && e.message || e).split('\n')[0]; }
+    finally { if (realCreate) HR.Brain.create = realCreate; }
+    if (err) fail('parity: the sim could not replay the scene\'s runs: ' + err);
+    else if (realCreate) ok(JSON.stringify(out.commits) === JSON.stringify(seen), 'parity: the sim\'s commitLog is not what its brain.commit received');
+    const sc = rec.commits.slice(0, fin[fin.length - 1].commitEnd), sm = err ? seen : (out.commits || []);
+    let first = -1;
+    for (let i = 0; i < Math.max(sc.length, sm.length); i++) if (sc[i] !== sm[i]) { first = i; break; }
+    if (!err) ok(sc.length === sm.length, () => 'parity: the scene sealed ' + sc.length + ' times, the sim ' + sm.length);
+    if (first >= 0 && sc[first] && sm[first]) {
+      const a = JSON.parse(sc[first]), b = JSON.parse(sm[first]), keys = [];
+      for (const k of new Set(Object.keys(a).concat(Object.keys(b)))) {
+        if (k === 'q' && a.q && b.q) { for (const j of new Set(Object.keys(a.q).concat(Object.keys(b.q)))) if (JSON.stringify(a.q[j]) !== JSON.stringify(b.q[j])) keys.push('q.' + j); }
+        else if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) keys.push(k);
+      }
+      fail('parity: commit input ' + first + ' (duel ' + a.duel + ' phase ' + a.phase + ' turn ' + a.turn + ') differs in ' + keys.join(', '));
+    } else ok(first < 0, () => 'parity: commit input ' + first + ' exists on one side only');
+    for (const f of faces) ok(!!covered[f], () => 'parity coverage: ' + f + ' stake ' + stake + ' never finished a run in its last phase (' + fin.length + ' runs)');
+    const fc = {}; fin.forEach(r => { fc[r.boss] = (fc[r.boss] || 0) + 1; });
+    lines.push('stake ' + stake + ': ' + fin.length + ' runs (' + faces.map(f => f + ' ' + (fc[f] || 0)).join(', ') + '), ' + (first < 0 && sc.length === sm.length ? sc.length + '/' + sm.length + ' identical' : 'MISMATCH at ' + first) +
+      ', ' + rec.coins + ' coin throws');
+  }
+  where = 'parity';
+  console.log('parity (scene vs sim brain.commit inputs): ' + lines.join('; ') + ', ' + ((Date.now() - t) / 1000).toFixed(1) + ' s');
+}
+
+// ============================================================================================== 13. the coercion counter bites
+// A forged save (a real input-window save whose own sealed move is then put under a seal, so it is illegal) is the
+// one way to make the scene resolve a move the Rival did not seal: validRun accepts it and combat.js coerce()
+// replaces the move. The counter must see exactly that one coercion; it is expected here and not a failure.
+// (If a later push makes validRun or the scene refuse such a pending, update this control in that push.)
+function coerceTests() {
+  where = 'coerce:forged';
+  const clockSave = clock.ms;
+  clock.ms = 1.89e12;
+  const store0 = makeStore(), page0 = makePage(store0, VIEWS[2], { randomTrap: mulberry(5150), ts: 1000 });
+  if (!page0.alive) { clock.ms = clockSave; return; }
+  const free = p => p.E.sceneName === 'duel' && p.R.Scenes.duel.peek() && p.R.Scenes.duel.peek().input && !p.R.Scenes.duel.peek().only &&
+    p.G.run.pending && p.R.Combat.legal(p.G.run.duel, 'r').length === 3;
+  if (!playUntil(page0, store0, free, { what: 'an input window with all three Rival moves legal', seed: 71 })) { clock.ms = clockSave; return; }
+  const o = JSON.parse(store0.raw()), sm = o.run.pending.sealed.move;
+  o.run.duel.r.status.sealed[sm] = 2;
+  const store = makeStore(); store.map.set(KEY, JSON.stringify(o));
+  const page = makePage(store, VIEWS[2], { randomTrap: mulberry(5151), ts: 1000 });
+  const before = COERCE.expected, f0 = fails;
+  page.coerceExpected = 1;
+  waitScene(page, 'title', 400); run60(page, 20); tapLabel(page, /CONTINUE/);
+  for (let i = 0; i < 600 && !(page.E.sceneName === 'duel' && page.R.Scenes.duel.peek() && page.R.Scenes.duel.peek().input); i++) page.frame(16.7);
+  const d = page.G.run && page.G.run.duel, lr = d ? page.R.Combat.legal(d, 'r') : [];
+  const b = page.buttons.filter(q => /STRIKE|GUARD|FEINT/.test(q.label) && !q.disabled)[0];
+  if (ok(!!b && lr.indexOf(sm) < 0, 'coerce control: the forged save did not reach an input window with the sealed move illegal')) {
+    const n0 = d.r.moves.length;
+    page.down(b.x + 4, b.y + 4); page.up(b.x + 4, b.y + 4);
+    run60(page, 120);
+    ok(COERCE.expected === before + 1 && page.coerceExpected === 0, 'control: the forged illegal seal must be counted as exactly one Rival coercion (counted ' + (COERCE.expected - before) + ')');
+    ok(d.r.moves.length === n0 + 1 && d.r.moves[n0] === lr[0], () => 'control: the coerced Rival move should be legal[0] = ' + lr[0] + ', got ' + d.r.moves[n0]);
+    ok(fails === f0, 'control: the forged save raised other failures');
+  }
+  page.coerceExpected = 0;
+  clock.ms = clockSave;
+  console.log('coerce control: forged seal ' + sm + ' under a seal -> ' + (COERCE.expected - before) + ' coercion counted, Rival played ' + (d && d.r.moves[d.r.moves.length - 1]));
+}
+
+// ============================================================================================== 14. seal trace (opt-in)
+// One deterministic run per config through the real duel scene, logging per seal the commit (sealed move, tell,
+// honest, pred..., called) and the G.rng draws in three windows. Invariants: no draw between the seal and the
+// buttons lighting; exactly one draw (the Coin of Fools pick) in the player's window when the coin is thrown, else
+// none; at least one draw per commit except the tutorial's forced ones. Each config also runs with Math.random
+// noise, 16.7 ms frames and skip taps, which must give the identical log. Prints "SEALTRACE <sha256 of the log>".
+function sealTraceTests() {
+  where = 'sealtrace';
+  const t = Date.now(), O = oracle.R.Run;
+  const CFGS = [{ name: 'T1 fresh', clock0: 1.8e12 }];
+  O.BOSSES.forEach((b, i) => [0, 7].forEach(stake => {
+    const coin = (i + stake / 7) % 2 === 1;                          // the coin on half of them, both stakes and every face
+    CFGS.push({ name: b.id + ' s' + stake + (coin ? ' coin' : ''), clock0: 1.81e12 + (i * 2 + stake / 7) * 1e10, veteran: true, stake, face: b.id, pre: coin ? ['coin_of_fools'] : null, coin });
+  }));
+  const all = [];
+  for (const c of CFGS) {
+    where = 'sealtrace:' + c.name;
+    const a = drive(Object.assign({ runs: 1, qHash: true }, c)), b = drive(Object.assign({ runs: 1, qHash: true }, c, { noise: 7, dt: 16.7, skips: true }));
+    const ja = a.log.map(x => JSON.stringify(x)), jb = b.log.map(x => JSON.stringify(x));
+    const first = firstDiff(ja, jb);
+    ok(first < 0, () => 'seal trace ' + c.name + ' depends on frame timing, skips or Math.random (entry ' + first + ')\n   ' + ja[first] + '\n   ' + jb[first]);
+    const turns = a.log.filter(x => x.commit), cm = turns.map(x => JSON.parse(x.commit));
+    for (const x of turns) {
+      const at = c.name + ' duel ' + x.n + ' phase ' + x.ph + ' turn ' + x.t;
+      ok(x.dSeal === 0, () => 'G.rng drew ' + x.dSeal + ' time(s) between the seal and the buttons lighting (' + at + ')');
+      ok(x.dWindow === (x.coin ? 1 : 0), () => 'G.rng drew ' + x.dWindow + ' time(s) in the player\'s window (' + at + (x.coin ? ', Coin of Fools' : '') + ')');
+      ok(x.tut ? x.dCommit === 0 : x.dCommit >= 1, () => 'commit drew ' + x.dCommit + ' time(s) (' + at + (x.tut ? ', tutorial: forced' : '') + ')');
+      ok(!!x.qHash, () => 'no brain.commit call observed for ' + at);
+    }
+    const face = c.face || (turns.length ? turns[turns.length - 1].face : null), last = face ? O.BOSSES.find(q => q.id === face).phases.length : 0;
+    ok(turns.some(x => x.n === 7 && x.ph === last), () => 'seal trace ' + c.name + ' never reached the last phase (' + last + ') of ' + face);
+    if (!c.veteran) ok(turns.filter(x => x.tut).length >= 1, 'seal trace ' + c.name + ': no forced tutorial turn');
+    if (c.coin) ok(turns.some(x => x.coin), 'seal trace ' + c.name + ': the Coin of Fools was never thrown');
+    if (face === 'three_faced') ok(turns.some((x, i) => x.n === 7 && x.ph === 3 && cm[i].sealed.tell === cm[i].sealed.move && cm[i].sealed.honest), 'seal trace ' + c.name + ': no turn of the Blank (no stance)');
+    if (face === 'reflection') ok(cm.some(x => x.sealed.mode === 'mimic'), 'seal trace ' + c.name + ': no mimic commit');
+    if (c.stake === 7 || face === 'unmasked') ok(cm.some(x => x.called), 'seal trace ' + c.name + ': no Called Shot');
+    const hist = {};
+    turns.forEach(x => { const h = x.dCommit + '/' + x.dWindow; hist[h] = (hist[h] || 0) + 1; });
+    const fights = new Set(turns.map(x => x.n + (x.n === 7 ? '.' + x.ph : '')));
+    console.log('  ' + (c.name + ' '.repeat(20)).slice(0, 20) + turns.length + ' turns, fights ' + [...fights].join(' ') + ', called ' + cm.filter(x => x.called).length + ', mimic ' + cm.filter(x => x.sealed.mode === 'mimic').length +
+      ', coin ' + turns.filter(x => x.coin).length + ', draws commit/window ' + JSON.stringify(hist) + ', ' + a.frames + '/' + b.frames + ' frames, ' + (first < 0 ? 'time-independent' : 'TIME-DEPENDENT'));
+    all.push({ name: c.name, log: a.log });
+  }
+  where = 'sealtrace';
+  const doc = JSON.stringify(all);
+  if (process.env.FLOW_SEAL_OUT) fs.writeFileSync(process.env.FLOW_SEAL_OUT, JSON.stringify(all.map(x => ({ name: x.name, log: x.log })), null, 0).replace(/\},\{/g, '},\n{') + '\n');
+  console.log('SEALTRACE ' + sha(doc));
+  console.log('seal trace: ' + CFGS.length + ' configs, ' + all.reduce((s, x) => s + x.log.filter(e => e.commit).length, 0) + ' seals, ' + ((Date.now() - t) / 1000).toFixed(1) + ' s');
+}
+
 // ============================================================================================== go
-console.log('test_flow: ' + RUNS + ' runs, seed ' + SEED + (QUICK ? ' (quick)' : ''));
-const SECTIONS = { soak, long: longSession, storage: storageTests, corrupt: corruptTests, pause: pauseTests, scripted: scriptedReloads, layout: layoutTests, perf: perfProbe, random: randomTests };
-const pickSec = process.env.FLOW_SECTIONS ? process.env.FLOW_SECTIONS.split(',') : Object.keys(SECTIONS);   // e.g. FLOW_SECTIONS=soak,perf
-for (const k of Object.keys(SECTIONS)) if (pickSec.indexOf(k) >= 0) SECTIONS[k]();
-console.log((fails ? 'FAILED ' + fails : 'ALL PASS') + ' - ' + checks + ' checks' + (known ? ', ' + known + ' known-open defect(s) awaiting the lead\'s patch' : '') + ', ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
-process.exit(fails ? 1 : 0);
+// New sections go after the old ones: every page draws from the shared sysRand stream, so inserting one earlier
+// would change what the later sections play.
+const SECTIONS = {
+  soak, long: longSession, storage: storageTests, corrupt: corruptTests, pause: pauseTests, scripted: scriptedReloads, layout: layoutTests, perf: perfProbe, random: randomTests,
+  rngsites: rngSitesTests, blind: blindTests, pausetap: pauseTapTests, parity: parityTests, coerce: coerceTests, sealtrace: sealTraceTests
+};
+const OPT_IN = ['sealtrace'];                                       // only when named in FLOW_SECTIONS
+function main() {
+  console.log('test_flow: ' + RUNS + ' runs, seed ' + SEED + (QUICK ? ' (quick)' : ''));
+  const pickSec = process.env.FLOW_SECTIONS ? process.env.FLOW_SECTIONS.split(',').map(s => s.trim()) : Object.keys(SECTIONS).filter(k => OPT_IN.indexOf(k) < 0);   // e.g. FLOW_SECTIONS=soak,perf
+  for (const k of pickSec) if (!SECTIONS[k]) { where = 'go'; fail('unknown section in FLOW_SECTIONS: ' + k + ' (have ' + Object.keys(SECTIONS).join(',') + ')'); }
+  for (const k of Object.keys(SECTIONS)) if (pickSec.indexOf(k) >= 0) SECTIONS[k]();
+  console.log('coerce: ' + COERCE.resolves + ' resolves, ' + COERCE.rival + ' Rival coercions' + (COERCE.expected ? ' (+' + COERCE.expected + ' expected in the forged-save control)' : '') +
+    (COERCE.player ? ', ' + COERCE.player + ' player-side' : ''));
+  const rows = Object.keys(knownSeen);
+  console.log((fails ? 'FAILED ' + fails : 'ALL PASS') + ' - ' + checks + ' checks' + (rows.length ? ', ' + rows.length + ' KNOWN row(s) (' + rows.join(', ') + ')' : '') + ', ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
+  process.exit(fails ? 1 : 0);
+}
+
+if (require.main === module) main();
+else {
+  // The harness for other tools (P1.1 fixtures and the like). Requiring this file runs no section. Shared state:
+  // clock (the wall clock every page sees), the sysRand stream, the failure counters (stats(), setWhere()).
+  module.exports = {
+    KEY, VIEWS, SRC, clock, sysRand, oracle, COERCE, KNOWN_ROWS,
+    makeStore, makePage, makeBot, makeMonitor, session, commitOf, coreOf, diffKeys, findBtn, run60, tapXY, tapLabel, waitScene, playUntil,
+    collectSaves, bootAndPlay, drive, veteranSave, recordFrames, blindRun, blindLive, qCanon, canonV, mulberry, fail, ok, knownHit,
+    setWhere(w) { where = w; }, stats: () => ({ fails, checks, known, knownRows: Object.assign({}, knownSeen), where })
+  };
+}
