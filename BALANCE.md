@@ -2,7 +2,7 @@
 
 Measured with `tools/sim.js`, which plays the real `rng`, `brain`, `boons`, `combat` and `run` modules in the game's own call order. Each bot plays chains of 400 sequential runs against one persistent brain and meta. Tables are 8 chains per bot (3,200 runs), seed 1, natural unlock order.
 
-Reproduce: `node tools/sim.js --seeds 8` (about 40 s). Raw output of the final run is `tools/out/final_r2.txt`; every tuning step is in `tools/out/balance_log.md`.
+Reproduce: `node tools/sim.js --seeds 8` (about 40 s). The raw output of the final run (`tools/out/final_r2.txt`) and the tuning log (`tools/out/balance_log.md`) are local-only, not in the repo: `tools/out/` is git-ignored.
 
 ## 1. The structure
 
@@ -168,9 +168,9 @@ Also worth a look: Rupture without the seal (four clashes in a row), Sealing Wax
 
 ## 8. Follow-ups outside this pass
 
-- `DESIGN.md` §4, §5, §8 and §12 still describe the old Rupture rule, HP table, heal and boon numbers. I did not edit it.
-- `index.html` was not rebuilt; run `node tools/build.js`.
-- The layout spec has "9/12"-style numerals and an HP bar with a notch per HP; I have not looked at either at 26.
+- Closed in the P1.0 docs pass: `DESIGN.md` §4, §5 and §12 carry SUPERSEDED banners, and §8 says the card text in `src/game/boons.js` is authoritative. `index.html` must equal a fresh build of `src/`; the release gate's in-sync step checks it on every run.
+- Balance changes are checked against the exact sim digest in `tools/baseline.json`: `node tools/test_all.js` replays 8 short sim cells (four faces × stakes 0 and 7, 2 chains × 60 runs, all unlocks, no combos) and compares them byte for byte, so any change in pure-module behaviour fails the gate unless the same commit re-records the baseline. The baseline was recorded on the `src/` tree with src digest `283c46cbdad8` (the first 12 hex of its `srcSha256`).
+- Still open: the layout spec has "9/12"-style numerals and an HP bar with a notch per HP; I have not looked at either at 26.
 
 ## 8b. The Vigil (stakes)
 
@@ -214,10 +214,143 @@ With all seven lights out: Unmasked 46 / 39 / 23 / 17, Three-Faced 44 / 32 / 25 
 - The Reflection is the kindest to the habit bot: when it plays as the bot would, the two of them clash a lot.
 - The adaptive bot was taught one thing for The Reflection: under the mimic rule it weighs the Rival's moves by its own record after a win, loss or clash, which is what a player who has read the rule card would do.
 
+## 8d. Noise baseline and per-phase tables (P1.0)
+
+The tables below come from `node tools/sim_tables.js` (its defaults: `--seeds 8 --runs 400 --seed 1 --stakes 0,7 --faces all --jobs 4`; about 90 to 110 s). It runs one sim process per face and stake, never with `--label`:
+
+```
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=unmasked --set stake=0
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=three_faced --set stake=0
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=hours --set stake=0
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=reflection --set stake=0
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=unmasked --set stake=7
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=three_faced --set stake=7
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=hours --set stake=7
+node tools/sim.js --json --seed 1 --seeds 8 --runs 400 --unlocks all --no-combos --set boss=reflection --set stake=7
+```
+
+- **Code measured:** commit `fdb990f` with the P1.0 tools, node v22.23.2. Its `src/` is the same tree as at `0cba25d`; these tools (`sim.js --json`, `sim_tables.js`) do not exist at that commit, so the tables cannot be re-run there. `sim_tables.js` prints the src digest `263f9953f0a7` (LF-normalised path+length+content, 32 files); `tools/baseline.json` hashes the same tree another way (`srcSha256` `283c46cbdad8`).
+- 8 chains × 400 sequential runs per bot, seed 1, all unlocks, no combo checks. W = runs won, A = runs that reached duel 7.
+- **Insufficient sample:** a chain counts only with 30 or more duel-7 arrivals, a chain SD needs 6 counted chains, and a pooled value needs 100 or more arrivals (`SAMPLE` in `tools/sim.js`). Such a cell reads "insufficient sample", never a pass.
+- **Chain SD** is the spread of win given arrival across the counted chains: the noise of one 400-run chain. **SE = SD / √(counted chains)** is the noise of the pooled 8 × 400 number. The binomial SE √(p(1 − p) / A) is shown for reference.
+- **Acceptance bands** for later balance changes are max(3, 2 × chain SD) points around these values, per the roadmap. That band is sized for chain-to-chain noise; a pooled 8 × 400 figure is known to within its SE, which is smaller. The bands stay on the chain SD (owner, 2026-11-16): runs in one chain share a learning Rival and are not independent, so a band built on the pooled SE would be too narrow and would flag noise as change.
+- At stake 0 these figures agree with the 8c table (300-run chains) within 2 points for every face and bot. At stake 7 the adaptive and mixer figures agree within 2 points; the uniform and habit samples there are small (see their SD and arrivals).
+- Stance columns count only turns on which a stance was shown (since P1.0), so The Blank's no-stance turns are left out of The Three-Faced's stance numbers.
+
+**Final-duel win given arrival, stake 0**
+
+| face | bot | W/A | win given arrival % | chain SD | SE = SD/√chains | binomial SE | band max(3, 2 SD) | run win % | arrivals per chain (min-max) |
+|---|---|---|---|---|---|---|---|---|---|
+| unmasked | adaptive | 1827/2567 | 71.2 | 1.29 | 0.45 | 0.89 | 3.0 | 57.1 | 310-334 |
+| unmasked | mixer | 1108/1746 | 63.5 | 3.18 | 1.12 | 1.15 | 6.4 | 34.6 | 211-223 |
+| unmasked | uniform | 689/1341 | 51.4 | 2.49 | 0.88 | 1.36 | 5.0 | 21.5 | 154-172 |
+| unmasked | habit | 303/1411 | 21.5 | 2.25 | 0.79 | 1.09 | 4.5 | 9.5 | 158-192 |
+| three_faced | adaptive | 1793/2506 | 71.5 | 2.82 | 1.00 | 0.90 | 5.6 | 56.0 | 298-324 |
+| three_faced | mixer | 1097/1684 | 65.1 | 4.01 | 1.42 | 1.16 | 8.0 | 34.3 | 199-215 |
+| three_faced | uniform | 721/1289 | 55.9 | 5.86 | 2.07 | 1.38 | 11.7 | 22.5 | 151-171 |
+| three_faced | habit | 343/1430 | 24.0 | 1.20 | 0.42 | 1.13 | 3.0 | 10.7 | 166-195 |
+| hours | adaptive | 1840/2553 | 72.1 | 2.23 | 0.79 | 0.89 | 4.5 | 57.5 | 313-327 |
+| hours | mixer | 1066/1754 | 60.8 | 3.95 | 1.40 | 1.17 | 7.9 | 33.3 | 210-227 |
+| hours | uniform | 688/1338 | 51.4 | 3.15 | 1.11 | 1.37 | 6.3 | 21.5 | 155-176 |
+| hours | habit | 206/1366 | 15.1 | 3.84 | 1.36 | 0.97 | 7.7 | 6.4 | 160-192 |
+| reflection | adaptive | 1861/2516 | 74.0 | 2.91 | 1.03 | 0.87 | 5.8 | 58.2 | 303-327 |
+| reflection | mixer | 991/1645 | 60.2 | 4.06 | 1.44 | 1.21 | 8.1 | 31.0 | 200-214 |
+| reflection | uniform | 771/1387 | 55.6 | 3.65 | 1.29 | 1.33 | 7.3 | 24.1 | 165-185 |
+| reflection | habit | 435/1413 | 30.8 | 3.74 | 1.32 | 1.23 | 7.5 | 13.6 | 153-187 |
+
+Left out, insufficient sample (fewer than 100 arrivals pooled): unmasked cycle (0 arrivals), unmasked guard (0 arrivals), unmasked truster (6 arrivals), unmasked wsls (46 arrivals), three_faced cycle (0 arrivals), three_faced guard (0 arrivals), three_faced truster (6 arrivals), three_faced wsls (56 arrivals), hours cycle (0 arrivals), hours guard (0 arrivals), hours truster (6 arrivals), hours wsls (47 arrivals), reflection cycle (0 arrivals), reflection guard (0 arrivals), reflection truster (5 arrivals), reflection wsls (51 arrivals).
+
+**Final-duel win given arrival, stake 7** (all seven lights out)
+
+| face | bot | W/A | win given arrival % | chain SD | SE = SD/√chains | binomial SE | band max(3, 2 SD) | run win % | arrivals per chain (min-max) |
+|---|---|---|---|---|---|---|---|---|---|
+| unmasked | adaptive | 680/1468 | 46.3 | 3.25 | 1.15 | 1.30 | 6.5 | 21.3 | 150-199 |
+| unmasked | mixer | 291/734 | 39.6 | 3.54 | 1.25 | 1.81 | 7.1 | 9.1 | 73-107 |
+| unmasked | uniform | 113/407 | 27.8 | 10.15 | 3.59 | 2.22 | 20.3 | 3.5 | 47-64 |
+| unmasked | habit | 27/192 | 14.1 | insufficient sample (2 of 8 chains) | insufficient sample | 2.51 | insufficient sample | 0.8 | 16-33 |
+| three_faced | adaptive | 626/1418 | 44.1 | 2.67 | 0.94 | 1.32 | 5.3 | 19.6 | 158-190 |
+| three_faced | mixer | 222/698 | 31.8 | 8.12 | 2.87 | 1.76 | 16.2 | 6.9 | 71-102 |
+| three_faced | uniform | 102/403 | 25.3 | 6.65 | 2.35 | 2.17 | 13.3 | 3.2 | 41-61 |
+| three_faced | habit | 11/173 | 6.4 | insufficient sample (0 of 8 chains) | insufficient sample | 1.86 | insufficient sample | 0.3 | 14-28 |
+| hours | adaptive | 684/1482 | 46.2 | 4.92 | 1.74 | 1.29 | 9.8 | 21.4 | 167-200 |
+| hours | mixer | 217/754 | 28.8 | 5.11 | 1.81 | 1.65 | 10.2 | 6.8 | 84-107 |
+| hours | uniform | 88/378 | 23.3 | 8.06 | 2.85 | 2.17 | 16.1 | 2.8 | 38-62 |
+| hours | habit | 6/184 | 3.3 | insufficient sample (1 of 8 chains) | insufficient sample | 1.31 | insufficient sample | 0.2 | 15-32 |
+| reflection | adaptive | 656/1473 | 44.5 | 3.87 | 1.37 | 1.29 | 7.7 | 20.5 | 175-196 |
+| reflection | mixer | 227/710 | 32.0 | 4.44 | 1.57 | 1.75 | 8.9 | 7.1 | 80-101 |
+| reflection | uniform | 96/413 | 23.2 | 4.69 | 1.66 | 2.08 | 9.4 | 3.0 | 45-58 |
+| reflection | habit | 15/214 | 7.0 | insufficient sample (4 of 8 chains) | insufficient sample | 1.75 | insufficient sample | 0.5 | 20-30 |
+
+Left out, insufficient sample (fewer than 100 arrivals pooled): unmasked cycle (0 arrivals), unmasked guard (0 arrivals), unmasked truster (0 arrivals), unmasked wsls (0 arrivals), three_faced cycle (0 arrivals), three_faced guard (0 arrivals), three_faced truster (0 arrivals), three_faced wsls (0 arrivals), hours cycle (0 arrivals), hours guard (0 arrivals), hours truster (0 arrivals), hours wsls (0 arrivals), reflection cycle (0 arrivals), reflection guard (0 arrivals), reflection truster (0 arrivals), reflection wsls (0 arrivals).
+
+**Final duel by phase.** Condensed to the adaptive and mixer rows; `node tools/sim_tables.js` also prints the uniform and habit rows.
+
+turns = p10/p50/p90 (mean); ≤2 dec = phases settled within 2 decisive (non-clash) exchanges; ≤2 t = within 2 turns; clash = clashes / turns;
+7+, rupt, lock = share of phases with a 7+ hit on the player, a Rupture, 9+ clashes in a row at 3 pips; bored = escapes (turns / phases);
+truth = honest share of the turns on which a stance was shown (shown turns). Rows with fewer than 100 arrivals: insufficient sample.
+
+Stake 0:
+
+| face | bot | phase | exploit | arrive | win % | ±SE | turns | ≤2 dec % | ≤2 t % | clash % | 7+ % | rupt % | lock % | bored | truth % (shown) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| unmasked | adaptive | 1 The Altar | 1 | 2567 | 86.4 | 0.5 | 4/7/13 (7.54) | 6.5 | 1.0 | 34.0 | 5.8 | 10.6 | 0.0 | 1/1 | 42.0 (19352) |
+| unmasked | adaptive | 2 The Unmasked | 1 | 2219 | 82.3 | 0.6 | 2/5/9 (5.12) | 39.1 | 17.9 | 35.5 | 14.6 | 21.1 | 0.1 | 4/2 | 38.4 (11372) |
+| unmasked | mixer | 1 The Altar | 1 | 1746 | 82.1 | 0.5 | 3/7/13 (7.37) | 17.1 | 3.7 | 38.1 | 6.9 | 12.8 | 0.2 | 4/3 | 57.2 (12866) |
+| unmasked | mixer | 2 The Unmasked | 1 | 1433 | 77.3 | 1.3 | 2/5/10 (5.51) | 33.2 | 11.3 | 37.3 | 15.1 | 24.6 | 0.0 | 0/0 | 52.7 (7895) |
+| three_faced | adaptive | 1 The Jester | 1 | 2506 | 92.7 | 0.6 | 2/3/8 (4.16) | 56.3 | 37.9 | 32.5 | 5.2 | 5.1 | 0.0 | 0/0 | 33.6 (10422) |
+| three_faced | adaptive | 2 The Mourner | 1 | 2322 | 89.5 | 0.6 | 2/4/9 (5.00) | 42.9 | 22.4 | 34.7 | 4.2 | 7.0 | 0.1 | 3/2 | 40.1 (11610) |
+| three_faced | adaptive | 3 The Blank | 1 | 2078 | 86.3 | 0.8 | 2/5/10 (5.71) | 34.4 | 13.7 | 37.1 | 3.5 | 10.3 | 0.0 | 0/0 | n/a (no stance shown) |
+| three_faced | mixer | 1 The Jester | 1 | 1684 | 91.3 | 0.5 | 1/3/9 (4.20) | 58.7 | 36.7 | 37.9 | 4.6 | 6.8 | 0.1 | 2/1 | 48.6 (7065) |
+| three_faced | mixer | 2 The Mourner | 1 | 1538 | 84.1 | 0.9 | 2/5/10 (5.39) | 37.5 | 14.5 | 36.3 | 5.0 | 9.4 | 0.0 | 0/0 | 50.9 (8288) |
+| three_faced | mixer | 3 The Blank | 1 | 1294 | 84.8 | 1.7 | 3/5/10 (5.79) | 34.2 | 10.0 | 39.5 | 2.9 | 10.6 | 0.0 | 0/0 | n/a (no stance shown) |
+| hours | adaptive | 1 Vespers | 1 | 2553 | 94.4 | 0.5 | 2/3/8 (3.96) | 61.9 | 45.2 | 32.2 | 3.2 | 4.9 | 0.1 | 4/3 | 40.1 (10119) |
+| hours | adaptive | 2 Compline | 1 | 2411 | 91.5 | 0.4 | 1/3/8 (3.72) | 64.5 | 46.2 | 34.9 | 5.3 | 14.7 | 0.1 | 2/2 | 35.8 (8968) |
+| hours | adaptive | 3 Matins | 1 | 2207 | 91.7 | 0.7 | 1/2/6 (2.64) | 79.5 | 65.1 | 33.0 | 6.7 | 18.3 | 0.0 | 0/0 | 37.3 (5819) |
+| hours | adaptive | 4 Lauds | 1 | 2024 | 90.9 | 0.4 | 1/1/5 (2.24) | 85.4 | 71.2 | 30.8 | 7.9 | 33.0 | 0.0 | 0/0 | 37.6 (4533) |
+| hours | mixer | 1 Vespers | 1 | 1754 | 93.8 | 0.4 | 1/3/8 (3.91) | 63.3 | 41.8 | 37.7 | 2.9 | 7.5 | 0.0 | 0/0 | 56.9 (6855) |
+| hours | mixer | 2 Compline | 1 | 1646 | 88.8 | 1.2 | 1/3/8 (4.08) | 59.5 | 36.8 | 38.3 | 5.8 | 19.5 | 0.0 | 0/0 | 51.6 (6723) |
+| hours | mixer | 3 Matins | 1 | 1462 | 86.8 | 0.7 | 1/3/7 (3.26) | 72.4 | 49.7 | 37.5 | 6.6 | 25.0 | 0.0 | 0/0 | 50.6 (4759) |
+| hours | mixer | 4 Lauds | 1 | 1269 | 84.0 | 0.6 | 1/2/6 (2.95) | 80.4 | 54.5 | 40.3 | 11.7 | 55.7 | 0.0 | 0/0 | 52.4 (3748) |
+| reflection | adaptive | 1 The Borrower | 1 | 2516 | 89.3 | 0.6 | 2/4/10 (5.11) | 42.4 | 25.5 | 34.2 | 6.6 | 7.5 | 0.0 | 0/0 | 41.3 (12864) |
+| reflection | adaptive | 2 The Likeness | 1 | 2247 | 92.9 | 0.4 | 2/4/8 (4.51) | 48.6 | 26.2 | 32.4 | 2.4 | 5.5 | 0.0 | 0/0 | 24.5 (10140) |
+| reflection | adaptive | 3 The Reflection | 1 | 2087 | 89.2 | 0.8 | 2/3/8 (4.19) | 55.2 | 31.2 | 33.7 | 10.0 | 16.4 | 0.0 | 0/0 | 27.4 (8752) |
+| reflection | mixer | 1 The Borrower | 1 | 1645 | 86.4 | 0.9 | 2/4/9 (4.75) | 50.6 | 27.7 | 37.9 | 6.9 | 8.3 | 0.0 | 0/0 | 57.4 (7813) |
+| reflection | mixer | 2 The Likeness | 1 | 1422 | 88.0 | 0.8 | 2/4/9 (5.07) | 37.3 | 15.8 | 33.2 | 3.4 | 7.0 | 0.0 | 0/0 | 29.1 (7212) |
+| reflection | mixer | 3 The Reflection | 1 | 1252 | 79.2 | 1.2 | 2/4/8 (4.37) | 47.9 | 24.5 | 33.7 | 13.9 | 17.8 | 0.1 | 1/1 | 30.5 (5470) |
+
+Stake 7:
+
+| face | bot | phase | exploit | arrive | win % | ±SE | turns | ≤2 dec % | ≤2 t % | clash % | 7+ % | rupt % | lock % | bored | truth % (shown) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| unmasked | adaptive | 1 The Altar | 1 | 1468 | 71.7 | 1.3 | 4/7/12 (7.56) | 5.4 | 0.8 | 33.8 | 12.7 | 10.8 | 0.1 | 2/1 | 43.0 (11099) |
+| unmasked | adaptive | 2 The Unmasked | 1 | 1053 | 64.6 | 1.5 | 2/4/8 (4.83) | 40.8 | 15.5 | 35.5 | 18.9 | 21.3 | 0.1 | 3/1 | 40.6 (5082) |
+| unmasked | mixer | 1 The Altar | 1 | 734 | 69.2 | 2.1 | 3/7/12 (7.03) | 14.6 | 3.4 | 37.3 | 10.9 | 12.7 | 0.0 | 0/0 | 54.5 (5160) |
+| unmasked | mixer | 2 The Unmasked | 1 | 508 | 57.3 | 1.6 | 2/4/8 (4.46) | 43.1 | 19.3 | 35.2 | 13.6 | 20.1 | 0.0 | 0/0 | 50.6 (2267) |
+| three_faced | adaptive | 1 The Jester | 1 | 1418 | 84.0 | 0.7 | 2/4/8 (4.43) | 46.8 | 24.5 | 32.1 | 9.9 | 6.2 | 0.0 | 0/0 | 41.0 (6283) |
+| three_faced | adaptive | 2 The Mourner | 1 | 1191 | 75.7 | 0.8 | 2/4/9 (4.98) | 37.2 | 13.9 | 34.4 | 8.1 | 7.1 | 0.0 | 0/0 | 43.8 (5926) |
+| three_faced | adaptive | 3 The Blank | 1 | 901 | 69.5 | 1.5 | 2/5/9 (5.20) | 36.7 | 14.1 | 35.3 | 5.4 | 8.3 | 0.0 | 0/0 | n/a (no stance shown) |
+| three_faced | mixer | 1 The Jester | 1 | 698 | 80.4 | 1.8 | 2/4/8 (4.35) | 49.9 | 26.1 | 35.7 | 11.5 | 8.2 | 0.0 | 0/0 | 49.4 (3039) |
+| three_faced | mixer | 2 The Mourner | 1 | 561 | 67.0 | 1.9 | 2/4/9 (4.94) | 39.4 | 18.7 | 36.3 | 8.7 | 8.2 | 0.0 | 0/0 | 51.4 (2773) |
+| three_faced | mixer | 3 The Blank | 1 | 376 | 59.0 | 3.6 | 2/4/8 (4.71) | 47.6 | 17.6 | 39.1 | 8.2 | 10.4 | 0.0 | 0/0 | n/a (no stance shown) |
+| hours | adaptive | 1 Vespers | 1 | 1482 | 88.7 | 1.0 | 2/3/8 (4.29) | 50.4 | 30.6 | 31.8 | 5.0 | 5.2 | 0.0 | 0/0 | 41.6 (6351) |
+| hours | adaptive | 2 Compline | 1 | 1314 | 79.4 | 1.6 | 2/3/7 (3.70) | 63.9 | 40.6 | 33.6 | 12.6 | 16.7 | 0.0 | 0/0 | 39.5 (4857) |
+| hours | adaptive | 3 Matins | 1 | 1043 | 78.6 | 1.4 | 1/2/6 (3.13) | 73.4 | 51.3 | 33.4 | 15.1 | 23.3 | 0.1 | 1/1 | 39.4 (3268) |
+| hours | adaptive | 4 Lauds | 1 | 820 | 83.4 | 1.2 | 1/1/4 (2.01) | 90.5 | 75.2 | 29.9 | 11.2 | 35.0 | 0.0 | 0/0 | 37.2 (1652) |
+| hours | mixer | 1 Vespers | 1 | 754 | 85.0 | 1.1 | 2/3/8 (3.99) | 58.5 | 35.5 | 36.0 | 5.4 | 7.7 | 0.0 | 0/0 | 55.0 (3010) |
+| hours | mixer | 2 Compline | 1 | 641 | 73.9 | 1.0 | 2/3/7 (3.85) | 60.2 | 35.1 | 37.2 | 13.3 | 17.9 | 0.0 | 0/0 | 50.8 (2468) |
+| hours | mixer | 3 Matins | 1 | 474 | 69.2 | 1.5 | 1/3/6 (3.13) | 73.0 | 47.0 | 34.8 | 15.6 | 22.2 | 0.0 | 0/0 | 48.1 (1484) |
+| hours | mixer | 4 Lauds | 1 | 328 | 66.2 | 4.3 | 1/2/5 (2.42) | 87.8 | 64.0 | 37.2 | 17.7 | 46.6 | 0.0 | 0/0 | 49.7 (793) |
+| reflection | adaptive | 1 The Borrower | 1 | 1473 | 79.8 | 1.1 | 2/4/10 (5.28) | 32.8 | 15.5 | 33.7 | 12.6 | 8.0 | 0.1 | 2/2 | 42.4 (7784) |
+| reflection | adaptive | 2 The Likeness | 1 | 1175 | 79.2 | 0.9 | 2/4/8 (4.61) | 43.7 | 18.8 | 32.8 | 5.8 | 6.0 | 0.0 | 0/0 | 25.5 (5412) |
+| reflection | adaptive | 3 The Reflection | 1 | 931 | 70.5 | 1.3 | 2/3/7 (3.92) | 56.8 | 30.1 | 32.3 | 14.1 | 14.2 | 0.0 | 0/0 | 27.9 (3653) |
+| reflection | mixer | 1 The Borrower | 1 | 710 | 77.2 | 1.4 | 2/4/8 (4.58) | 47.6 | 22.4 | 36.3 | 15.5 | 7.7 | 0.0 | 0/0 | 54.5 (3253) |
+| reflection | mixer | 2 The Likeness | 1 | 548 | 69.5 | 1.2 | 2/4/8 (4.65) | 38.5 | 19.0 | 32.3 | 6.9 | 6.9 | 0.0 | 0/0 | 28.1 (2547) |
+| reflection | mixer | 3 The Reflection | 1 | 381 | 59.6 | 1.3 | 2/4/7 (4.17) | 54.1 | 24.9 | 34.7 | 18.6 | 17.1 | 0.0 | 0/0 | 28.3 (1588) |
+
 ## 9. About the sim
 
-- `node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot a,b] [--quick] [--unlocks natural|all] [--no-combos] [--no-boons] [--set key=value] [--label text] [--trace]`. About 100 to 150 runs per second per worker, 1,300 per second on 11 workers.
-- `--set` overrides constants for a sweep without editing files, for example `--set maxhp=24 --set heal=7 --set hp=6,7,8,8,9,10,9 --set K.TAU_BASE=1.5`. `--label` appends the headline to `tools/out/balance_log.md`.
+- `node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot a,b] [--quick] [--jobs J] [--unlocks natural|all] [--no-combos] [--combos] [--no-boons] [--set key=value] [--no-timing] [--json] [--label text] [--trace]`. `--no-timing` drops everything machine-dependent, so the output is byte-identical across runs and `--jobs` values; `--json` prints one canonical JSON document (sorted keys, raw counts per face, bot, duel and final-duel phase, no timing); `--set boss=all` plays every face, one job per face × bot × chain, and implies `--no-combos` unless `--combos` is given. About 100 to 150 runs per second per worker, 1,300 per second on 11 workers.
+- `--set` overrides constants for a sweep without editing files, for example `--set maxhp=24 --set heal=7 --set hp=6,7,8,8,9,10,9 --set K.TAU_BASE=1.5`. `--label` appends the headline to `tools/out/balance_log.md` (local-only, not in the repo; release work never passes `--label`).
 - Bots are never handed the sealed commit. Info boons reach them only through the values the scene draws. The mixer and uniform bots use only the Coin of Fools; the adaptive bot uses every active.
 - The tutorial is skipped, runs are spaced 10 minutes apart, and unlocks arrive naturally unless `--unlocks all`.
 - Bot relic choice is a fixed favourite with 15% exploration. Draft choice is a soft preference by move share (simple bots) or by tag synergy and counter-drafting the Rival's pick (adaptive).

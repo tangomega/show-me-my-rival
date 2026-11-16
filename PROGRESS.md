@@ -8,9 +8,11 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 
 - `node tools/build.js` writes the single-file game to `index.html`.
 - `node tools/serve.js` serves the folder on http://localhost:4173 for local preview. `POST /shot/<name>` on that server saves a PNG to `tools/out/` (used to review frames).
-- `node tools/check.js` verifies the build has no external requests and carries the credits.
-- Tests: `tools/test_brain.js`, `tools/test_combat.js`, `tools/test_flow.js` (`--quick` for a short pass), `tools/test_audio.js`, `tools/out/test_scenes.js`.
-- Balance: `node tools/sim.js --seeds 8`.
+- `node tools/check.js` verifies the build has no external requests, carries the exact credit, names nothing else and stays under 700,000 bytes (WARN above 650,000). `node tools/check.js --docs` runs the same name check over every tracked `.md` file; the code host the game is served from may be named there, never in the game.
+- **Release gate:** `node tools/test_all.js` exports HEAD and runs everything below on it (about 90 s). Run it before asking for any push, and with `--full` (about 5 minutes more) before a milestone push; `--worktree` checks uncommitted work; `--write-baseline` re-records `tools/baseline.json` and is only for a commit that changes behaviour on purpose. Known-open defects are registered in `tools/known.json`.
+- Tests: `tools/test_brain.js`, `tools/test_combat.js`, `tools/test_flow.js` (`--quick` for a short pass; `FLOW_SECTIONS=corrupt node tools/test_flow.js 200 <seed>` for the full corrupt-save section), `tools/test_audio.js`, `tools/test_scenes.js`, `tools/check_text.js`, `tools/test_rules.js`, `tools/test_sim.js`, `tools/lint_pure.js`, and the text client's `node tools/playtest/play.js selftest --quick`.
+- Balance: `node tools/sim.js --seeds 8`; `--json` (implies `--no-timing`) prints raw counts per face, bot, duel and final-duel phase; `node tools/sim_tables.js` prints the noise baseline and per-phase tables. Never pass `--label`.
+- Playtesting: `tools/playtest/` (see its README). Every scene-logic change is mirrored into `tools/playtest/play.js`; its self-test fails until it is.
 - Art review sheets: `node tools/render_fighters.js`, `node tools/render_world.js` (write PNGs to `tools/out/`, which is git-ignored).
 
 ## Status
@@ -56,6 +58,15 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 - Settings (beyond the sound toggle) are only reachable from the title.
 
 ## Decisions log
+
+- **Owner decisions for Milestone 1 (2026-11-16).**
+  - O1: one yes per milestone. Milestone 1's gate (P1.0) and save fix (P1.1) ship first, each on its own, so the save fix is live before anything else changes the save. Each release is tagged in git.
+  - O2: section 0 of `DESIGN.md` keeps rulings 1-13 under their numbers, and 14-25 are reserved.
+  - O3: the credit reads exactly "Developed by tangoSHELL · 2026" everywhere. `check.js` checks `index.html`; `check.js --docs` checks every tracked `.md`.
+  - O18: no mandatory timers (ruling 20). O22: seeded or chosen tables earn nothing (ruling 19).
+  - O28: the gate is a habit; there is no hook or CI.
+  - Size: FAIL above 700,000 bytes, WARN above 650,000. `test_all --full` is opt-in day to day and required before a milestone push.
+  - Signed off: the two pause-tap KNOWN rows until P1.6; the exploit mode's 0.5% dominated-move tolerance (revisit after P1.2); The Reflection's dominated moves as INFO until P1.2; degeneracy bounds on final-duel phases only (duels 1-6 reported); ruling 19 names no section outside this repo; acceptance bands from the chain SD (`BALANCE.md` §8d).
 
 - The game is titled **Show Me My Rival** (renamed by the owner from the working title "THE RIVAL"). The opponent is still "the Rival" in-fiction; the `RIVAL` code namespace and save key are unchanged.
 - Source is split into `src/` plain scripts on one `globalThis.RIVAL` namespace; `tools/build.js` inlines them into `index.html`.

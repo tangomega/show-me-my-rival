@@ -4,11 +4,13 @@ Developed by tangoSHELL · 2026. Phone-first, single-file HTML5. This file says 
 
 ## 0. Lead's rulings (these OVERRIDE anything below that disagrees)
 
+Rulings keep their numbers and are listed in numeric order. A number that has not landed yet is marked Reserved, with the push that will write it.
+
 1. **Balance targets changed.** The brief says the Rival must beat predictable play and *lose to near-random play over time*. So an unexploitable player must have a real shot, and the HP economy is close to a 1:1 trade, not 1.8:1. New targets (run win rate, all unlocks): always-Guard ≈ 0%; fixed cycle ≤ 2%; naive tell-truster ≤ 15% on run 1 and falling to ≤ 5% by run 10; **equilibrium/uniform mixer that ignores tells: 30–45%**; adaptive tell-reading bot: 50–65%. The §5 bot table is superseded by this.
-2. **Starting numbers for the sim:** Rival HP by duel `[6,7,8,8,9,10, 9 then phase-2 8]`, bonfire heal 5, phase-2 heal 2. Exploit and honesty curves stay as in §5. The sim tunes HP and heal first.
-3. **Phase 2 has two rules, not three: Embers and Called Shot. Twin Stance is CUT** (no flickering stance, no `p2:` tables, no phantom tell). Phase 2 uses the normal tell layer at honesty base 0.35.
+2. **Starting numbers for the sim:** Rival HP by duel `[6,7,8,8,9,10, 9 then phase-2 8]`, bonfire heal 5, phase-2 heal 2. Exploit and honesty curves stay as in §5. The sim tunes HP and heal first. *(Superseded by ruling 11: the shipped numbers live in BALANCE.md and `src/game/run.js`.)*
+3. **Phase 2 has two rules, not three: Embers and Called Shot. Twin Stance is CUT** (no flickering stance, no `p2:` tables, no phantom tell). Phase 2 uses the normal tell layer at honesty base 0.35. *(Superseded in part by ruling 13: each face's phases set their own rules. This still describes The Unmasked, and Twin Stance stays cut.)*
 4. **Called Shot plumbing:** on a Called Shot turn the duel scene asks `brain.predict(ctx, legalP)` (tell-independent ensemble) and stores the argmax in `duel.intel.called` *before* `R.Combat.payoff` and `brain.commit`, so the payoff matrix already contains the ±2 / stagger terms. The brain has no Called Shot code.
-5. **`R.Combat.payoff` is the complete value matrix:** it includes tension, focus/fortify, boon hooks, the hit cap, guard-break value (±0.86 per turn of break inflicted) and the lethal bonus (±8). The brain uses it as given and adds nothing.
+5. **`R.Combat.payoff` is the value of one exchange as known at the seal** *(amended in P1.0; it used to claim to be complete)*. Each cell runs the real resolve on a copy of the duel: damage dealt minus damage taken, plus the Rival's heals minus the player's, with tension pips, focus and fortify, damage and heal hooks, the hit cap and the Called Shot terms already applied, plus guard-break value (±0.86 per turn of break inflicted) and the lethal bonus (±8). What the exchange leaves behind for later turns (tension built by a clash, focus or fortify gained, bleed, seals) counts as 0. Hooks that read `intel.honest`, `intel.pred` or `intel.coin` are not priced: the duel scene writes those only after the player picks, so when the payoff runs they are null, null and false (pillar 2). The Painted Smile is therefore priced as if the stance were honest, and Hungry Mask, Broken Pattern and Coin of Fools as if they do not fire. `intel.called` is priced: it is set before the payoff runs (ruling 4). The brain uses the matrix as given and adds nothing.
 6. **Accepted contract additions:** `duel.intel {called, honest, pred, coin}`, `brain.predict`, `brain.forget(f)`, `brain.beginRun({days})`, `meta.counters`, `meta.memory.favorites`, `offer.choices` of length 3–4, `run.pending` (the sealed commit, saved so a reload cannot reroll it). Taunt shuffle bags are session-only (no `tauntBag` persistence).
 7. **Art scope cuts (quality over quantity):**
    - Per-duel arena variants are limited to candle count, palette remap and the altar candle ring. No rain, puddle reflection, wind gusts or crows.
@@ -17,16 +19,35 @@ Developed by tangoSHELL · 2026. Phone-first, single-file HTML5. This file says 
    - `transform` is at most 10 frames. `rival2` reuses the Rival's poses with part swaps (shattered head, tendril cloak, 3 px hover) and a code-drawn afterimage.
    - The title scene is one large mask sprite plus a candle; the "smile widens" gag is optional.
 8. **Skip** is implemented as: a tap during resolution sets `timeScale` to 3 until the next input window.
-11. **Balance numbers live in `BALANCE.md` and the constants block of `src/game/run.js`; they supersede every HP, heal, exploit, honesty and boon number in this document.** As shipped: player max HP 26 (a run-long pool), bonfire heal 6, phase-2 heal 4, Rival HP 6,7,8,8,9,10,9 then 7; hit cap 8; **Rupture no longer seals a move** (a clash at 3 pips costs both fighters 1 non-lethal HP and tension stays at 3), because the seal could lock a duel into an endless loop.
-13. **The faces at the altar (final bosses), added after ship.** Duel 7 reads its phases from `R.Run.BOSSES` (unmasked 2, three_faced 3, hours 4, reflection 3). A phase row may set health, exploit, honesty, heal, a tension floor, Called Shot, `stance: 'none'`, `mimic`, lent boons, fortify, boon copying, and its look (sprite set, mask, arena, music, how the change is staged). Rules reach combat as fields on the duel (`floor`, `calls`, `stance`, `mimic`); nothing tests `phase === 2` any more. `meta.bosses` records how many faces are earned (beat the newest to earn the next) and wins per face; `run.boss` is drawn at `create()` from its own seeded stream. **Always-lying and always-truthful stances were designed and rejected**: with three moves, either one gives the player a move that can never lose, and play collapses into endless clashes. The Three-Faced therefore uses lent boons and a no-stance phase instead. §12 below describes only The Unmasked.
-12. **The Vigil (stakes), added after ship.** `run.stake` = how many of seven lights are out; each adds one rule to all before it: (1) exploit curve one duel early, (2) bonfire heal −2, (3) honesty curve one duel early, (4) the Rival drafts once before duel 1 and the pick is shown, (5) no heal at a phase change, (6) Rival +1 HP in every duel and phase, (7) Called Shot in every duel. A win with every earned light out earns the next (`meta.vigil`). Rules live in `R.Run.cfg / healOf / lightsOut`; names and lines in `R.Text.vigil`. Two rules were tried and dropped because the sim showed they did not make runs harder: a tension floor from duel 5 (it helped the best bot) and two boon offers instead of three (no measurable effect).
-10. **The game's title is "Show Me My Rival"** (renamed from the working title "THE RIVAL"). Use "SHOW ME MY RIVAL" for the logo, the HTML `<title>`, the header comment and the README. In-fiction, the opponent is still called "the Rival". The internal `RIVAL` namespace, folder name and save key do not change.
 9. The credits roll contains only in-fiction lines, the player's lifetime stats and "Developed by tangoSHELL · 2026". No other names, roles or studios.
+10. **The game's title is "Show Me My Rival"** (renamed from the working title "THE RIVAL"). Use "SHOW ME MY RIVAL" for the logo, the HTML `<title>`, the header comment and the README. In-fiction, the opponent is still called "the Rival". The internal `RIVAL` namespace, folder name and save key do not change.
+11. **Balance numbers live in `BALANCE.md` and the constants block of `src/game/run.js`; they supersede every HP, heal, exploit, honesty and boon number in this document.** As shipped: player max HP 26 (a run-long pool), bonfire heal 6, phase-2 heal 4, Rival HP 6,7,8,8,9,10,9 then 7; hit cap 8; **Rupture no longer seals a move** (a clash at 3 pips costs both fighters 1 non-lethal HP and tension stays at 3), because the seal could lock a duel into an endless loop.
+12. **The Vigil (stakes), added after ship.** `run.stake` = how many of seven lights are out; each adds one rule to all before it: (1) exploit curve one duel early, (2) bonfire heal −2, (3) honesty curve one duel early, (4) the Rival drafts once before duel 1 and the pick is shown, (5) no heal at a phase change, (6) Rival +1 HP in every duel and phase, (7) Called Shot in every duel. A win with every earned light out earns the next (`meta.vigil`). Rules live in `R.Run.cfg / healOf / lightsOut`; names and lines in `R.Text.vigil`. Two rules were tried and dropped because the sim showed they did not make runs harder: a tension floor from duel 5 (it helped the best bot) and two boon offers instead of three (no measurable effect).
+13. **The faces at the altar (final bosses), added after ship.** Duel 7 reads its phases from `R.Run.BOSSES` (unmasked 2, three_faced 3, hours 4, reflection 3). A phase row may set health, exploit, honesty, heal, a tension floor, Called Shot, `stance: 'none'`, `mimic`, lent boons, fortify, boon copying, and its look (sprite set, mask, arena, music, how the change is staged). Rules reach combat as fields on the duel (`floor`, `calls`, `stance`, `mimic`); nothing tests `phase === 2` any more. `meta.bosses` records how many faces are earned (beat the newest to earn the next) and wins per face; `run.boss` is drawn at `create()` from its own seeded stream. **Always-lying and always-truthful stances were designed and rejected**: with three moves, either one gives the player a move that can never lose, and play collapses into endless clashes. The Three-Faced therefore uses lent boons and a no-stance phase instead. §12 below describes only The Unmasked.
+14. **Stance honesty is never fixed.** No face, phase, light, boon or mode may make the Rival's shown stance always lie or always tell the truth. With three moves either one hands the player a move that can never lose, and play collapses into endless clashes; that is why ruling 13 rejected them. A phase may show no stance at all (`stance: 'none'`), because a stance that is never seen carries nothing. The honesty the brain draws against stays inside its clamp (`R.Brain.K.H_MIN` 0.15 to `H_MAX` 0.97). Before it ships, any rule that changes what the Rival infers, what it shows or what an exchange is worth must pass a dominance check (it creates no player move that can never lose; the guard-broken turn priced in §6.4 is the one designed case, to be recorded as ruling 16) and the balance sim for every face it touches (`node tools/sim.js --unlocks all --set boss=<id>`).
+15. *Reserved, lands in P4.2.* Topic: the Rupture rule. Not yet a ruling.
+16. *Reserved, lands in P1.5.* Topic: the guard break. Not yet a ruling.
+17. *Reserved, lands in P1.2.* Topic: the Mirror Rule. Not yet a ruling.
+18. *Reserved, lands in P1.2.* Topic: phase length. Not yet a ruling.
+19. **The seed fixes the table, never the dice or the mind.**
+   - (a) No code, screen or exported value may contain, or let anyone derive, `run.pending`, `G.rng`/`G.crng`/`G.coinRng` state, or any value derived from them. A content seed (`run.seed`, and the `run.rngState` stream it starts) may be public in a seeded mode, because it fixes only content (clause c).
+   - (b) The Rival's dice always come from private device entropy, never from a shown seed.
+   - (c) A seed may fix only content shown before or between duels: face, stake, relic, the offer stream, and (in a future table mode) a versioned table pool.
+   - (d) Seeded or chosen tables earn nothing: no unlocks, lights or faces, no change to `bosses.last`, no `memory.runs`. A chosen table is a run whose rules or content beyond the face were set by the player (Rehearsal, table codes). A normal run with a chosen face (P7.1) counts as a normal run except that it lights no candle and leaves `bosses.last` and `bosses.owed` untouched. The single-attempt date altar, capped to content the player has already earned, counts as a normal run (with the face-record limits set when that mode is built).
+   - (e) Any seeded mode ships with a test that the same seed with different device entropy gives divergent Rival commit traces (at least 8 of the first 20 seals), and the same seed with the same entropy gives identical traces.
+   - (f) tools/sim.js keeps seed-derived dice for reproducibility.
+   - *Status at P1.0:* `newRun` still derives `G.rng` from the run seed until P1.2; no seed is shown anywhere, so clause (b) holds in effect.
+20. **No mandatory input timers.** The default path through every face is untimed, and no face, light, unlock, mark, title or record depends on a clock. A clock may exist only as an opt-in setting, off by default, that gates nothing. It runs on game time and freezes whenever the game is paused, hidden, blurred or rotated. Its timeout default is a move fixed before the seal and saved in `run.pending` with the sealed commit, and it is never shown before it fires (a shown default leaks the Rival's read). A move forced by a clock teaches the brain nothing about the player's choices. Every balance target is measured with the clock off. No clock is built; the only clock designed so far, a hidden-default hourglass for the final duel, is parked.
+21. *Reserved, lands in P1.6.* Topic: when the player may leave a duel. Not yet a ruling.
+22. *Reserved, lands in P1.3.* Topic: what a line may claim. Not yet a ruling.
+23. *Reserved, lands in P7.2.* Topic: the charter for new faces and rules. Not yet a ruling.
+24. *Reserved, lands in P2.2.* Topic: the screen grammar. Not yet a ruling.
+25. *Reserved, lands in P1.2.* Topic: one definition of a read. Not yet a ruling.
 
 ## 1. Pillars
 
 1. **It knows you.** One enemy, forever. Its model of the player persists across all runs and is quoted back in taunts and the Dossier. Every system feeds or reads that model.
-2. **Fair mind-game.** Three moves, sealed simultaneous choice, the Rival commits first and never sees input. Every Rival advantage (boons, phase rules, guard break) is visible before the player picks.
+2. **Fair mind-game: the fairness contract.** Three moves, sealed simultaneous choice. In every phase and mode the Rival seals its move before the player's buttons light up, and `brain.commit` is never given the current turn's player move or anything derived from it; `brain.observe`, after the reveal, is the only place the brain learns it. Anything model-derived that the player sees or that changes the exchange (the Called Shot call, the Stolen Ledger line, any future timeout default) is computed before the seal or from the sealed commit, and whatever must survive a reload is saved in `run.pending` with the seal, so a reload replays it and never rolls it again. Every Rival advantage (boons, phase rules, guard break) is visible before the player picks. No rule may make a stance always lie or always tell the truth, or create a move that can never lose, except the designed guard-broken turn (ruling 14). **KNOWN BUG (V5):** the pre-pick habit line is chosen after the seal, so a reload can re-roll it (fixed in P1.3).
 3. **Read the stance, never trust it.** The tell is the skill axis: honest early, lying later, and it lies *more* the more you trust it.
 4. **Options, not stat bloat.** Boons change which move is good when; none is flat +HP/+damage.
 5. **Melancholy with a smirk.** Ruined cathedral, ash, candlelight, "YOU DIED" — and a nemesis who is funnier than you. PG-13, never cruel about the real person, only about their play.
@@ -43,11 +64,11 @@ Developed by tangoSHELL · 2026. Phone-first, single-file HTML5. This file says 
 | `dossier` | title, bonfire | The Rival's notebook: predictability gauge, stat lines (§7), lifetime record, most-broken habit | back |
 | `death` | duel lost | "YOU DIED" → parting line → 2–3 "what I learned" lines (`runInsights()`) → unlock cards → TAP | `title` |
 | `victory` | phase 2 won | Rival's defeat line, run summary (turns, predictability, finishing move), unlocks | `credits` (first win) else `title` |
-| `credits` | first win (replay from settings) | 35 s roll over dawn cathedral: title, "Developed by tangoSHELL · 2026", the Rival's footnotes heckling each credit, lifetime stats | `title` |
-| `settings` | title, pause icon in duel/bonfire | Mute, Haptics, Mask (unlocked), Arena (unlocked), Replay credits (if seen), RESET SAVE (two-step: "ERASE EVERYTHING? It will forget you." hold 1.5 s to confirm) | back |
+| `credits` | first win (replay from settings) | 22 s roll over dawn cathedral: title, "Developed by tangoSHELL · 2026", the Rival's footnotes heckling each credit, lifetime stats | `title` |
+| `settings` | title, pause icon in duel/bonfire | Mute, Haptics, Mask (unlocked), Arena (unlocked), Replay credits (if seen), RESET SAVE (two-step: "ERASE EVERYTHING? It will forget you." hold 1.5 s to confirm). **KNOWN BUG (B30):** there is no pause icon or menu in the duel or bonfire yet, so settings open from the title only (fixed in P1.6). | back |
 | `unlocks` | title | Grid of 28 items; locked ones show the condition text | back |
 
-Save/resume: `R.Game.save()` after every resolved exchange, after `brain.commit` (the sealed move/tell and `rngState` are stored so a reload cannot reroll the Rival's choice), after each bonfire step, and on `visibilitychange`. Resume re-enters at: start of the pending turn (sealed already committed), or the exact bonfire step.
+Save/resume: `R.Game.save()` runs after `brain.commit` (the duel scene writes `run.pending = {sealed, turn, n, phase, called}` and saves before the buttons light), when an active is used (Keyhole and Candle of Truth add `seen_glimpse` / `seen_honesty` to `run.pending`), after every resolved exchange (which clears `run.pending`), after each bonfire step, in the scene's `pause()`, and on `visibilitychange` (hidden) and `pagehide`. Resume re-enters at the start of the pending turn with the saved commit replayed, never re-rolled, or at the exact bonfire step. What makes a reload safe is `run.pending`, not `run.rngState`: the Rival's dice (`G.rng`) are never saved and are reseeded at boot, so the same seed does not give the same run after a reload, and `run.rngState` drives only the run's offer and Rival-draft stream. During the input window the sealed move sits in localStorage (`rival.save.v1`), so no backup, share or seed code may ever contain `run` or `run.pending` (ruling 19). `R.Combat.resolve` replaces an illegal move with the first legal one and only leaves a note event, so no status may change the Rival's legal moves between the seal and the reveal.
 
 ## 3. Layout (180 × 320 baseline, internal px; add `E.safe.top` to all y)
 
@@ -68,9 +89,11 @@ Save/resume: `R.Game.save()` after every resolved exchange, after `brain.commit`
 | **Buttons** STRIKE / GUARD / FEINT | 4,262,56,52 / 62,262,56,52 / 120,262,56,52 | icon 20×20 on top, label below, 6×6 "beats" mini-icon in corner |
 | Bottom pad | 0,314,180,6 | plus `E.safe.bottom` |
 
-Stretch (E = H − 320, 0..80): arena height += min(E,40) (rows added at the top; fighters, floor and sigils stay anchored to the arena bottom); button height += clamp(E−40, 0, 24); the rest (≤16) goes to the bottom pad. Everything below the arena shifts down. H = clamp(floor(180·vh/vw), 320, 400); scale = largest integer fitting both axes; letterbox colour 1.
+Stretch (E = H − 320, 0..80): arena height += min(E,40) (rows added at the top; fighters, floor and sigils stay anchored to the arena bottom); button height += clamp(E−40, 0, 24); the rest (≤16) goes to the bottom pad. Everything below the arena shifts down. H = clamp(floor(180·vh/vw), 320, 400); scale = largest integer fitting both axes; letterbox colour 1. **KNOWN BUG (B36):** the page behind the canvas is still #000 (fixed in P1.5).
 
 ## 4. Combat rules & math
+
+> **SUPERSEDED in part (P1.0 docs pass).** Three things below are out of date. A Rupture seals nothing and tension stays at 3 (ruling 11). After a decisive exchange tension falls to the duel's tension floor, `R.Combat.floorOf(duel)`: the phase row's `floor`, 0 when it is unset (ruling 13), so the Unmasked's phase 2 has floor 1 and other faces' phases set their own; it is not "0, or 1 in phase 2". In step (5) of the turn order the game saves right after `resolve` and `brain.observe`, before the reveal is shown and before the Rival speaks. Numbers live in BALANCE.md (ruling 11).
 
 **Turn order:** (1) `beginTurn`: Rival bleed tick, then player bleed tick (Rival first = ties favour the player), status timers, `turnStart` hooks; (2) `brain.commit` → sigil seals; (3) tell shown, legal buttons enable, actives usable; (4) player locks in; (5) reveal → `resolve` → `brain.observe` → taunt → save.
 
@@ -110,9 +133,11 @@ Legal-move rule: a fighter always has ≥ 2 legal moves; if a new seal would lea
 | `onDraft` | building the offer (player only) | offer size |
 | `active` | tap during step 3 | info / self-modifier; never alters the already-sealed Rival move |
 
-**[+IF] `duel.intel`** (plain JSON set by the duel scene from `sealed` right before `resolve`): `{ honest:bool, pred:{S,G,F}, called:move|null, coin:bool }`. Needed by 4 boons and Called Shot; no signature changes.
+**[+IF] `duel.intel`** (plain JSON): `called` is set before the payoff on Called Shot turns; `honest`, `pred` and `coin` are set by the duel scene right before `resolve`, so the payoff never sees them (ruling 5). `{ honest:bool|null, pred:{S,G,F}|null, called:move|null, coin:bool }`.
 
 ## 5. Duel table & balance targets
+
+> **SUPERSEDED (P1.0 docs pass).** This is the pre-ship plan, kept for history; do not tune from it. The balance targets are ruling 1. Every HP, heal, exploit, honesty and τ number lives in BALANCE.md and the constants block of `src/game/run.js` (ruling 11). Duel 7 is a face drawn from `R.Run.BOSSES` (ruling 13), and arena variants are limited by ruling 7.
 
 | Duel | Name | Rival HP | exploit e | honesty base | τ = 1.5−1.2e | Rival boons | Arena variant (`bg opts.variant`) |
 |---|---|---|---|---|---|---|---|
@@ -160,7 +185,7 @@ Tuning levers, in order: honesty base (duels 3–6) → Rival HP duels 5–7 →
 | T1 | response by stance | shown tell | 3 | 0.88 |
 | T2 | response after last tell result | `burned` (lost on a lie) / `paid` (countered an honest tell and won) / `other` | 3 | 0.88 |
 
-Tell experts predict a response category relative to a candidate tell t and convert it to a move: COUNTER = `LOSES_TO[t]` (what beats t), MIRROR = t, UNDER = `BEATS[t]` (what t beats). Phase 2 uses separate tables with key prefix `p2:` (see §12). An expert abstains when its key is undefined (turn 1/2) or the key's Σc < 0.5.
+Tell experts predict a response category relative to a candidate tell t and convert it to a move: COUNTER = `LOSES_TO[t]` (what beats t), MIRROR = t, UNDER = `BEATS[t]` (what t beats). Phase 2 uses separate tables with key prefix `p2:` (see §12). *(Superseded: Twin Stance was cut (ruling 3), so there are no `p2:` tables.)* An expert abstains when its key is undefined (turn 1/2) or the key's Σc < 0.5.
 
 **6.2 Mixing (Hedge with decay).** Weights start at 1/13. After each observed turn, for every non-abstaining expert: `loss = 1 − p_i(pm | tell shown)`; `w_i = max(0.02, w_i^0.96 · exp(−1.5·loss))`; renormalise. Ensemble: `P(m | ctx, t) = Σ w_i p_i(m|t) / Σ w_i` over active experts. Habit-break speed: E0 half-life ≈ 9.5 turns, 3-key experts ≈ 20 turns of play; with Hedge shifting weight a dropped habit loses >70% of its predicted mass in 15–25 turns.
 `confidence = clamp((p_max − 1/n)/(1 − 1/n), 0, 1) · min(1, lifetimeTurns/20)`, n = |legalP|.
@@ -179,6 +204,9 @@ Traps alone would make MIRROR risk-free (win or clash), so lies must be drawn fr
 **6.4 Baseline (near-equilibrium) mix.** Zero-sum values S>F = a = 3, G>S = b = 2, F>G = c = 2. Generalised-RPS equilibrium plays each move in proportion to the payoff of the matchup it is *not* in: S:G:F = c:a:b = **2/7 : 3/7 : 2/7** (28.6 / 42.9 / 28.6%), value 0. Guard break is worth extra: in the broken sub-game the unbroken side plays S 4/7, G 3/7 (F is dominated), the broken side S 5/7, F 2/7, value **6/7 ≈ 0.86** to the unbroken side. With c = 2.86: **S 36.4%, G 38.2%, F 25.5%** (20:21:14) — the default opening mix. At tension T add T to a, b, c (T=3: 34.7 / 35.6 / 29.7). Because boons make the matrix non-antisymmetric, `brain` solves the supplied matrix numerically: regret matching, 300 iterations over `legalR × legalP`, cached by matrix hash → `eqR`, `eqP`.
 
 **6.5 Decision (`commit(q)`).**
+
+> **SUPERSEDED in part (P1.0 docs pass).** `V` is `q.payoff` exactly as given: the payoff already holds the guard-break value and the lethal bonus (ruling 5), so the brain adds neither. τ is `R.Brain.K.TAU_BASE − TAU_SLOPE·exploit` = 1.2 − 0.9·exploit (never below `TAU_MIN`), not 1.5 − 1.2·exploit. The honesty h uses a trust slope that grows from 0.45 to 0.75 and a mirror slope that grows from 0 to 0.7 over the first 150 tell-observed turns of a lifetime, clamped to 0.15–0.97 (`R.Brain.K`). In the exploit branch each pair is weighted by `eqR[r]` plus a floor of 0.01 (`EQ_PRIOR_FLOOR`). `commit` also takes `noTell` and `mimic` (mode `'mimic'`, see INTERFACES.md). The rest of the pseudocode is current.
+
 ```
 V[r][p]  = q.payoff[r][p] + 0.86·(r=='F'&&p=='G') − 0.86·(r=='G'&&p=='F')   // only if payoff omits break value
            clamp lethal: +8 if exchange kills the player, −8 if it kills the Rival
@@ -194,7 +222,7 @@ else:                                            // mode 'exploit'
     choose (r,t) with probability ∝ eqR[r] · exp(EV(r,t)/τ),  τ = 1.5 − 1.2·q.exploit
 return sealed{ move:r, tell:t, honest:(t==r), pred:pred[t], top:argmax, confidence:conf, mode }
 ```
-Tells are restricted to moves the Rival can legally make. The `eqR` prior means "no information" degrades to equilibrium play, not to uniform. Note: the non-honest branch may still pick an honest pair, so realised honesty ≥ h; the sim must log realised honesty per duel. `force` (tutorial) bypasses everything. `commit` receives nothing derived from the current input; a unit test asserts identical `sealed` for all three player moves under the same `rngState`.
+Tells are restricted to moves the Rival can legally make. The `eqR` prior means "no information" degrades to equilibrium play, not to uniform. Note: the non-honest branch may still pick an honest pair, so realised honesty ≥ h; the sim must log realised honesty per duel. `force` (tutorial) bypasses everything. `commit` receives nothing derived from the current input; a unit test (`tools/test_brain.js`) asserts identical `sealed` for all three player moves given the same brain state and the same `q.rng` state. In the game that rng is `G.rng`, which is reseeded at boot and never saved (see the Save/resume paragraph in §2).
 
 **6.6 Signals.** `pAct = sealed.pred[pm]`. **Surprised:** pAct < 0.20. **Read:** pAct > 0.60 and the Rival won the exchange. **Lie worked / lie caught:** `!honest` and Rival won / player won. Per-run counters `reads`, `surprises`, `liesCaught` feed taunts, unlocks and the run summary.
 
@@ -231,6 +259,8 @@ Tells are restricted to moves the Rival can legally make. The `eqR` prior means 
 
 Archetype tags: **RIP** Riposte/Guard · **TEN** Tension/Clash · **BLD** Bleed · **TRK** Feint-trickster · **GMB** Low-HP gambler · **INF** Information · **CHA** Chaos/habit-breaker · **EXE** Strike/executioner. Every tag has ≥ 4 boons. Boons are unique per run across both fighters (if the Rival takes it, the player's offer cannot contain it). "Low HP" = hp ≤ ceil(maxHp/3). Card `desc` (≤ 60 chars) is the writer's compression of the effect column.
 
+**Numbers:** where this table and the card text in `src/game/boons.js` differ, the card text is authoritative (ruling 11): for example `coiled_riposte` deals +2, not +3, and `first_blood` starts each duel with focus 1, not 2.
+
 | id | Name | Rar. | Who | Hook(s) | Exact effect | Tags | Locked (unlock id) |
 |---|---|---|---|---|---|---|---|
 | `coiled_riposte` | Coiled Riposte | U | both | outDamage | Strike win deals double base (+3) if your previous move was Guard | RIP, EXE | — |
@@ -263,7 +293,7 @@ Archetype tags: **RIP** Riposte/Guard · **TEN** Tension/Clash · **BLD** Bleed 
 | `keyhole` | Keyhole | R | player | active ×1 (`glimpse`) | Tap: the sealed sigil turns to glass this turn, showing its committed move | INF | `flawless_duel` |
 | `truth_candle` | Candle of Truth | U | player | active ×1 (`honesty`) | Tap: this turn's stance is stamped TRUE or FALSE | INF | — |
 | `stolen_ledger` | Stolen Ledger | U | player | turnStart | Each turn shows the Rival's top guess for your move (`sealed.top`) with 1–3 confidence dots | INF, CHA | `reach_7` |
-| `liars_tally` | Liar's Tally | C | player | duelStart, afterExchange | HUD shows its current honesty h (nearest 10%) and this duel's honest/lie count | INF | — |
+| `liars_tally` | Liar's Tally | C | player | duelStart, afterExchange | HUD shows its current honesty h (nearest 10%) and this duel's honest/lie count. **KNOWN BUG (B01):** the count is never drawn, and no-stance turns count as honest (fixed in P1.2 and P1.3) | INF | — |
 | `coin_of_fools` | Coin of Fools | U | player | active ×3 (`coin`), outDamage | Tap: your move is chosen uniformly from your legal moves; if it wins, +2 | CHA | — |
 | `broken_pattern` | Broken Pattern | U | player | outDamage | +2 when you win with a move its model rated below 20% (`intel.pred[pm]`) | CHA | `ghost_run` |
 | `ash_of_forgetting` | Ash of Forgetting | R | player | onRest | Each bonfire: its decayed tables × 0.5, expert weights halfway to uniform (**[+IF]** `brain.forget(0.5)`) | CHA | `ghost_run` |
@@ -281,7 +311,7 @@ Counts: 14 common / 14 uncommon / 8 rare; 21 both / 6 rival-only / 9 player-only
 | `relic_rusty_nail` | Rusty Nail | afterExchange | Your first win each duel applies bleed 2 | BLD | `lose_3_row` |
 | `relic_cracked_mirror` | Cracked Mirror | onClash | The first clash each duel adds 2 pips and gives you fortify 1 | TEN | `deathblows_5` |
 | `relic_dealers_thumb` | Dealer's Thumb | onDraft | Draft from 4 choices instead of 3 | draft | `drafts_12` |
-| `relic_liars_coin` | Liar's Coin | turnStart | On turn 1 of every duel the stance is stamped TRUE or FALSE | INF | `lies_15` |
+| `relic_liars_coin` | Liar's Coin | turnStart | On turn 1 of every duel the stance is stamped TRUE or FALSE. **KNOWN BUG (B08):** it also stamps turn 1 of every later phase of the final duel (fixed in P1.2) | INF | `lies_15` |
 
 **Known dangerous combos (sim must check):**
 1. `coiled_riposte` + `first_blood` + `deathblow_creed` + `resonance`: Guard → Strike at 3 pips = 6+3+2+2 = 13 raw; verify the hit cap (8) and that P(player takes ≥ 7 in one hit) < 3% per duel when the Rival holds it.
@@ -364,9 +394,11 @@ Totals: 16 boons, 6 relics, 4 masks, 2 arenas. Rival-boon unlocks are framed as 
 | `favorites` **[+IF]** | move[] (last 10 runs) | finish | "Three runs of Guard, now Strike? Bold." |
 | `totalTurns` | int | per turn | confidence ramp, milestones |
 | `counters` **[+IF]** | `{deathblows, bleedDealt, reads, guardBroken, drafts, liesCaught}` | per turn / bonfire | unlock checks |
-| `tauntBag` **[+IF]** | `{category:[used line ids]}` | per taunt | no-repeat shuffle bags across sessions |
+| `tauntBag` **[+IF]** | — | — | **Superseded by ruling 6:** taunt shuffle bags are session-only and never saved |
 
 ## 12. Final duel
+
+> **SUPERSEDED (P1.0 docs pass).** This is the pre-ship plan for The Unmasked, kept for history. Twin Stance was cut (ruling 3). Numbers are in BALANCE.md (ruling 11). The final duel is one of four faces, each with its own phases, rules, look and staging (ruling 13, `R.Run.BOSSES`). Called Shot runs on turns 2, 5, 8… of any duel whose phase row or lights enable calls, including every duel with the seventh light out (ruling 12).
 
 Phase 1 (duel 7): standard rules, HP 10, e 0.90, honesty 0.42, altar arena, music `boss`. `spare_mask` cannot trigger. At 0 HP: transformation (§14), then `R.Run.startPhase2`: Rival HP 9, both fighters' statuses cleared, player heals 2, tension set to 1, boons and charges carry over (actives are *not* recharged).
 
@@ -502,7 +534,9 @@ Honest and lying stances are pixel-identical. Phase 2 alternates two tell poses 
 | Aftermath | 450 | HP bar snaps, lag bar per §13.5, fighters return to idle (250), tension pips reset or light |
 | Taunt bubble | non-blocking | typewriter 28 ms/char (`type` blip every 2nd char), stays 1800 ms after the last char or until lock-in; the next turn's seal starts 0 ms after aftermath regardless |
 
-**Skip:** any tap during resolution plays the remainder at 4× (floor 400 ms total); the open sigils and the damage number always stay ≥ 120 ms. Scripted sequences below are unskippable the first time only.
+**Skip:** any tap during resolution plays the rest of it at 3× (ruling 8: `timeScale` 3 until the next input window), with no time floor. A tap never speeds up the final blow (any exchange that ends a duel or a phase of duel 7) or a phase change of duel 7.
+
+> **SUPERSEDED in part (P1.0 docs pass).** In the Clash row, a Rupture seals nothing (ruling 11): both fighters take 1, never below 1 HP, and nothing stamps onto the buttons. The Phase-2 transformation row is the pre-ship Unmasked: each face now stages its own phase changes (`change`: shatter, swap or bell), with its own health, heal and rule cards (ruling 13, BALANCE.md). The Final blow row cannot be skipped at all, not only for its first 1.5 s. **KNOWN BUG (B26):** the GUARD BROKEN banner is drawn at a fixed x, not over the loser (fixed in P1.5).
 
 | Sequence | Beats (ms from start) |
 |---|---|
@@ -567,7 +601,7 @@ Voice: an aristocrat who has all the time in the world and has spent it on you. 
 | `surprised` | 14 | Surprised signal and the player won | 0.6 | "...Hm. That wasn't in my notes." | "Oh, a new trick! Precious. I'll have it memorized by morning." |
 | `lie_worked` | 8 | lying stance, Rival won | 0.3 | "You believed me. Adorable. Never change. Really, don't." | "The stance said Strike. The stance lies. I taught it everything." |
 | `lie_caught` | 8 | lying stance, player won | 0.4 | "You didn't buy it. When did you get suspicious? I preferred you gullible." | "Called my bluff. Enjoy it. I have others." |
-| `player_low_hp` | 12 | player first crosses low HP this duel | 1.0 | "{hp} health left. I'd say 'careful', but you never are." | "You're bleeding on my floor. I just had it ruined." |
+| `player_low_hp` | 12 | player first crosses low HP this duel. **KNOWN BUG (B10):** for either side the line can come an exchange late, when a Called Shot or Rupture line takes the crossing exchange (fixed in P1.3) | 1.0 | "{hp} health left. I'd say 'careful', but you never are." | "You're bleeding on my floor. I just had it ruined." |
 | `rival_low_hp` | 12 | Rival first crosses low HP this duel | 1.0 | "A scratch. The mask is fine. That's what matters." | "Enjoy this. I've watched you waste better leads." |
 | `clash` | 15 | clash (4 per mirror type + 3 Rupture) | 0.25; entering 3 pips 0.8; Rupture 1.0 | "Great minds. And also yours." | "Stop copying me. It's embarrassing for both of us." |
 | `guard_break_player` | 8 | player's guard broken | 0.6 | "There goes your guard. You leaned on it like a crutch anyway." | "No Guard next turn. Whatever will you do. (I know what you'll do.)" |
@@ -596,7 +630,7 @@ Voice: an aristocrat who has all the time in the world and has spent it on you. 
 - **Forced moments (always speak, ignore cooldown):** tutorial beats, duel intros, first low-HP crossing (either side), Rupture, Called Shot, duel end, phase 2, death, bonfire picks.
 - **Optional triggers:** after each exchange collect all that fired, walk them in priority order, roll each one's p, speak the first success. Priority: `guard_break_*` > `read_you` > `surprised` > `habit_detected` > `lie_caught` > `lie_worked` > `clash` > `idle`.
 - **Cooldown:** after any optional bubble the next turn is silent; after a forced bubble optional triggers resume immediately. A third consecutive silent turn doubles all p for the next roll (capped at 1). Expected density ≈ 1 bubble per 3 turns.
-- **No repeats:** each category is a shuffle bag persisted in `meta.memory.tauntBag`; a line cannot recur until the bag empties; never the same category twice in a row unless forced.
+- **No repeats:** each category is a session-only shuffle bag (ruling 6; never saved); a line cannot recur until the bag empties; never the same category twice in a row unless forced.
 - **Budget per duel:** max 2 `habit_detected`, 2 `read_you`, 1 `idle`. Bubbles never block input.
 
 ## 17. Tutorial (first-ever duel; ≈ 26 s; Rival HP 7)

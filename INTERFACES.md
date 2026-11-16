@@ -70,7 +70,10 @@ R.Brain.create(serialized|null) -> brain
 brain.serialize() -> object
 brain.beginRun({ days })                 // run-start decay (stronger if days >= 7); resets per-run tracking
 brain.commit(q) -> sealed
-brain.predict(ctx, legalP) -> {S,G,F}    // tell-independent ensemble prediction (used for Called Shot + Stolen Ledger)
+brain.predict(ctx, legalP) -> {S,G,F}    // tell-independent habit-only ensemble; the game uses it for the Called Shot call only.
+                                         // The Stolen Ledger shows sealed.top, which is conditioned on the shown tell and blended toward
+                                         // equilibrium, so the two can differ (a fresh brain's predict is uniform, while its
+                                         // sealed.top follows the equilibrium mix: Guard on an opening turn)
 brain.observe(ctx, tell, pm, rm)         // call once per resolved turn, AFTER reveal (skipped for forced tutorial turns)
 brain.trust() -> 0..1                    // smoothed COUNTER share (how much the player believes stances)
 brain.honesty(honestyBase) -> 0..1       // the h it would use right now (for the Liar's Tally boon)
@@ -80,23 +83,23 @@ brain.dossier() -> dossier
 brain.habitFor(ctx) -> stat|null         // strongest shown-able habit relevant to this context
 brain.runInsights() -> stat[]            // up to 3, for the death/victory screen
 ```
-`q = { ctx, payoff, legalR:[move], legalP:[move], exploit:0..1, honestyBase:0..1, rng, force?:{move?, tell?} }`
-(`force` is for the scripted tutorial only.)
+`q = { ctx, payoff, legalR:[move], legalP:[move], exploit:0..1, honestyBase:0..1, rng, force?:{move?, tell?}, noTell?:bool, mimic?:ctx }`
+(`force` is for the scripted tutorial only. `noTell`: no stance is shown (The Blank), so the stance is forced honest and carries nothing. `mimic`: the context from the Rival's seat, `R.Combat.ctx(duel, 'r')`; it samples its move from what it predicts the player would play in that seat (The Reflection).)
 
-`sealed = { move, tell, honest:bool, pred:{S,G,F}, top:move, confidence:0..1, mode:'exploit'|'mix' }`
+`sealed = { move, tell, honest:bool, pred:{S,G,F}, top:move, confidence:0..1, mode:'exploit'|'mix'|'mimic' }`
 - `pred` = predicted probability of each player move given ctx **and the tell it chose to show**; `top` = argmax.
-- The caller keeps `sealed` in a closure the input handler cannot reach. `commit` must never be given the current-turn player move, and `observe` is the only place it learns it.
+- The duel scene keeps `sealed` as a local of its turn coroutine; input handlers only set the player's choice, and the Keyhole / Candle of Truth reveals read it through a scene closure. `sealed` is also saved in `run.pending` (localStorage `rival.save.v1`) for the whole input window, so a reload replays it; no backup, share or seed code may contain `run` or `run.pending`. `commit` must never be given the current-turn player move, and `observe` is the only place it learns it.
 
 `ctx` (built by `R.Combat.ctx(duel)`):
 ```
-{ duel:1..7, phase:1|2, turn:int>=1,
+{ duel:1..7, phase:1..4, turn:int>=1,
   prev1:move|null, prev2:move|null,   // player's last two moves this duel
   prevR:move|null,                    // Rival's last move this duel
   last:'W'|'L'|'C'|null,              // last exchange from the player's view
   pHp, pMaxHp, rHp, rMaxHp, tension:0..3,
   pBroken:bool, rBroken:bool }        // guard broken this turn
 ```
-`payoff[rm][pm]` = number, the complete value to the Rival of that exchange, from `R.Combat.payoff(duel)`: damage dealt minus damage taken with tension, focus/fortify, boon hooks, hit cap, Called Shot terms, guard-break value (±0.86 per break turn) and lethal bonus (±8) already included. Illegal cells are present but ignored (the brain only reads `legalR × legalP`). The brain adds nothing to it.
+`payoff[rm][pm]` = number, the value to the Rival of that one exchange as known at the seal, from `R.Combat.payoff(duel)`, called after `duel.intel.called` is set and before `brain.commit`: damage dealt minus damage taken plus the Rival's heals minus the player's, from a simulated resolve with tension pips, focus/fortify, boon damage and heal hooks, hit cap and Called Shot terms applied, plus guard-break value (±0.86 per break turn inflicted) and lethal bonus (±8). Hooks that read `intel.honest`, `intel.pred` or `intel.coin` are not priced: at the seal they are `null`, `null` and `false`; `intel.called` is priced (DESIGN ruling 5). Effects on later turns are worth 0. Illegal cells are present but ignored (the brain only reads `legalR × legalP`). The brain adds nothing to it.
 
 `stat = { id, kind:'habit'|'tell'|'record', move:move|null, pct:0..100, n:int, strength:0..1, vars:{...} }`
 `dossier = { samples:int, predictability:0..100, favorite:move|null, tell:{counter,mirror,under,n}, stats:stat[] (strongest first), broken:stat|null }`
@@ -123,8 +126,10 @@ R.Combat.newFighter(maxHp, hp, boonIds) -> fighter
 R.Combat.newDuel({ n, phase, p:fighter, r:fighter }) -> duel   // runs duelStart hooks
   duel = { n, phase, turn:1, tension:0, p, r, over:null|'p'|'r' (winner), pendingEvents:[],
            intel:{ called:move|null, honest:bool|null, pred:{S,G,F}|null, coin:bool } }
-  // duel.intel is written by the duel scene: `called` at turn start (phase 2, before payoff/commit);
-  // `honest` + `pred` copied from `sealed` and `coin` set right before resolve(). resolve() resets it afterwards.
+  // duel.intel is written by the duel scene: `called` on Called Shot turns (R.Combat.callsOf(duel) && turn % 3 == 2, never on a
+  // tutorial beat), before payoff and commit; `coin` by useActive during the player's window; `honest`, `pred` and `coin`
+  // right before resolve(). resolve() resets it afterwards, so payoff() sees only `called`. callsOf(duel) is true in the
+  // Unmasked's phase 2, in any phase whose row sets calls, and in every duel with light 7 out (R.Run sets duel.calls).
 R.Combat.legal(duel, side) -> [move]            // never empty
 R.Combat.ctx(duel) -> ctx                        // for R.Brain
 R.Combat.payoff(duel) -> payoff[rm][pm]          // pure preview, no mutation
@@ -154,11 +159,11 @@ R.Run.defaultMeta() -> meta
                     lastWin:null|{move,hp,run,ts}, lastPlayed:ts|0, firstPlayed:ts|0, lastFavorite:move|null, totalTurns } }
 R.Run.relics(meta) -> boon[]                          // unlocked starting relics
 R.Run.pool(meta, side) -> boon[]                      // draftable boons for that side
-R.Run.create(meta, { seed, relicId|null, now }) -> run
-  run = { seed, rngState, duelN:1, phase:1, stage:'duel'|'bonfire'|'won'|'dead',
+R.Run.create(meta, { seed, relicId|null, now, stake, anyStake, boss, anyBoss, dossier }) -> run
+  run = { seed, rngState, duelN:1, phase:1, stage:'duel'|'bonfire'|'won'|'dead',   // rngState: the offer + Rival-draft stream only (not the Rival's dice; reloads are safe because of pending)
           pHp, pMaxHp, pBoons:[id], rBoons:[id], duel:null|duel,
           offer:null|{ rivalPick:id, rivalWhy:null|'G'|'S'|'F'|'repeat'|'predictable'|'trust'|'tags', choices:[id x3..4], healed:int },
-          pending:null|{ sealed },                    // the Rival's commit for the current turn (so a reload cannot reroll it)
+          pending:null|{ sealed, turn, n, phase, called, seen_glimpse?, seen_honesty? },   // the Rival's commit for the current turn, saved before the buttons light (a reload replays it, never re-rolls it); seen_* = a Keyhole / Candle of Truth reveal already shown
           relicId:null|id,
           stats:{ turns, moves:{S,G,F}, wins, losses, clashes, reads, surprises, liesCaught, duelTurns:[...], flags:{} } }
 R.Run.startDuel(run) -> duel                          // sets run.duel
@@ -185,8 +190,8 @@ R.Run.startPhase(run, k) / nextPhase(run) -> duel     // startPhase2(run) is sta
 R.Run.finish(...) also returns { light: 0..7, face: id|null }
 duel.floor, duel.calls, duel.stance, duel.mimic       // set by R.Run; read with R.Combat.floorOf(duel) / callsOf(duel)
 R.Combat.ctx(duel, 'r')                               // the same picture from the Rival's seat
-brain.commit({ ..., noTell:true })                    // no stance is shown
-brain.commit({ ..., mimic: ctxFromRivalSeat })        // it plays as the player would
+brain.commit({ ..., noTell:true })                    // no stance is shown; honest is forced true after the honesty draw (same dice count)
+brain.commit({ ..., mimic: ctxFromRivalSeat })        // it plays as the player would; the payoff is still passed but not used to pick the move
 ```
 
 ## R.Engine — `src/core/engine.js` (DOM)
@@ -205,7 +210,8 @@ E.after(sec, fn) -> id ; E.cancel(id)
 E.co(generatorFn) -> { cancel(), done }   // coroutine: `yield 0.3` waits seconds (scaled); `yield fn` waits until fn() is truthy
 E.tween(obj, key, to, sec, ease?) -> can be yielded-on via its .done flag
 E.buzz(pattern)             // navigator.vibrate, respects settings.haptics, fails silently
-E.paused                    // true while document hidden; loop + audio suspended
+E.paused                    // true while the document is hidden, after pagehide and after blur; cleared, once the page is visible, by
+                            // visibilitychange, focus, pageshow, a key or a tap; loop + audio suspended while true
 ```
 - Rendering: scenes draw to the 180×H buffer `g`; the engine blits it to the visible canvas at an integer scale of device pixels with smoothing off; letterbox is black. dt is clamped to 50 ms.
 - Input: pointer events mapped to internal coordinates; multi-touch ignored (first pointer only); context menu, selection, scroll, pinch and double-tap zoom are suppressed in the HTML/CSS shell.
@@ -302,7 +308,7 @@ R.Game.save()                    // serializes brain + meta + run into R.Save an
 R.Game.vars(extra?) -> object    // template variables for R.Text.taunt: runs, deaths, wins, days, streak, duel,
                                  // bestDuel, hp, rivalHp, turns, score, lastWinMove, lastWinHp (+ extra merged in)
 R.Game.last                      // result of the run that just ended, for 'death' / 'victory' / 'credits':
-  { won:bool, duel:1..7, phase:1|2, rivalHp:int, turns:int, score:0..100, finishingMove:move|null, hp:int,
+  { won:bool, duel:1..7, phase:1..4, rivalHp:int, turns:int, score:0..100, finishingMove:move|null, hp:int,
     unlocks:[{ id, type, ref, name, how }], firstWin:bool, insights:stat[], boons:[id], rivalBoons:[id] }
 R.Game.resetAll()                // settings "erase everything": wipes save, brain, meta; goes to 'title'
 ```

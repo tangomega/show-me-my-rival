@@ -16,7 +16,7 @@ Each turn you and the Rival secretly pick one of three moves.
 | **Guard** | Strike | 2 damage (a riposte) |
 | **Feint** | Guard | 2 damage and a **guard break**: the loser cannot Guard next turn |
 
-- **Same move = a clash.** No damage, but a tension pip lights. The next hit that lands deals +1 per pip. At three pips the duel is in *Deathblow*; clash again there and both fighters take 1 (a *Rupture*).
+- **Same move = a clash.** No damage, but a tension pip lights. The next hit that lands deals +1 per pip. At three pips the duel is in *Deathblow*; clash again there and both fighters take 1, never below 1 HP (a *Rupture*).
 - **The Rival always commits first.** Its sealed sigil drops before your buttons light up, and both sigils crack open at the same instant. Nothing you tap can change or read its choice.
 - **Read the stance.** Before you pick, the Rival takes a stance that hints at its move, and the game names it for you. Early in a run the stance is honest. Later it lies, and it lies more the more you believe it.
 - **A run is seven duels** with a bonfire between each. Your health is one pool for the whole run (26, with a small heal at each fire). At the bonfire the Rival drafts a boon *first*, you see what it took, then you pick one of three.
@@ -132,12 +132,21 @@ To host your own copy:
 | Command | What it does |
 |---|---|
 | `node tools/build.js` | Inlines `src/` into `index.html` |
-| `node tools/check.js` | Fails if the build could make any external request or lacks the credit |
+| `node tools/test_all.js` | The release gate: exports the last commit and runs on it the build and docs checks, the tests below (`test_flow` in its quick and corrupt-save passes), the text client's self-test and a short exact sim digest, in about 90 s on 12 threads; `--worktree` checks uncommitted work |
+| `node tools/check.js` | Fails if the build could make any external request, lacks the exact credit, names anything else or exceeds 700,000 bytes; `--docs` runs the same name check over every tracked `.md` file |
+| `node tools/check_docs.js` | Checks the docs against the code: a FAIL line fails the gate, a WARN line is prose drift to fix |
 | `node tools/test_brain.js` | Rival AI tests and learning benchmark |
 | `node tools/test_combat.js` | Rules, all 42 boons/relics, and a 3,000-run smoke sim |
 | `node tools/test_flow.js` | Plays 200 full runs through the real scenes with random reloads |
 | `node tools/test_audio.js` | Audio graph tests against a mock Web Audio context |
+| `node tools/test_scenes.js`, `node tools/check_text.js` | Menu scenes in a headless harness; every line of text, its length, wrap and variables |
+| `node tools/test_rules.js`, `node tools/lint_pure.js` | Rule lint over every face, phase and light; purity lint for the modules the sim shares with the game |
+| `node tools/test_sim.js` | The balance sim's command line, determinism and JSON shape |
 | `node tools/sim.js --seeds 8` | The balance sim |
+| `node tools/sim_tables.js` | The noise baseline and per-phase tables in `BALANCE.md` §8d |
+| `node tools/playtest/play.js selftest --quick` | The persona text client's self-test (see `tools/playtest/README.md`) |
+
+**Ship rule.** Run `node tools/test_all.js` before every push, and `node tools/test_all.js --full` (about 5 minutes more) before a milestone push. It tests the last commit, not the working tree, and exits 0 only when no step fails; a known-open defect registered in `tools/known.json` shows as a KNOWN row instead of a FAIL. The gate is a habit: nothing runs it automatically, and a pre-push hook or CI is the owner's call. Each milestone ships on one yes from the owner. The one exception is Milestone 1's first two pushes, the gate and the save fix, which go out ahead of the rest so the save fix is live before anything else changes the save. Each release is tagged in git so there is a fixed point to roll back to.
 
 Source layout, module contract and design are in [INTERFACES.md](INTERFACES.md), [DESIGN.md](DESIGN.md) and [PROGRESS.md](PROGRESS.md).
 
