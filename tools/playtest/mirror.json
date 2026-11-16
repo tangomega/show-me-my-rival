@@ -1,0 +1,356 @@
+{
+ "about": "SHA-256 of the LF-normalised source of each src function that tools/playtest/play.js mirrors, from its declaration line to its closing brace (a \"part\" entry hashes only its matching lines). The self-test fails when one changes. Mirror the change into play.js first, then refresh with: node tools/playtest/play.js pins --update",
+ "pins": [
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "mname",
+   "sha256": "5aa5fa08257a6b8aa755ffad88159106d7826fe3481f0e766963d36405c8d1a0"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "boonName",
+   "sha256": "0cad03dc965b83d75a901d12ebb65a867e23c363c9b79da7e891cd432fac80b4"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "taunt",
+   "sha256": "68f077d1b00467d4b05dd6b268e672861510d80e7198f0c60c739039b97c65a2"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "low",
+   "sha256": "ab3f1ac57ef2663800e77aa37413ae1ac8cd214aff6a396626d0a48dd3ccc007"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "hasEv",
+   "sha256": "cf06ac84d765c75bc3b7ecc594d2b401c3269c502dcab27cd4fb61e8abed1d59"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "say",
+   "sha256": "032cd2c4614367bd61146e49d4a20f6ca309883a2c865152d40561f61008ebd9"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "cfgOf",
+   "sha256": "b5287eccd4ee74e756f72f964c00e9630aa34f81a8388df4d4609f0045b2158f"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "setForm",
+   "sha256": "dc8b845aa2f9e0313cef4bb52f0c4bb81bb67e8b9adaad17ebdbeafaed6f6905"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "argmaxMove",
+   "sha256": "f5b8f32643b5ef3f17637253b37f46ac03fcebf1b31ba14f87702a79e573c192"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "setLegal",
+   "sha256": "cc4c4e6eefd883af52f6b65ecb6bbd962d127e530e42aa8acdb654e620cec775"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "hintFor",
+   "sha256": "5fc7e079b3ccf02fdffc9d746a3c0fa81c956fa3b92a7ecd08d3a538b8308115"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "tutorialBeat",
+   "sha256": "b3be4e5606ecbce446c6a59dacab91c409329385fac53aefb99a021854a73edd"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "tutorialResult",
+   "sha256": "667a49e69d6715e12f3ea2b4928446918adcf389e0ba0e9fe673774e5241e057"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "flow",
+   "sha256": "09a640c8438d594abb2f5b4a38347b0824d875434c8ff1a4e9a5f72d009386be"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "introLine",
+   "sha256": "a47b0adc1c6490624c7cc75638e28c5c77a130a65b378f1940baebbe8c3bdb49"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "intro",
+   "sha256": "a9f40ff62116a36bf92ea35d4f855ed67e6ba7e0ba413b6c197277c3b6d0237e"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "turn",
+   "sha256": "2b4997318411df72043b6d20d90ffb1c24ccb26baa05053493097fa0ad77a64a"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "reaction",
+   "sha256": "e0849848bb34afc7e9673193aa148cf7223b506bdfce3b1630bd3202e977008c"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "showEvents",
+   "sha256": "fe003eb01dd5172e4428481d0ff5dd0b4c7d637315bd187420abcbea622fc2b4"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "present",
+   "sha256": "bd8031437a14d7af1a15143575fd2db6fa83b872f4d96f530d4b959afb335d94"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "outro",
+   "sha256": "4b1fd8a704958d3248695ceacc94b2f8f70660a718878ddd124b71d07fcd85d2"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "bossTaunt",
+   "sha256": "d3697a65e4572ad877ea6c516e0fb7bb616b9244b56d349e1c7abdb01a8206f9"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "showCards",
+   "sha256": "7ad35bc9b63caae4ede4d46791329f7740d407ca33334eb97d1f53c1410679c5"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "transform",
+   "sha256": "463d0e645cf51641f744e7fe81e0d64890fbe8f6f64c0ebb3764357f902c37a5"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "canPick",
+   "sha256": "db42701f2e45acc35c5f7c563eea0e3faf4744b365f8d4d72e623b2d231f31d9"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "useActive",
+   "sha256": "572b0bae622ab74f79f1d5d6ddc1a0d85b9d0d42e0ef59bd6c004e83c375f1ed"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "pick",
+   "sha256": "2afbb956c7ed9fba7a438f82ebd90c76b1190119c559b60dad434991445247c3"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "ledgerPage",
+   "sha256": "aed24d4fc4cd5a904b6b501e48093cceb044a6a19806333ed0aa45853648e876"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "vigilPage",
+   "sha256": "4e9dcb8f4c9cce5b8ca998cbcd34a66ffc9ae38678e1453f50ed1b48ffbb318d"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "openLedger",
+   "sha256": "d7fa683c8f413831c41020bc6b6afc5cfbe3f7aeced712106cc8052f3f61959a"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "enter",
+   "sha256": "6e2b532aae2f42184c373453568f4a35b84a864bfb2f39b109850a11669c43a6"
+  },
+  {
+   "file": "src/scenes/duel.js",
+   "fn": "drawButtons",
+   "part": "hint row",
+   "sha256": "84565fbf177f8c4d0a21facd1e516923c573b6da7fbaebb201ffc1d6492e0a12"
+  },
+  {
+   "file": "src/scenes/bonfire.js",
+   "fn": "rivalLine",
+   "sha256": "2c753027c4842cd1e1c09879dd226e921dc8adfec0dc8e063cb58c310c346b13"
+  },
+  {
+   "file": "src/scenes/bonfire.js",
+   "fn": "flow",
+   "sha256": "d334f57a6b00bb3870fdd3d3082b720d3302cbc8ee6d361c64c2764d5ec5cd60"
+  },
+  {
+   "file": "src/scenes/bonfire.js",
+   "fn": "leave",
+   "sha256": "c23ec590da7bc3c8b29e655b02a1d0d2530205c052a7f63494bd0456683ffa19"
+  },
+  {
+   "file": "src/scenes/bonfire.js",
+   "fn": "enter",
+   "sha256": "32cc601378196db27ff0e3703c3ed13c9e7319aa3d2ade5887845f2649706aa5"
+  },
+  {
+   "file": "src/scenes/death.js",
+   "fn": "tap",
+   "sha256": "6c2b22fdbe380a93b8f801a4ff517581d47828699ab856568abd080b2570c1c4"
+  },
+  {
+   "file": "src/scenes/death.js",
+   "fn": "enter",
+   "sha256": "419b5e137c39300b50510de1571f032b8193f5b6c90a11e037fae32b911ef8a8"
+  },
+  {
+   "file": "src/scenes/victory.js",
+   "fn": "tap",
+   "sha256": "19f4b6d2ec33633903b20e71135a942b754b6cafeb38a1b83e14490ca97bb5d4"
+  },
+  {
+   "file": "src/scenes/victory.js",
+   "fn": "enter",
+   "sha256": "745d4edd89a61b0cf45e219cea15414ccc957382cbc27fef66fe71eedc4adc64"
+  },
+  {
+   "file": "src/scenes/credits.js",
+   "fn": "cast",
+   "sha256": "af76dc48eb70149414ccbfc214364a8fbb064ff62f36f53dae224d6fdf96dd2f"
+  },
+  {
+   "file": "src/scenes/credits.js",
+   "fn": "build",
+   "sha256": "57a0253b3005a12c5b9ec0b533041b0b3629d67cfcfb7fe8dc0d4ad6c8025924"
+  },
+  {
+   "file": "src/scenes/credits.js",
+   "fn": "enter",
+   "sha256": "336337b57ca0b3ce1995a326644b4ef6d5486e2f8be4dd9407196bbd8db89f82"
+  },
+  {
+   "file": "src/scenes/dossier.js",
+   "fn": "header",
+   "sha256": "077792f5b86d6bdd8c49af0d47297a0d4f1f00b5e66495ee64294d69ca316549"
+  },
+  {
+   "file": "src/scenes/dossier.js",
+   "fn": "line",
+   "sha256": "44483eb6d212748f0a052138056de7e76d550981fe04153cf54c187e0718af2b"
+  },
+  {
+   "file": "src/scenes/dossier.js",
+   "fn": "build",
+   "sha256": "dfc434b5bb560ac712c14b91554864288728d11b4c4768e5eb7ba9cf7c90a0dc"
+  },
+  {
+   "file": "src/scenes/unlocks.js",
+   "fn": "build",
+   "sha256": "4ec7deb72a58440d2384cb87861ed0a9559cc29332f7ac8cd1be31f667591a0f"
+  },
+  {
+   "file": "src/scenes/relic.js",
+   "fn": "viewLight",
+   "sha256": "1389943c26fb4c7170151e6145b7653fc6c1052ddcdcf550066cd7d040fe25e2"
+  },
+  {
+   "file": "src/scenes/relic.js",
+   "fn": "refreshLabel",
+   "sha256": "722a2d55f3f8d30fcf351ab65d5ab2b341b9e2262f175ef9cfadddb40b41ccc1"
+  },
+  {
+   "file": "src/scenes/relic.js",
+   "fn": "tapLight",
+   "sha256": "b04e24ee6f2182323bfae12d6e59fc222b45cd097586494632d01fa5094e984b"
+  },
+  {
+   "file": "src/scenes/relic.js",
+   "fn": "confirm",
+   "sha256": "191bde45f6bad45c720f20be8d4b36473e02c93dd5d71e4eade925b678aa2f21"
+  },
+  {
+   "file": "src/scenes/relic.js",
+   "fn": "enter",
+   "sha256": "8b42c3a51bc997ecf195cf13552701e24e75098bc22f3dc02972a2cf89f4498a"
+  },
+  {
+   "file": "src/scenes/title.js",
+   "fn": "memory",
+   "sha256": "af2f996f394e49b2a8b3b8d3ab6b286cbd0b6059a2fce7fa190eb85558c56a96"
+  },
+  {
+   "file": "src/scenes/title.js",
+   "fn": "refresh",
+   "sha256": "2c1b29a3a2f9c2412e09393ddd2853502161ebe2729f2edf5deefaae4f78ac25"
+  },
+  {
+   "file": "src/scenes/title.js",
+   "fn": "begin",
+   "sha256": "cfbc7baec57f77f3772c24b0ad45474587d75f37c9e23fe7faaaeba21c87fb34"
+  },
+  {
+   "file": "src/scenes/title.js",
+   "fn": "activate",
+   "sha256": "e1b2f6a1729c8a1448cc6f6b94af82de988b1ccae3d2cc555df0d289addcfaf6"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "validRun",
+   "sha256": "bcd6cab078bdcc459d0720d8ab568a9a347a4ad007c13b9b3310c70de1dcf2c8"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "nextGoal",
+   "sha256": "03937ada4a1b18cf762a2c5d4ae95c7a810763518c0fa456cd2d66a24acae4da"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "hasRun",
+   "sha256": "88d2fb7774bf54bb79239693f631b721cf0b9136e1d98d9de408a514fb0de4af"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "startFlow",
+   "sha256": "7a538ecf37aab32382ecd1df0430f97599af38a2877bcfdf8ec607d192b42c79"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "newRun",
+   "sha256": "9977f4d4cf9454dc460e4f8a7e2f5082e2c20c641bd69c1b5fb02ed919dd1df5"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "resume",
+   "sha256": "74d2bc9110321aaca1ec6cd9d1a9f851e2884dbde04646b10f3f3a12c7949a79"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "duelOver",
+   "sha256": "73a42f99d0c8f4230ea0fa11fdea267443e923663327862b3119d12607f87110"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "draft",
+   "sha256": "6df605794433dc2f13d6817772d70858202e98857a827e9e9adcb42c9ff09a2b"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "abandon",
+   "sha256": "4b738845df72988ce1152f63f9e4733604125e97227f97b06107d4ee73512317"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "vars",
+   "sha256": "f363840dcfb533e7340bfd15326575bf548049737d947132aac6786bb1b3765d"
+  },
+  {
+   "file": "src/main.js",
+   "fn": "boot",
+   "sha256": "e245e7e9942f03bb9a5fe8ba40e508d1322b96829d6853f8093179fcf86bacd8"
+  },
+  {
+   "file": "src/text/taunts.js",
+   "fn": "freshOrder",
+   "sha256": "0baab5c9a59426370e4a65ff5d067457097ea8d3b57f9d946275969f69c7f3ff"
+  },
+  {
+   "file": "src/text/taunts.js",
+   "fn": "draw",
+   "sha256": "1239dfa8c7164d5f700aa6c39a7da6ea83ddbf67f4544cdaaa45fc8fb023adbb"
+  },
+  {
+   "file": "src/text/taunts.js",
+   "fn": "taunt",
+   "sha256": "b891ac2a8613761afb767d639391969b713f6b8142cb9dcd30dd376239ee14e2"
+  }
+ ]
+}
