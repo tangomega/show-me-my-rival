@@ -9,8 +9,8 @@
 // --worktree runs the same steps on the working tree (banner: WORKTREE MODE).
 //
 // Steps: in-sync (a fresh build of src equals index.html once line endings are normalised), check (tools/check.js
-// on that build), the suites as concurrent child processes (FLOW_* and RIVAL_* variables removed from their
-// environment), the corrupt section of test_flow in full mode at seeds 1-3, check_docs when the tree has it, the
+// on that build), check-docs-names (tools/check.js --docs: the name lint over every tracked .md), the suites as
+// concurrent child processes (FLOW_* and RIVAL_* variables removed from their environment), the corrupt section of test_flow in full mode at seeds 1-3, check_docs when the tree has it, the
 // sim digest (8 cells, compared exactly with tools/baseline.json), the seal trace (compared with baseline.json),
 // degeneracy bounds on the digest, then test_brain alone (it has a wall-clock assertion).
 //
@@ -62,10 +62,10 @@ const CELL_STEPS = FACES.reduce(function (a, f) { return a.concat(STAKES.map(fun
 // Every step name --only accepts is listed here (a group, or a member of one); main() checks that the step table
 // below has no step missing from it.
 const GROUPS = {
-  'in-sync': ['in-sync'], check: ['check'], corrupt: ['corrupt-1', 'corrupt-2', 'corrupt-3'], sealtrace: ['sealtrace'], test_brain: ['test_brain'],
+  'in-sync': ['in-sync'], check: ['check', 'check-docs-names'], corrupt: ['corrupt-1', 'corrupt-2', 'corrupt-3'], sealtrace: ['sealtrace'], test_brain: ['test_brain'],
   digest: CELL_STEPS.concat(['bounds']),
   bounds: CELL_STEPS.concat(['bounds']),                  // the bounds are computed from the digest cells
-  suites: ['test_combat', 'test_flow', 'test_audio', 'test_scenes', 'check_text', 'test_rules', 'test_sim', 'playtest', 'lint_pure', 'check_docs'],
+  suites: ['test_combat', 'test_flow', 'test_audio', 'test_scenes', 'check_text', 'test_rules', 'test_sim', 'playtest', 'lint_pure', 'check_docs', 'check-docs-names'],
   'test_flow-full': ['test_flow-full']                    // runs only together with --full
 };
 const STEP_NAMES = new Set();
@@ -349,7 +349,8 @@ const SUITES = [
   { step: 'test_scenes', script: 'tools/test_scenes.js', args: [], est: 3 },
   { step: 'check_text', script: 'tools/check_text.js', args: [], est: 1 },
   { step: 'test_audio', script: 'tools/test_audio.js', args: [], est: 1 },
-  { step: 'check_docs', script: 'tools/check_docs.js', args: [], est: 1, optional: true }
+  { step: 'check_docs', script: 'tools/check_docs.js', args: [], est: 1, optional: true },
+  { step: 'check-docs-names', script: 'tools/check.js', args: ['--docs'], est: 1 }
 ];
 if (opt.full) SUITES.unshift({ step: 'test_flow-full', script: 'tools/test_flow.js', args: ['200'], est: 300 });
 const CELLS = [];

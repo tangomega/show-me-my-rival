@@ -1,6 +1,8 @@
 // SHOW ME MY RIVAL - build checker: the page must be self-contained, inside its size budget, and carry the credit.
-// Usage: node tools/check.js [<file>]          check a built page (default: index.html in the repo root)
-//        node tools/check.js --hash <token>    print the deny-list hash of a token (lowercased; words split by one space)
+// Usage: node tools/check.js [<file>]           check a built page (default: index.html in the repo root)
+//        node tools/check.js --docs [<file>...] name lint only (exact credit, no maker phrases, no deny-listed name)
+//                                               over docs (default: every tracked .md file, read from disk)
+//        node tools/check.js --hash <token>     print the deny-list hash of a token (lowercased; words split by one space)
 // Exit 1 on any failure. A WARN line (size over the warning line) does not fail.
 'use strict';
 const fs = require('fs');
@@ -17,15 +19,21 @@ function norm(s) { return String(s).toLowerCase().trim().replace(/\s+/g, ' '); }
 // ---------------------------------------------------------------- arguments
 const argv = process.argv.slice(2);
 let fileArg = null;
+let docsMode = false;
+const fileArgs = [];
 const hashArgs = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--hash') {
     if (i + 1 >= argv.length) { console.error('check: --hash needs a token'); process.exit(1); }
     hashArgs.push(argv[++i]);
-  } else if (a.indexOf('--') === 0) { console.error('check: unknown option ' + a + ' (usage: node tools/check.js [<file>] [--hash <token>])'); process.exit(1); }
-  else if (fileArg === null) fileArg = a;
-  else { console.error('check: one file at a time (got ' + fileArg + ' and ' + a + ')'); process.exit(1); }
+  } else if (a === '--docs') docsMode = true;
+  else if (a.indexOf('--') === 0) { console.error('check: unknown option ' + a + ' (usage: node tools/check.js [<file>] | --docs [<file>...] | --hash <token>)'); process.exit(1); }
+  else fileArgs.push(a);
+}
+if (!docsMode) {
+  if (fileArgs.length > 1) { console.error('check: one file at a time (got ' + fileArgs[0] + ' and ' + fileArgs[1] + ')'); process.exit(1); }
+  if (fileArgs.length) fileArg = fileArgs[0];
 }
 if (hashArgs.length) {
   for (const t of hashArgs) console.log(sha(norm(t)));
@@ -188,183 +196,232 @@ const ALLOW = new Set([
   '545ea538461003efdc8c81c244531b003f6f26cfccf6c0073b3239fdedf49446 7208f7bdc4becfe2d7b290029e8023d860f9a7a44c1bb07fd994dc94bde8f52c 79941e86ee521fe0633492b135d0f6ec99971d95023a6c82220f5be220a81e0c',
   '9390ef32addf32bfdea786bc1e20679592498068bcbfcd357ea10ab64ea35e47 d8e60ebbbb2b1a9d5f0dd2cfc7e810688583ad8afb626fcc6c357f756e799530 f9cde2d96a1dfea48b996abc876b672f8c3e40650de46184b705ad56b814ee2c'
 ].join(' ').split(' ').filter(Boolean));
+// Allowed in docs only, never in the page: the code host the game is served from, which the deploy instructions and
+// the live address have to name. It stays in DENY, so the page itself still may not name it.
+const DOCS_ALLOW = new Set(['c0b0109d9439de57fe3cf03abeccbc52f4c98170c732d3b69af5e6395ace574e']);
 
-// ---------------------------------------------------------------- the file
+// ---------------------------------------------------------------- one file
+// docs: the name lint only (credit lines, maker phrases, deny-list with DOCS_ALLOW); the page checks are skipped.
+function checkFile(file, shown, docs) {
+  const base = path.basename(file);
+  const bytes = fs.statSync(file).size;
+  const html = fs.readFileSync(file, 'utf8');
+  const lower = html.toLowerCase();
+  const fails = [];
+  const warns = [];
+
+  // Line starts, for where().
+  const lineStart = [0];
+  for (let i = 0; i < html.length; i++) if (html.charCodeAt(i) === 10) lineStart.push(i + 1);
+  function lineOf(idx) { let lo = 0, hi = lineStart.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStart[mid] <= idx) lo = mid; else hi = mid - 1; } return lo + 1; }
+  // Which source file does an offset come from? build.js writes its header comment, then src/shell.html with the
+  // bundle in place of its marker; every bundled file starts with a "// ---- path ----" line.
+  const firstMark = html.indexOf('// ---- ');
+  const lastMark = html.lastIndexOf('// ---- ');
+  const bundleEnd = lastMark >= 0 ? lower.indexOf('</script>', lastMark) : -1;
+  const headEnd = /^\s*<!--/.test(html) ? html.indexOf('-->') + 3 : 0;
+  function srcOf(idx) {
+    if (idx < headEnd) return 'tools/build.js header';
+    if (firstMark < 0 || idx < firstMark || (bundleEnd >= 0 && idx >= bundleEnd)) return 'src/shell.html';
+    const mk = html.lastIndexOf('// ---- ', idx);
+    const m = /^\/\/ ---- (\S+) ----/.exec(html.slice(mk, mk + 200));
+    return m ? 'src/' + m[1] : null;
+  }
+  function where(idx) {
+    const line = lineOf(idx);
+    const src = docs ? null : srcOf(idx);
+    const ls = lineStart[line - 1];
+    let le = html.indexOf('\n', idx); if (le < 0) le = html.length;
+    const text = html.slice(ls, le).trim();
+    return 'line ' + line + (src ? ' [' + src + ']' : '') + ': ' + (text.length > 90 ? text.slice(0, 90) + '...' : text);
+  }
+
+  let m;
+  if (!docs) {
+    // ---------------------------------------------------------------- no external requests
+    // Plain substring bans (case-insensitive): nothing that could make, or look like, an external request.
+    const banned = ['http://', 'https://', 'fetch(', 'xmlhttprequest', 'import(', '<img', '<script src', '@import', 'url(',
+      // other ways to reach the network or pull in a second file
+      'new image(', 'sendbeacon', 'websocket', 'eventsource', 'importscripts', 'serviceworker', 'new worker(', 'sharedworker', '@font-face',
+      '<iframe', '<audio', '<video', '<source', '<object', '<embed', '<frame', 'srcset', 'window.open', 'location.href', 'location.assign', 'location.replace',
+      'indexeddb', 'document.cookie', 'ws://', 'wss://'];
+    for (const needle of banned) {
+      let i = -1, n = 0;
+      while ((i = lower.indexOf(needle, i + 1)) >= 0) {
+        if (n++ < 5) fails.push('forbidden "' + needle + '" at ' + where(i));
+      }
+      if (n > 5) fails.push('...and ' + (n - 5) + ' more "' + needle + '"');
+    }
+    // Script-made requests: a script element, a src attribute set from code, a peer connection.
+    const reBans = [
+      [/createElement\s*\(\s*(['"`])script\1\s*\)/gi, "createElement('script')"],
+      [/setAttribute\s*\(\s*(['"`])src\1/gi, "setAttribute('src')"],
+      [/RTCPeerConnection/gi, 'RTCPeerConnection']
+    ];
+    for (const [re, label] of reBans) {
+      let r, n = 0;
+      while ((r = re.exec(html))) { if (n++ < 5) fails.push('forbidden ' + label + ' at ' + where(r.index)); }
+      if (n > 5) fails.push('...and ' + (n - 5) + ' more ' + label);
+    }
+
+    // Protocol-relative URLs ("//host.tld/...") in a string or a CSS/HTML attribute.
+    const relRe = /["'(=]\/\/[a-z0-9-]+(\.[a-z0-9-]+)+[\/"')]/gi;
+    let rm;
+    while ((rm = relRe.exec(html))) fails.push('protocol-relative URL at ' + where(rm.index));
+    // .src / .href assignments from script (an Image, a script tag or a stylesheet would load something).
+    const srcRe = /\.(src|href)\s*=[^=]/g;
+    while ((rm = srcRe.exec(html))) fails.push('assignment to .' + rm[1] + ' at ' + where(rm.index));
+
+    // <link> is only allowed as the empty-favicon stub: href="data:,"
+    const linkRe = /<link\b[^>]*>/gi;
+    while ((m = linkRe.exec(html))) {
+      const href = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m[0]);
+      const v = href ? (href[1] !== undefined ? href[1] : href[2] !== undefined ? href[2] : href[3]) : null;
+      if (v !== 'data:,') fails.push('<link> with href other than "data:," at ' + where(m.index));
+    }
+
+    // ---------------------------------------------------------------- required content
+    if (!/<title>SHOW ME MY RIVAL<\/title>/.test(html)) fails.push('missing <title>SHOW ME MY RIVAL</title>');
+    if (!/<meta\s+name="author"\s+content="tangoSHELL"\s*\/?>/.test(html)) fails.push('missing <meta name="author" content="tangoSHELL">');
+    const head = /^\s*<!--([\s\S]*?)-->/.exec(html);
+    if (!head) fails.push('file does not start with an HTML header comment');
+    else {
+      if (head[1].indexOf('SHOW ME MY RIVAL') < 0) fails.push('header comment lacks "SHOW ME MY RIVAL"');
+      if (head[1].indexOf(CREDIT) < 0) fails.push('header comment lacks "' + CREDIT + '"');
+    }
+    if (html.indexOf('/*__CODE__*/') >= 0) fails.push('unreplaced /*__CODE__*/ marker');
+    if ((lower.match(/<\/script>/g) || []).length !== (lower.match(/<script\b/g) || []).length) fails.push('unbalanced <script> tags (a "</script>" leaked into the code?)');
+  }
+
+  // ---------------------------------------------------------------- credit lint
+  // (a) Every "Developed by" (any case; the two words split by any run of whitespace, a no-break space or its entity or
+  //     escape) is followed by exactly " tangoSHELL", a space, the middle dot (the character itself, a JS escape or an
+  //     HTML entity), " 2026", then a character that is not a letter or digit, or the end.
+  const devRe = /developed(?:\s|&nbsp;|&#160;|&#xa0;|\\u00a0|\\xa0|\\u0020|\\x20|\\n|\\r|\\t)+by(?![A-Za-z0-9])/gi;
+  const CREDIT_TAIL = /^ tangoSHELL (?:\u00b7|\\u00[bB]7|\\x[bB]7|&middot;|&#183;|&#x[bB]7;) 2026(?![A-Za-z0-9])/;
+  let dm, devN = 0;
+  while ((dm = devRe.exec(html))) {
+    devN++;
+    if (!CREDIT_TAIL.test(html.slice(dm.index + dm[0].length, dm.index + dm[0].length + 40))) {
+      fails.push('credit must read exactly "' + CREDIT + '" at ' + where(dm.index));
+    }
+  }
+  if (!devN && !docs) fails.push('no "' + CREDIT + '" anywhere');
+  // (b) No tool or maker credit phrases.
+  const phraseRe = /\b(?:generated|powered)\s+by\b|\b(?:made|built)\s+with\b/gi;
+  while ((m = phraseRe.exec(html))) fails.push('forbidden phrase "' + m[0] + '" at ' + where(m.index));
+  // (c) Hashed proper-name deny-list over word tokens (letters and digits; a token without a letter only joins runs),
+  //     their camelCase and letter/digit parts (a name with a version number glued on), runs of two or three parts of
+  //     one token (spaced and joined), and runs of two or three adjacent tokens (spaced only: joining separate words
+  //     of prose would invent compounds), taken both whole and at the part boundary ("Two Words2" -> "two words").
+  //     A multi-word name is listed both spaced and joined, so "two words", "TwoWords" and "twowords" all match it.
+  for (const h of ALLOW) if (DENY.has(h)) fails.push('internal: hash ' + h.slice(0, 12) + ' is in both the deny-list and the allowlist');
+  const hcache = new Map();
+  function hashOf(s) { let v = hcache.get(s); if (v === undefined) { v = sha(s); hcache.set(s, v); } return v; }
+  function isAllowed(s) { const h = hashOf(s); return ALLOW.has(h) || (docs && DOCS_ALLOW.has(h)); }
+  function camelParts(tok) { return tok.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])/).filter(Boolean); }
+  // The runs of consecutive words that end with the last one: a pair and a triple, spaced (and joined when asked).
+  function pushRunsEnding(cands, words, joined) {
+    const n = words.length;
+    if (n >= 2) { cands.add(words[n - 2] + ' ' + words[n - 1]); if (joined) cands.add(words[n - 2] + words[n - 1]); }
+    if (n >= 3) { cands.add(words[n - 3] + ' ' + words[n - 2] + ' ' + words[n - 1]); if (joined) cands.add(words[n - 3] + words[n - 2] + words[n - 1]); }
+  }
+  const denyHits = new Map();
+  {
+    const tokRe = /[A-Za-z0-9]+/g;
+    let t, run = [], prevEnd = -1;                      // run: the last two adjacent tokens (none allowlisted), {full, last}
+    while ((t = tokRe.exec(html))) {
+      const tok = t[0], low = tok.toLowerCase();
+      const allowed = isAllowed(low);
+      if (!/^[\s._'-]{1,3}$/.test(html.slice(prevEnd, t.index))) run = [];
+      const parts = camelParts(tok).map(s => s.toLowerCase());
+      if (!allowed) {
+        const cands = new Set();                        // a Set: one hit per name per token
+        if (/[a-z]/.test(low)) cands.add(low);
+        if (parts.length > 1) {
+          for (let i = 0; i < parts.length; i++) {
+            if (/^[a-z]/.test(parts[i]) && !isAllowed(parts[i])) cands.add(parts[i]);
+            pushRunsEnding(cands, parts.slice(0, i + 1), true);
+          }
+        }
+        pushRunsEnding(cands, run.map(r => r.full).concat([low]), false);
+        if (parts.length > 1 || run.some(r => r.last !== r.full)) {
+          const at = run.map(r => r.full);
+          if (at.length) at[at.length - 1] = run[run.length - 1].last;
+          if (at.length > 1) at[0] = run[0].last;
+          pushRunsEnding(cands, at.concat([parts[0]]), false);
+        }
+        for (const c of cands) {
+          const h = hashOf(c);
+          if (DENY.has(h)) {
+            const list = denyHits.get(h) || [];
+            if (list.length < 5) list.push(t.index);
+            list.n = (list.n || 0) + 1;
+            denyHits.set(h, list);
+          }
+        }
+      }
+      run = allowed ? [] : run.concat([{ full: low, last: parts[parts.length - 1] }]).slice(-2);
+      prevEnd = t.index + tok.length;
+    }
+  }
+  for (const [h, list] of denyHits) {
+    for (const idx of list) fails.push('deny-listed name (hash ' + h.slice(0, 12) + ') at ' + where(idx));
+    if (list.n > list.length) fails.push('...and ' + (list.n - list.length) + ' more of hash ' + h.slice(0, 12));
+  }
+
+  // ---------------------------------------------------------------- size
+  if (!docs && bytes > SIZE_LIMIT) fails.push(base + ' is ' + bytes + ' bytes, over the 700,000-byte limit');
+  else if (!docs && bytes > SIZE_WARN) warns.push(base + ' is ' + bytes + ' bytes, over the 650,000-byte warning line (the limit is 700,000)');
+  return { base: base, bytes: bytes, lines: lineStart.length, fails: fails, warns: warns };
+}
+
+// ---------------------------------------------------------------- run
+if (docsMode) {
+  let docs = fileArgs;
+  if (!docs.length) {
+    // Tracked .md files; outside a git checkout (the gate's HEAD export holds tracked files only) walk the tree.
+    const root = path.resolve(__dirname, '..');
+    const inRepo = fs.existsSync(path.join(root, '.git'));
+    const ls = inRepo ? require('child_process').spawnSync('git', ['ls-files', '-z', '--', '*.md'], { cwd: root, encoding: 'utf8', windowsHide: true }) : null;
+    if (ls && ls.status === 0) docs = ls.stdout.split('\0').filter(Boolean).map(f => path.resolve(root, f));
+    else if (inRepo) { console.error('check: git ls-files failed; name the files instead'); process.exit(1); }
+    else {
+      const skip = new Set(['.git', 'node_modules', '.claude', path.join('tools', 'out'), path.join('tools', 'playtest', 'profiles')]);
+      (function walk(dir) {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
+          const full = path.join(dir, e.name), rel = path.relative(root, full);
+          if (e.isDirectory()) { if (!skip.has(rel)) walk(full); }
+          else if (e.isFile() && /\.md$/i.test(e.name)) docs.push(full);
+        }
+      })(root);
+    }
+    if (!docs.length) { console.error('check: no .md files found under ' + root); process.exit(1); }
+  }
+  let bad = 0;
+  for (const d of docs) {
+    const f = path.resolve(d);
+    const sh = path.relative(process.cwd(), f) || d;
+    if (!fs.existsSync(f) || !fs.statSync(f).isFile()) { console.error('check: ' + sh + ' not found'); process.exit(1); }
+    const r = checkFile(f, sh, true);
+    if (r.fails.length) {
+      bad++;
+      console.error('CHECK FAILED ' + sh + ' (' + r.fails.length + '):');
+      for (const x of r.fails) console.error('  - ' + x);
+    }
+  }
+  if (bad) process.exit(1);
+  console.log('check OK: ' + docs.length + ' doc' + (docs.length === 1 ? '' : 's') + ' carry only the exact credit and name nothing deny-listed');
+  process.exit(0);
+}
 const file = fileArg !== null ? path.resolve(fileArg) : path.resolve(__dirname, '..', 'index.html');
 const shown = fileArg !== null ? (path.relative(process.cwd(), file) || fileArg) : 'index.html';
 if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
   console.error('check: ' + shown + ' not found' + (fileArg === null ? ' (run node tools/build.js first)' : ''));
   process.exit(1);
 }
-const base = path.basename(file);
-const bytes = fs.statSync(file).size;
-const html = fs.readFileSync(file, 'utf8');
-const lower = html.toLowerCase();
-const fails = [];
-const warns = [];
-
-// Line starts, for where().
-const lineStart = [0];
-for (let i = 0; i < html.length; i++) if (html.charCodeAt(i) === 10) lineStart.push(i + 1);
-function lineOf(idx) { let lo = 0, hi = lineStart.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStart[mid] <= idx) lo = mid; else hi = mid - 1; } return lo + 1; }
-// Which source file does an offset come from? build.js writes its header comment, then src/shell.html with the
-// bundle in place of its marker; every bundled file starts with a "// ---- path ----" line.
-const firstMark = html.indexOf('// ---- ');
-const lastMark = html.lastIndexOf('// ---- ');
-const bundleEnd = lastMark >= 0 ? lower.indexOf('</script>', lastMark) : -1;
-const headEnd = /^\s*<!--/.test(html) ? html.indexOf('-->') + 3 : 0;
-function srcOf(idx) {
-  if (idx < headEnd) return 'tools/build.js header';
-  if (firstMark < 0 || idx < firstMark || (bundleEnd >= 0 && idx >= bundleEnd)) return 'src/shell.html';
-  const mk = html.lastIndexOf('// ---- ', idx);
-  const m = /^\/\/ ---- (\S+) ----/.exec(html.slice(mk, mk + 200));
-  return m ? 'src/' + m[1] : null;
-}
-function where(idx) {
-  const line = lineOf(idx);
-  const src = srcOf(idx);
-  const ls = lineStart[line - 1];
-  let le = html.indexOf('\n', idx); if (le < 0) le = html.length;
-  const text = html.slice(ls, le).trim();
-  return 'line ' + line + (src ? ' [' + src + ']' : '') + ': ' + (text.length > 90 ? text.slice(0, 90) + '...' : text);
-}
-
-// ---------------------------------------------------------------- no external requests
-// Plain substring bans (case-insensitive): nothing that could make, or look like, an external request.
-const banned = ['http://', 'https://', 'fetch(', 'xmlhttprequest', 'import(', '<img', '<script src', '@import', 'url(',
-  // other ways to reach the network or pull in a second file
-  'new image(', 'sendbeacon', 'websocket', 'eventsource', 'importscripts', 'serviceworker', 'new worker(', 'sharedworker', '@font-face',
-  '<iframe', '<audio', '<video', '<source', '<object', '<embed', '<frame', 'srcset', 'window.open', 'location.href', 'location.assign', 'location.replace',
-  'indexeddb', 'document.cookie', 'ws://', 'wss://'];
-for (const needle of banned) {
-  let i = -1, n = 0;
-  while ((i = lower.indexOf(needle, i + 1)) >= 0) {
-    if (n++ < 5) fails.push('forbidden "' + needle + '" at ' + where(i));
-  }
-  if (n > 5) fails.push('...and ' + (n - 5) + ' more "' + needle + '"');
-}
-// Script-made requests: a script element, a src attribute set from code, a peer connection.
-const reBans = [
-  [/createElement\s*\(\s*(['"`])script\1\s*\)/gi, "createElement('script')"],
-  [/setAttribute\s*\(\s*(['"`])src\1/gi, "setAttribute('src')"],
-  [/RTCPeerConnection/gi, 'RTCPeerConnection']
-];
-for (const [re, label] of reBans) {
-  let r, n = 0;
-  while ((r = re.exec(html))) { if (n++ < 5) fails.push('forbidden ' + label + ' at ' + where(r.index)); }
-  if (n > 5) fails.push('...and ' + (n - 5) + ' more ' + label);
-}
-
-// Protocol-relative URLs ("//host.tld/...") in a string or a CSS/HTML attribute.
-const relRe = /["'(=]\/\/[a-z0-9-]+(\.[a-z0-9-]+)+[\/"')]/gi;
-let rm;
-while ((rm = relRe.exec(html))) fails.push('protocol-relative URL at ' + where(rm.index));
-// .src / .href assignments from script (an Image, a script tag or a stylesheet would load something).
-const srcRe = /\.(src|href)\s*=[^=]/g;
-while ((rm = srcRe.exec(html))) fails.push('assignment to .' + rm[1] + ' at ' + where(rm.index));
-
-// <link> is only allowed as the empty-favicon stub: href="data:,"
-const linkRe = /<link\b[^>]*>/gi;
-let m;
-while ((m = linkRe.exec(html))) {
-  const href = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m[0]);
-  const v = href ? (href[1] !== undefined ? href[1] : href[2] !== undefined ? href[2] : href[3]) : null;
-  if (v !== 'data:,') fails.push('<link> with href other than "data:," at ' + where(m.index));
-}
-
-// ---------------------------------------------------------------- required content
-if (!/<title>SHOW ME MY RIVAL<\/title>/.test(html)) fails.push('missing <title>SHOW ME MY RIVAL</title>');
-if (!/<meta\s+name="author"\s+content="tangoSHELL"\s*\/?>/.test(html)) fails.push('missing <meta name="author" content="tangoSHELL">');
-const head = /^\s*<!--([\s\S]*?)-->/.exec(html);
-if (!head) fails.push('file does not start with an HTML header comment');
-else {
-  if (head[1].indexOf('SHOW ME MY RIVAL') < 0) fails.push('header comment lacks "SHOW ME MY RIVAL"');
-  if (head[1].indexOf(CREDIT) < 0) fails.push('header comment lacks "' + CREDIT + '"');
-}
-if (html.indexOf('/*__CODE__*/') >= 0) fails.push('unreplaced /*__CODE__*/ marker');
-if ((lower.match(/<\/script>/g) || []).length !== (lower.match(/<script\b/g) || []).length) fails.push('unbalanced <script> tags (a "</script>" leaked into the code?)');
-
-// ---------------------------------------------------------------- credit lint
-// (a) Every "Developed by" (any case; the two words split by any run of whitespace, a no-break space or its entity or
-//     escape) is followed by exactly " tangoSHELL", a space, the middle dot (the character itself, a JS escape or an
-//     HTML entity), " 2026", then a character that is not a letter or digit, or the end.
-const devRe = /developed(?:\s|&nbsp;|&#160;|&#xa0;|\\u00a0|\\xa0|\\u0020|\\x20|\\n|\\r|\\t)+by(?![A-Za-z0-9])/gi;
-const CREDIT_TAIL = /^ tangoSHELL (?:\u00b7|\\u00[bB]7|\\x[bB]7|&middot;|&#183;|&#x[bB]7;) 2026(?![A-Za-z0-9])/;
-let dm, devN = 0;
-while ((dm = devRe.exec(html))) {
-  devN++;
-  if (!CREDIT_TAIL.test(html.slice(dm.index + dm[0].length, dm.index + dm[0].length + 40))) {
-    fails.push('credit must read exactly "' + CREDIT + '" at ' + where(dm.index));
-  }
-}
-if (!devN) fails.push('no "' + CREDIT + '" anywhere');
-// (b) No tool or maker credit phrases.
-const phraseRe = /\b(?:generated|powered)\s+by\b|\b(?:made|built)\s+with\b/gi;
-while ((m = phraseRe.exec(html))) fails.push('forbidden phrase "' + m[0] + '" at ' + where(m.index));
-// (c) Hashed proper-name deny-list over word tokens (letters and digits; a token without a letter only joins runs),
-//     their camelCase and letter/digit parts (a name with a version number glued on), runs of two or three parts of
-//     one token (spaced and joined), and runs of two or three adjacent tokens (spaced only: joining separate words
-//     of prose would invent compounds), taken both whole and at the part boundary ("Two Words2" -> "two words").
-//     A multi-word name is listed both spaced and joined, so "two words", "TwoWords" and "twowords" all match it.
-for (const h of ALLOW) if (DENY.has(h)) fails.push('internal: hash ' + h.slice(0, 12) + ' is in both the deny-list and the allowlist');
-const hcache = new Map();
-function hashOf(s) { let v = hcache.get(s); if (v === undefined) { v = sha(s); hcache.set(s, v); } return v; }
-function camelParts(tok) { return tok.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])/).filter(Boolean); }
-// The runs of consecutive words that end with the last one: a pair and a triple, spaced (and joined when asked).
-function pushRunsEnding(cands, words, joined) {
-  const n = words.length;
-  if (n >= 2) { cands.add(words[n - 2] + ' ' + words[n - 1]); if (joined) cands.add(words[n - 2] + words[n - 1]); }
-  if (n >= 3) { cands.add(words[n - 3] + ' ' + words[n - 2] + ' ' + words[n - 1]); if (joined) cands.add(words[n - 3] + words[n - 2] + words[n - 1]); }
-}
-const denyHits = new Map();
-{
-  const tokRe = /[A-Za-z0-9]+/g;
-  let t, run = [], prevEnd = -1;                      // run: the last two adjacent tokens (none allowlisted), {full, last}
-  while ((t = tokRe.exec(html))) {
-    const tok = t[0], low = tok.toLowerCase();
-    const allowed = ALLOW.has(hashOf(low));
-    if (!/^[\s._'-]{1,3}$/.test(html.slice(prevEnd, t.index))) run = [];
-    const parts = camelParts(tok).map(s => s.toLowerCase());
-    if (!allowed) {
-      const cands = new Set();                        // a Set: one hit per name per token
-      if (/[a-z]/.test(low)) cands.add(low);
-      if (parts.length > 1) {
-        for (let i = 0; i < parts.length; i++) {
-          if (/^[a-z]/.test(parts[i]) && !ALLOW.has(hashOf(parts[i]))) cands.add(parts[i]);
-          pushRunsEnding(cands, parts.slice(0, i + 1), true);
-        }
-      }
-      pushRunsEnding(cands, run.map(r => r.full).concat([low]), false);
-      if (parts.length > 1 || run.some(r => r.last !== r.full)) {
-        const at = run.map(r => r.full);
-        if (at.length) at[at.length - 1] = run[run.length - 1].last;
-        if (at.length > 1) at[0] = run[0].last;
-        pushRunsEnding(cands, at.concat([parts[0]]), false);
-      }
-      for (const c of cands) {
-        const h = hashOf(c);
-        if (DENY.has(h)) {
-          const list = denyHits.get(h) || [];
-          if (list.length < 5) list.push(t.index);
-          list.n = (list.n || 0) + 1;
-          denyHits.set(h, list);
-        }
-      }
-    }
-    run = allowed ? [] : run.concat([{ full: low, last: parts[parts.length - 1] }]).slice(-2);
-    prevEnd = t.index + tok.length;
-  }
-}
-for (const [h, list] of denyHits) {
-  for (const idx of list) fails.push('deny-listed name (hash ' + h.slice(0, 12) + ') at ' + where(idx));
-  if (list.n > list.length) fails.push('...and ' + (list.n - list.length) + ' more of hash ' + h.slice(0, 12));
-}
-
-// ---------------------------------------------------------------- size
-if (bytes > SIZE_LIMIT) fails.push(base + ' is ' + bytes + ' bytes, over the 700,000-byte limit');
-else if (bytes > SIZE_WARN) warns.push(base + ' is ' + bytes + ' bytes, over the 650,000-byte warning line (the limit is 700,000)');
-
-console.log(base + ': ' + (bytes / 1024).toFixed(1) + ' KB (' + bytes + ' bytes), ' + (lineStart.length) + ' lines');
+const { base, bytes, lines, fails, warns } = checkFile(file, shown, false);
+console.log(base + ': ' + (bytes / 1024).toFixed(1) + ' KB (' + bytes + ' bytes), ' + lines + ' lines');
 for (const w of warns) console.log('WARN ' + w);
 if (fails.length) {
   console.error('CHECK FAILED (' + fails.length + '):');
