@@ -1,5 +1,7 @@
 // SHOW ME MY RIVAL - build: inlines src/**/*.js into src/shell.html and writes index.html.
-// Zero dependencies. Usage: node tools/build.js
+// Zero dependencies. Usage: node tools/build.js [--out <path>]
+//   --out <path>   write the page there instead (resolved against the working folder). The sources are always the
+//                  src/ next to this script, so a copy of the repo builds from its own src (tools/test_all.js uses this).
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -8,6 +10,17 @@ const root = path.resolve(__dirname, '..');
 const src = path.join(root, 'src');
 const MARK = '/*__CODE__*/';
 const HEADER = '<!--\n  SHOW ME MY RIVAL\n  Developed by tangoSHELL \u00b7 2026\n-->\n';
+
+let outArg = null;
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--out') {
+    if (i + 1 >= argv.length || !argv[i + 1]) { console.error('build: --out needs a path'); process.exit(1); }
+    outArg = argv[++i];
+  } else if (a.indexOf('--out=') === 0 && a.length > 6) outArg = a.slice(6);
+  else { console.error('build: unknown argument ' + a + ' (usage: node tools/build.js [--out <path>])'); process.exit(1); }
+}
 
 // Build order is the contract in INTERFACES.md.
 const ORDER = [
@@ -47,8 +60,10 @@ if (shell.split(MARK).length !== 2) { console.error('build: src/shell.html must 
 
 const bundle = parts.join(';\n');
 const out = HEADER + shell.replace(MARK, () => bundle);   // function form: no "$" substitution surprises
-const outPath = path.join(root, 'index.html');
+const outPath = outArg ? path.resolve(process.cwd(), outArg) : path.join(root, 'index.html');
+if (outArg) fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(outPath, out, 'utf8');
 
 const bytes = Buffer.byteLength(out, 'utf8');
-console.log('built index.html: ' + parts.length + ' files, ' + (bytes / 1024).toFixed(1) + ' KB (' + bytes + ' bytes)');
+const shown = outArg ? (path.relative(process.cwd(), outPath) || outPath) : 'index.html';
+console.log('built ' + shown + ': ' + parts.length + ' files, ' + (bytes / 1024).toFixed(1) + ' KB (' + bytes + ' bytes)');
