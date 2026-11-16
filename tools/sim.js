@@ -1,8 +1,14 @@
 // SHOW ME MY RIVAL — headless balance sim.
 //
 //   node tools/sim.js [--runs N] [--seeds K] [--seed S] [--bot name[,name]] [--quick] [--jobs J]
-//                     [--unlocks natural|all] [--no-combos] [--no-boons]
-//                     [--set key=value ...] [--label text] [--trace]
+//                     [--unlocks natural|all] [--no-combos] [--combos] [--no-boons]
+//                     [--set key=value ...] [--no-timing] [--json] [--label text] [--trace]
+//
+// --no-timing drops everything machine-dependent (worker count, runs/s, wall clock); results always merge
+// in job order, so the output is byte-identical across runs and --jobs values. --json prints one canonical
+// JSON document (sorted keys, raw integer counts, no timing) and nothing else. --set boss=all plays every
+// face (one job per face x bot x chain, paired seeds) and implies --no-combos unless --combos is given.
+// Required as a module (require('./tools/sim.js')) it runs nothing and exports runChain, parseSet, ...
 //
 // Plays the real logic (core/rng, ai/brain, game/boons, game/combat, game/run) in exactly the order
 // the game does (scenes/duel.js turn(), main.js newRun/duelOver/draft). Every chain is N
@@ -36,37 +42,154 @@ const BOT_NAMES = ['guard', 'cycle', 'wsls', 'truster', 'habit', 'uniform', 'mix
 const BUCKETS = [[1, 10], [11, 50], [51, 200], [201, 1e9]];
 const BUCKET_NAMES = ['1-10', '11-50', '51-200', '201+'];
 
+const FACE_IDS = RUN.BOSSES.map(function (b) { return b.id; });
+const MAX_PHASES = RUN.BOSSES.reduce(function (m, b) { return Math.max(m, b.phases.length); }, 0);
+const HIST = 64;                                      // turns / decisive-exchange histograms: bins 0..63 (63 = 63 or more)
+// "insufficient sample" rules shared by the W/A lines and tools/sim_tables.js
+const SAMPLE = { chainArrivals: 30, sdChains: 6, pooledArrivals: 100 };
+
 // ------------------------------------------------------------------ overrides
 let STAKE = 0;                                        // --set stake=N: every run is played with N lights of the Vigil out
 let BOSS = 'unmasked';                                // --set boss=id: the face worn in duel 7 (R.Run.BOSSES)
-function applySet(list) {
-  (list || []).forEach(function (kv) {
-    const i = kv.indexOf('=');
-    if (i < 0) throw new Error('--set needs key=value: ' + kv);
-    const k = kv.slice(0, i), v = kv.slice(i + 1);
-    const nums = v.split(',').map(Number);
-    let n;
-    if (k === 'hp') for (n = 1; n <= 7; n++) RUN.DUELS[n].rivalHp = nums[n - 1];
-    else if (k === 'exploit') for (n = 1; n <= 7; n++) RUN.DUELS[n].exploit = nums[n - 1];
-    else if (k === 'honesty') for (n = 1; n <= 7; n++) RUN.DUELS[n].honesty = nums[n - 1];
-    else if (k === 'p2hp') RUN.DUELS.phase2.rivalHp = nums[0];
-    else if (k === 'p2exploit') RUN.DUELS.phase2.exploit = nums[0];
-    else if (k === 'p2honesty') RUN.DUELS.phase2.honesty = nums[0];
-    else if (k === 'heal') RUN.HEAL = nums[0];
-    else if (k === 'maxhp') RUN.PLAYER_MAX_HP = nums[0];
-    else if (k === 'p2heal') RUN.PHASE2_HEAL = nums[0];
-    else if (k === 'stake') STAKE = nums[0];
-    else if (k.indexOf('B.') === 0) {                 // B.<boss id>.<phase 1..n>.<key>=number, e.g. B.hours.4.floor=2
-      const parts = k.split('.'), bo = RUN.BOSSES.filter(function (b) { return b.id === parts[1]; })[0];
-      if (!bo || !bo.phases[+parts[2] - 1]) throw new Error('unknown boss phase: ' + k);
-      bo.phases[+parts[2] - 1][parts[3]] = nums[0];
+
+// --set is strict and typed: the whole list is validated before anything is changed.
+//   hp, exploit, honesty           7 values (duels 1..7): hp integers >= 1, exploit / honesty in [0,1]
+//   p2hp | p2exploit | p2honesty   1 value: integer >= 1 | [0,1] | [0,1]
+//   heal, p2heal | maxhp           1 integer >= 0 | >= 1
+//   stake                          integer 0..7 (lights of the Vigil out)
+//   boss                           a face id (R.Run.BOSSES) or 'all' (CLI only: every face, one job each)
+//   V.<k>                          k in R.Run.VIGIL_TUNE, integer >= 0
+//   K.<k>                          k in R.Brain.K: one finite number, or as many as the array holds (LAMBDA)
+//   A.<k>                          k in the adaptive bot's tunables (ADAPT), one finite number
+//   B.<face>.<phase>.<field>       one field of one phase of one face (PHASE_FIELDS); 'null' deletes the field
+const PHASE_FIELDS = {
+  name: { t: 'text' },
+  hp: { t: 'int', min: 1 }, exploit: { t: 'unit' }, honesty: { t: 'unit' },
+  heal: { t: 'int', min: 0, later: true }, floor: { t: 'int', min: 0, max: 3 }, fortify: { t: 'int', min: 0 },
+  calls: { t: 'bool' }, mimic: { t: 'bool' }, copyBoons: { t: 'bool' }, witch: { t: 'bool' },
+  stance: { t: 'enum', of: ['none'] }, change: { t: 'enum', of: ['shatter', 'swap', 'bell'], later: true },
+  who: { t: 'enum', of: ['rival', 'rival2', 'mirror'] },
+  mask: { t: 'id' }, arena: { t: 'id' }, music: { t: 'id' },
+  innate: { t: 'boons' }, cards: { t: 'ids' }
+};
+const TOP_KEYS = {
+  hp: { n: 7, t: 'int', min: 1 }, exploit: { n: 7, t: 'unit' }, honesty: { n: 7, t: 'unit' },
+  p2hp: { n: 1, t: 'int', min: 1 }, p2exploit: { n: 1, t: 'unit' }, p2honesty: { n: 1, t: 'unit' },
+  heal: { n: 1, t: 'int', min: 0 }, p2heal: { n: 1, t: 'int', min: 0 }, maxhp: { n: 1, t: 'int', min: 1 },
+  stake: { n: 1, t: 'int', min: 0, max: RUN.VIGIL.length }
+};
+const NUM_RE = /^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/;
+const ID_RE = /^[a-z0-9_]+$/;
+function usageError(msg) { const e = new Error(msg); e.usage = true; return e; }
+function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+function parseNumber(kv, s, spec) {
+  if (!NUM_RE.test(s)) throw usageError('--set ' + kv + ': ' + JSON.stringify(s) + ' is not a number');
+  const x = Number(s);
+  if (!isFinite(x)) throw usageError('--set ' + kv + ': ' + s + ' is not finite');
+  if (spec.t === 'int' && Math.floor(x) !== x) throw usageError('--set ' + kv + ': ' + s + ' must be an integer');
+  if (spec.t === 'unit' && (x < 0 || x > 1)) throw usageError('--set ' + kv + ': ' + s + ' must lie in [0,1]');
+  if (spec.min !== undefined && x < spec.min) throw usageError('--set ' + kv + ': ' + s + ' must be >= ' + spec.min);
+  if (spec.max !== undefined && x > spec.max) throw usageError('--set ' + kv + ': ' + s + ' must be <= ' + spec.max);
+  return x;
+}
+function parseList(kv, v, n, spec) {
+  const parts = v.split(',');
+  if (parts.length !== n) throw usageError('--set ' + kv + ': needs exactly ' + n + ' value' + (n === 1 ? '' : 's') + ', got ' + parts.length);
+  return parts.map(function (s) { return parseNumber(kv, s, spec); });
+}
+function parseField(kv, field, v, k) {
+  const spec = PHASE_FIELDS[field];
+  if (v === 'null') return { del: true, value: null };
+  if (spec.later && k === 1) throw usageError('--set ' + kv + ': ' + field + ' applies to phases 2+ only');
+  if (spec.t === 'int' || spec.t === 'unit') return { value: parseList(kv, v, 1, spec)[0] };
+  if (spec.t === 'bool') {
+    if (v !== 'true' && v !== 'false') throw usageError('--set ' + kv + ': ' + field + ' takes true or false');
+    return { value: v === 'true' };
+  }
+  if (spec.t === 'enum') {
+    if (spec.of.indexOf(v) < 0) throw usageError('--set ' + kv + ': ' + field + ' takes one of ' + spec.of.join(', ') + ' (or null)');
+    return { value: v };
+  }
+  if (spec.t === 'text') { if (!v) throw usageError('--set ' + kv + ': empty ' + field); return { value: v }; }
+  if (spec.t === 'id') { if (!ID_RE.test(v)) throw usageError('--set ' + kv + ': ' + field + ' must match ' + ID_RE); return { value: v }; }
+  const ids = v.split(',');                           // innate / cards
+  ids.forEach(function (id) {
+    if (!ID_RE.test(id)) throw usageError('--set ' + kv + ': ' + JSON.stringify(id) + ' is not an id');
+    if (spec.t === 'boons') {
+      const b = B.byId[id];
+      if (!b) throw usageError('--set ' + kv + ': unknown boon ' + id);
+      if (b.relic || b.who === 'player') throw usageError('--set ' + kv + ': the Rival cannot hold ' + id);
     }
-    else if (k === 'boss') { BOSS = v; if (!RUN.BOSSES.some(function (b) { return b.id === v; })) throw new Error('unknown boss: ' + v); }
-    else if (k.indexOf('V.') === 0) RUN.VIGIL_TUNE[k.slice(2)] = nums[0];
-    else if (k.indexOf('K.') === 0) R.Brain.K[k.slice(2)] = nums[0];
-    else if (k.indexOf('A.') === 0) ADAPT[k.slice(2)] = nums[0];
-    else throw new Error('unknown --set key: ' + k);
   });
+  return { value: ids };
+}
+// parseSet(list) -> [{ kv, key, kind, target, value, del? }] or throws Error('--set <kv>: <reason>') (err.usage = true).
+function parseSet(list) {
+  return (list || []).map(function (kv) {
+    if (typeof kv !== 'string') throw usageError('--set ' + String(kv) + ': needs key=value');
+    const i = kv.indexOf('=');
+    if (i <= 0) throw usageError('--set ' + kv + ': needs key=value');
+    const k = kv.slice(0, i), v = kv.slice(i + 1);
+    if (own(TOP_KEYS, k)) {
+      const spec = TOP_KEYS[k], nums = parseList(kv, v, spec.n, spec);
+      return { kv: kv, key: k, kind: 'top', target: k, value: spec.n === 1 ? nums[0] : nums };
+    }
+    if (k === 'boss') {
+      if (v !== 'all' && FACE_IDS.indexOf(v) < 0) throw usageError('--set ' + kv + ': unknown boss ' + JSON.stringify(v) + ' (have: ' + FACE_IDS.join(', ') + ', all)');
+      return { kv: kv, key: k, kind: 'boss', target: 'boss', value: v };
+    }
+    const dot = k.indexOf('.'), pre = dot > 0 ? k.slice(0, dot) : '', name = k.slice(dot + 1);
+    if (pre === 'V' || pre === 'K' || pre === 'A') {
+      const tbl = pre === 'V' ? RUN.VIGIL_TUNE : pre === 'K' ? R.Brain.K : ADAPT;
+      if (!own(tbl, name)) throw usageError('--set ' + kv + ': unknown key ' + k + ' (have: ' + Object.keys(tbl).map(function (x) { return pre + '.' + x; }).join(', ') + ')');
+      const cur0 = tbl[name];
+      if (Array.isArray(cur0)) return { kv: kv, key: k, kind: pre, target: name, value: parseList(kv, v, cur0.length, { t: 'num' }) };
+      const spec = pre === 'V' ? { t: 'int', min: 0 } : { t: 'num' };
+      return { kv: kv, key: k, kind: pre, target: name, value: parseList(kv, v, 1, spec)[0] };
+    }
+    if (pre === 'B') {                                // B.<face>.<phase 1..n>.<field>, e.g. B.hours.4.floor=2
+      const parts = k.split('.');
+      if (parts.length !== 4) throw usageError('--set ' + kv + ': expected B.<face>.<phase>.<field>');
+      const fi = FACE_IDS.indexOf(parts[1]);
+      if (fi < 0) throw usageError('--set ' + kv + ': unknown face ' + JSON.stringify(parts[1]) + ' (have: ' + FACE_IDS.join(', ') + ')');
+      const phases = RUN.BOSSES[fi].phases;
+      if (!/^[1-9]\d*$/.test(parts[2]) || +parts[2] > phases.length) throw usageError('--set ' + kv + ': ' + parts[1] + ' has phases 1..' + phases.length);
+      if (!own(PHASE_FIELDS, parts[3])) throw usageError('--set ' + kv + ': unknown phase field ' + JSON.stringify(parts[3]) + ' (have: ' + Object.keys(PHASE_FIELDS).join(', ') + ')');
+      const f = parseField(kv, parts[3], v, +parts[2]);
+      return { kv: kv, key: k, kind: 'B', target: { face: parts[1], phase: +parts[2], field: parts[3] }, value: f.value, del: !!f.del };
+    }
+    throw usageError('--set ' + kv + ': unknown key ' + JSON.stringify(k));
+  });
+}
+// applySet(list) = parseSet + mutation. 'boss=all' is refused here: only the CLI expands it (one job per face).
+function applySet(list) {
+  const items = parseSet(list);
+  items.forEach(function (it) { if (it.kind === 'boss' && it.value === 'all') throw usageError('--set ' + it.kv + ': only the CLI expands boss=all (give each runChain job its own boss)'); });
+  items.forEach(function (it) {
+    const k = it.target, x = it.value;
+    let n;
+    if (it.kind === 'top') {
+      if (k === 'hp') for (n = 1; n <= 7; n++) RUN.DUELS[n].rivalHp = x[n - 1];
+      else if (k === 'exploit') for (n = 1; n <= 7; n++) RUN.DUELS[n].exploit = x[n - 1];
+      else if (k === 'honesty') for (n = 1; n <= 7; n++) RUN.DUELS[n].honesty = x[n - 1];
+      else if (k === 'p2hp') RUN.DUELS.phase2.rivalHp = x;
+      else if (k === 'p2exploit') RUN.DUELS.phase2.exploit = x;
+      else if (k === 'p2honesty') RUN.DUELS.phase2.honesty = x;
+      else if (k === 'heal') RUN.HEAL = x;
+      else if (k === 'maxhp') RUN.PLAYER_MAX_HP = x;
+      else if (k === 'p2heal') RUN.PHASE2_HEAL = x;
+      else if (k === 'stake') STAKE = x;
+    }
+    else if (it.kind === 'boss') BOSS = x;
+    else if (it.kind === 'V') RUN.VIGIL_TUNE[k] = x;
+    else if (it.kind === 'K') R.Brain.K[k] = Array.isArray(x) ? x.slice() : x;
+    else if (it.kind === 'A') ADAPT[k] = x;
+    else if (it.kind === 'B') {
+      const ph = RUN.BOSSES[FACE_IDS.indexOf(k.face)].phases[k.phase - 1];
+      if (it.del) delete ph[k.field]; else ph[k.field] = Array.isArray(x) ? x.slice() : x;
+    }
+  });
+  return items;
 }
 
 // ------------------------------------------------------------------ small helpers
@@ -192,7 +315,11 @@ function sharesOf(o) {
 // Safety net from before the Rupture rule was fixed (it used to seal the move, which locked the duel):
 // a bot that has clashed this many times in a row at 3 pips presses something at random.
 const BORED_AFTER = 9;
-function bored(v) { return v.tension >= 3 && v.clashRun >= BORED_AFTER; }
+function bored(v) {
+  const b = v.tension >= 3 && v.clashRun >= BORED_AFTER;
+  if (b) v.boredHit = 1;                              // statistics only: counts the escapes (no draw, no decision)
+  return b;
+}
 function basicBot(rng, pick, relicPrefs, usable) {
   return {
     relic: relicPrefs ? preferRelic(relicPrefs, rng, usable ? 0.15 : 0) : randomRelic(rng),
@@ -381,9 +508,45 @@ function makeAdaptive(rng) {
   };
 }
 
+// A scripted player (in-process only, used by the sim-scene parity check): it replays what a person did.
+// script = { runs: [{ seed, now, finishNow, stake, relicId, moves: ['S'|'G'|'F'|'coin'], drafts: [boonId], boss?, rngState? }] }
+function makeScripted(script) {
+  let ri = -1, mi = 0, di = 0, cur = null;
+  function noop() {}
+  return {
+    relic: function () {                              // called once per run, before runStart: advances the run index
+      ri++; cur = script.runs[ri]; mi = 0; di = 0;
+      if (!cur) throw new Error('script has no run ' + (ri + 1));
+      return cur.relicId || null;
+    },
+    pick: function (v) {
+      const m = cur.moves[mi++];
+      if (m === undefined) throw new Error('script ran out of moves in run ' + (ri + 1) + ' (duel ' + v.n + ' phase ' + v.phase + ' turn ' + v.turn + ')');
+      if (m !== 'coin') return m;
+      const c = v.use('coin_of_fools');
+      if (!c) throw new Error('script: the Coin of Fools was refused in run ' + (ri + 1) + ' (duel ' + v.n + ' turn ' + v.turn + ')');
+      return c;
+    },
+    draft: function () {
+      const id = cur.drafts[di++];
+      if (id === undefined) throw new Error('script ran out of drafts in run ' + (ri + 1));
+      return id;
+    },
+    after: noop, runStart: noop, duelStart: noop
+  };
+}
+
 // ------------------------------------------------------------------ statistics
+// One segment = one kind of fight (seg[1..7] = duels 1..7 / phase 1 of the final duel, seg[8] = every later phase
+// pooled as 'P2+'; ph[1..MAX_PHASES] = each final-duel phase on its own). Stance counters (tells, honest, trap,
+// counter, mirror, rWinShown) count only turns on which a stance was shown; exchange counters count every turn.
+function newMv() { return { ex: 0, pWin: 0, rWin: 0 }; }
 function newSeg() {
-  return { n: 0, w: 0, turns: 0, hpIn: 0, hpOut: 0, tells: 0, honest: 0, trap: 0, rWin: 0, pWin: 0, clash: 0, big7: 0, counter: 0, mirror: 0 };
+  return {
+    n: 0, w: 0, deaths: 0, turns: 0, hpIn: 0, hpOut: 0, tells: 0, honest: 0, trap: 0, rWin: 0, pWin: 0, clash: 0, big7: 0, counter: 0, mirror: 0,
+    rWinShown: 0, hist: zeros(HIST), dec: 0, decHist: zeros(HIST), le2dec: 0, le2t: 0, ruptDuels: 0, ruptures: 0, lockDuels: 0,
+    bored: 0, boredPhases: 0, maxClashRun: 0, legalSum: 0, mv: { S: newMv(), G: newMv(), F: newMv() }
+  };
 }
 function newStats() {
   const s = {
@@ -393,15 +556,19 @@ function newStats() {
     lifeScore: 0, trust: 0, legalSum: 0, legal2: 0,
     pb: {}, rb: {}, bonN: zeros(7), bonW: zeros(7), relic: {},
     healHist: zeros(16), brkN: 0, brkNet: 0, brkDealt: 0, coinN: 0, coinNet: 0, nocoinN: 0, nocoinNet: 0,
-    mirrorHeal: 0, ruptureP: 0, ruptures: 0, ruptDuels: 0, lockDuels: 0, ruptLost: 0, unlockRun: {}, ms: 0
+    mirrorHeal: 0, ruptureP: 0, ruptures: 0, ruptDuels: 0, lockDuels: 0, ruptLost: 0, unlockRun: {}, ms: 0,
+    coerced: 0, ph: []
   };
   for (let k = 0; k <= 8; k++) s.seg.push(newSeg());
+  for (let k = 0; k <= MAX_PHASES; k++) s.ph.push(newSeg());
   return s;
 }
+// Sums, element-wise for arrays, recursively for objects; max for any key named max<Name> or <name>Streak.
+const MAX_KEY = /^max[A-Z]|Streak$/;
 function merge(a, b) {
   for (const k in b) {
     const v = b[k];
-    if (typeof v === 'number') a[k] = k === 'maxHit' ? Math.max(a[k] || 0, v) : (a[k] || 0) + v;
+    if (typeof v === 'number') a[k] = MAX_KEY.test(k) ? Math.max(a[k] || 0, v) : (a[k] || 0) + v;
     else if (Array.isArray(v)) {
       if (!a[k]) a[k] = [];
       for (let i = 0; i < v.length; i++) {
@@ -415,19 +582,91 @@ function merge(a, b) {
 function bucketOf(runNo) { for (let i = 0; i < 4; i++) if (runNo >= BUCKETS[i][0] && runNo <= BUCKETS[i][1]) return i; return 3; }
 function boonRow(tbl, id) { return tbl[id] || (tbl[id] = { n: zeros(7), w: zeros(7) }); }
 
+// ------------------------------------------------------------------ commit records (sim-scene parity)
+// canon(v): object keys sorted at every depth, arrays kept in order (integer-like keys enumerate numerically in JS).
+function canon(v) {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === 'object') {
+    const o = {};
+    Object.keys(v).sort().forEach(function (k) { o[k] = canon(v[k]); });
+    return o;
+  }
+  return v;
+}
+function plain(x) { return x === undefined ? null : JSON.parse(JSON.stringify(x)); }
+// commitRecord(q): the exact brain.commit input as plain JSON, taken BEFORE the commit (rngState = the dice state
+// the seal will draw from). The scene side of a parity check builds the same record from its own q.
+function commitRecord(q) {
+  const c = q.ctx || {};
+  const qq = { ctx: plain(q.ctx), payoff: plain(q.payoff), legalR: plain(q.legalR), legalP: plain(q.legalP), exploit: q.exploit, honestyBase: q.honestyBase };
+  if (q.noTell) qq.noTell = true;
+  if (q.mimic) qq.mimic = plain(q.mimic);
+  if (q.force) qq.force = plain(q.force);
+  return { duel: c.duel, phase: c.phase, turn: c.turn, q: qq, rngState: q.rng && typeof q.rng.state === 'function' ? q.rng.state() : null };
+}
+// commitInput(q): the same record as one canonical JSON string (what parity compares).
+function commitInput(q) { return JSON.stringify(canon(commitRecord(q))); }
+
+function countTurn(g, shown, sealed, pm, res, nLegal) {
+  if (shown) {                                        // stance statistics: only turns on which a stance was shown
+    g.tells++;
+    if (sealed.honest) g.honest++; else if (sealed.move === BEATS[sealed.tell]) g.trap++;
+    if (pm === LOSES_TO[sealed.tell]) g.counter++; else if (pm === sealed.tell) g.mirror++;
+  }
+  const mv = g.mv[pm];
+  mv.ex++;
+  if (res.clash) g.clash++;
+  else if (res.winner === 'r') { g.rWin++; mv.rWin++; if (shown) g.rWinShown++; }
+  else { g.pWin++; mv.pWin++; }
+  g.legalSum += nLegal;
+}
+function endFight(g, f) {
+  if (f.won) g.w++; else if (f.over === 'r') g.deaths++;
+  g.turns += f.turns; g.hpOut += f.hpOut;
+  g.hist[Math.min(HIST - 1, f.turns)]++;
+  g.dec += f.dec; g.decHist[Math.min(HIST - 1, f.dec)]++;
+  if (f.dec <= 2) g.le2dec++;
+  if (f.turns <= 2) g.le2t++;
+  if (f.big) g.big7++;
+  if (f.rupt) g.ruptDuels++;
+  g.ruptures += f.rupt;
+  if (f.locked) g.lockDuels++;
+  g.bored += f.bored; if (f.bored) g.boredPhases++;
+  if (f.maxRun > g.maxClashRun) g.maxClashRun = f.maxRun;
+}
+
 // ------------------------------------------------------------------ one chain of sequential runs
-// job = { bot, seed, runs, unlocks:'natural'|'all', pre:{p:[],r:[]}|null, force:[ids]|null, set:[...], trace:bool }
+// job = { bot, tag, seed, runs, unlocks:'natural'|'all', pre:{p:[],r:[]}|null, force:[ids]|null, forceR:[ids]|null, trace:bool,
+//         idx: job index (results merge in this order), boss: face id (default: --set boss), stake (default: --set stake),
+//         noTiming: never reads the clock }
+// In-process only (the CLI never sets these):
+//   meta       starting meta (deep-copied; seenTutorial is still forced true)
+//   brain      a serialized brain for R.Brain.create (default null = a fresh brain)
+//   commitLog  true: result.commitLog = commitRecord(q) for every seal, in order, and result.commits = the same as
+//              commitInput strings
+//   script     { runs: [...] } replays a person's runs (makeScripted); with a script the face comes from meta unless
+//              runs[i].boss is given, and RUN.finish uses runs[i].finishNow
+//   record     true: result.script = what this chain did, in the script format (replayable; moves and drafts only)
+//   tap(info)  called every turn after the bot's view is built and before it picks; it must not mutate anything
 function runChain(job) {
-  const t0 = Date.now();
+  const timing = !job.noTiming;
+  const t0 = timing ? Date.now() : 0;
+  const face = job.boss || BOSS;
+  const stake = typeof job.stake === 'number' ? job.stake : STAKE;
+  if (FACE_IDS.indexOf(face) < 0) throw new Error('unknown boss ' + face);
   const st = newStats();
   st.chains = 1;
-  const brain = R.Brain.create(null);
-  const meta = RUN.defaultMeta();
+  const brain = R.Brain.create(job.brain === undefined ? null : job.brain);
+  const meta = job.meta ? JSON.parse(JSON.stringify(job.meta)) : RUN.defaultMeta();
   meta.seenTutorial = true;                           // the scripted first duel is not simulated
   if (job.unlocks === 'all') RUN.UNLOCKS.forEach(function (u) { meta.unlocked[u.id] = true; });
   const botRng = R.RNG.create(hash32(job.seed, job.bot, 'bot'));
-  const bot = makeBot(job.bot, botRng);
+  const script = job.script || null;
+  const bot = script ? makeScripted(script) : makeBot(job.bot, botRng);
   const trace = job.trace ? [] : null;
+  const clog = job.commitLog === true ? [] : null, commits = clog ? [] : null;
+  const recRuns = job.record === true ? [] : null;
+  let recRun = null;
   const view = { info: { stamp: null, ledger: null, tallyH: null }, rng: botRng };
   let cur = null;                                     // per-turn harness state reachable from view.use
   view.use = function (id) {
@@ -440,9 +679,10 @@ function runChain(job) {
   };
 
   function fight(run, rng, k) {
-    const duel = run.duel, seg = st.seg[k];
-    let turns = 0, big = false, brkLeft = 0, clashRun = 0, rupt = 0, locked = false;
+    const duel = run.duel, seg = st.seg[k], ph = duel.n === 7 ? st.ph[duel.phase] : null;
+    let turns = 0, big = false, brkLeft = 0, clashRun = 0, rupt = 0, locked = false, dec = 0, boredN = 0, maxRun = 0;
     seg.n++; seg.hpIn += duel.p.hp;
+    if (ph) { ph.n++; ph.hpIn += duel.p.hp; }
     bot.duelStart();
     for (;;) {
       C.beginTurn(duel);
@@ -457,7 +697,12 @@ function runChain(job) {
       const cq = { ctx: ctx, payoff: payoff, legalR: legalR, legalP: legalP, exploit: cfg.exploit, honestyBase: cfg.honesty, rng: rng };
       if (noStance) cq.noTell = true;                                   // as scenes/duel.js turn()
       if (duel.mimic) cq.mimic = C.ctx(duel, 'r');
+      if (clog) { const rec = commitRecord(cq); clog.push(rec); commits.push(JSON.stringify(canon(rec))); }
       const sealed = brain.commit(cq);
+      if (!has(legalR, sealed.move)) {                                  // the harness never coerces a seal silently
+        st.coerced++;
+        throw new Error('the Rival sealed an illegal move ' + sealed.move + ' (legal ' + legalR.join(',') + ') in duel ' + duel.n + ' phase ' + duel.phase + ' turn ' + duel.turn);
+      }
 
       // ---- the player's window: public information only
       const inf = C.info(duel);
@@ -469,24 +714,35 @@ function runChain(job) {
       view.info.stamp = inf.coinTurn1 && !noStance ? sealed.honest : null;
       view.info.ledger = inf.ledger ? { top: sealed.top, dots: sealed.confidence > 0.66 ? 3 : sealed.confidence > 0.33 ? 2 : 1 } : null;
       view.info.tallyH = (!inf.ledger && inf.tally) ? Math.round(brain.honesty(cfg.honesty) * 10) * 10 : null;
+      if (job.tap) {
+        job.tap({ n: duel.n, phase: duel.phase, turn: duel.turn, called: called, guardBroken: duel.p.status.guardBroken, tension: duel.tension, noStance: noStance, inf: inf,
+                  honestyPct: Math.round(brain.honesty(cfg.honesty) * 10) * 10, top: sealed.top, confidence: sealed.confidence, honest: sealed.honest,
+                  info: JSON.parse(JSON.stringify(view.info)) });
+      }
       cur = { duel: duel, sealed: sealed, legalP: legalP, rng: rng, coin: false, forced: null };
       const coinAvail = duel.p.charges.coin_of_fools > 0;
+      view.boredHit = 0;
       let pm = bot.pick(view);
       if (cur.forced) pm = cur.forced;
       if (!has(legalP, pm)) throw new Error(job.bot + ' picked an illegal move ' + pm);
+      if (recRun) recRun.moves.push(cur.coin ? 'coin' : pm);
 
       duel.intel.honest = sealed.honest; duel.intel.pred = sealed.pred; duel.intel.coin = cur.coin;
       const res = C.resolve(duel, pm, sealed.move);
+      if (res.rm !== sealed.move || (res.events || []).some(function (e) { return e && e.t === 'note' && e.side === 'r'; })) {
+        st.coerced++;
+        throw new Error('the Rival sealed move ' + sealed.move + ' was replaced at resolve by ' + res.rm + ' in duel ' + duel.n + ' phase ' + duel.phase + ' turn ' + res.turn);
+      }
       brain.observe(ctx, noStance ? null : sealed.tell, pm, sealed.move);
       RUN.record(run, meta, res, sealed);
       bot.after(view, pm, sealed.move, res);
 
       // ---- statistics (the harness may look at everything)
       turns++;
-      seg.tells++;
-      if (sealed.honest) seg.honest++; else if (sealed.move === BEATS[sealed.tell]) seg.trap++;
-      if (pm === LOSES_TO[sealed.tell]) seg.counter++; else if (pm === sealed.tell) seg.mirror++;
-      if (res.clash) seg.clash++; else if (res.winner === 'r') seg.rWin++; else seg.pWin++;
+      countTurn(seg, !noStance, sealed, pm, res, legalP.length);
+      if (ph) countTurn(ph, !noStance, sealed, pm, res, legalP.length);
+      if (!res.clash) dec++;
+      if (view.boredHit) boredN++;
       st.legalSum += legalP.length; if (legalP.length === 2) st.legal2++;
       if (res.winner === 'r') {
         st.hitHist[Math.min(9, res.dmgP)]++;
@@ -498,6 +754,7 @@ function runChain(job) {
       if (res.brokenR > 0) { st.brkN++; brkLeft = res.brokenR; }
       if (cur.coin) { st.coinN++; st.coinNet += net; } else if (coinAvail) { st.nocoinN++; st.nocoinNet += net; }
       clashRun = res.clash ? clashRun + 1 : 0;
+      if (clashRun > maxRun) maxRun = clashRun;
       if (res.rupture) { st.ruptureP += res.dmgP; st.ruptures++; rupt++; }
       if (res.clash && res.healP > 0) st.mirrorHeal += res.healP;
       if (trace) trace.push('  d' + duel.n + (duel.phase === 2 ? 'b' : '') + ' t' + res.turn + ' tell ' + sealed.tell + ' R ' + sealed.move + ' P ' + pm +
@@ -508,10 +765,11 @@ function runChain(job) {
       if (duel.over) break;
     }
     const won = duel.over === 'p';
-    if (won) seg.w++;
-    seg.turns += turns; seg.hpOut += Math.max(0, duel.p.hp);
+    const f = { won: won, over: duel.over, turns: turns, hpOut: Math.max(0, duel.p.hp), dec: dec, big: big, rupt: rupt, locked: locked, bored: boredN, maxRun: maxRun };
+    endFight(seg, f);
+    if (ph) endFight(ph, f);
     st.lenHist[Math.min(63, turns)]++;
-    st.duels++; if (big) { st.big7++; seg.big7++; }
+    st.duels++; if (big) st.big7++;
     st.healHist[Math.min(15, duel.tally.healP)]++;
     if (rupt) { st.ruptDuels++; if (!won) st.ruptLost++; }
     if (locked) st.lockDuels++;
@@ -519,15 +777,25 @@ function runChain(job) {
     return duel.over;
   }
 
-  for (let i = 0; i < job.runs; i++) {
-    const seed = hash32(job.seed, job.bot, i);
-    const now = 1.7e12 + i * 600000;
+  const nRuns = script && typeof job.runs !== 'number' ? script.runs.length : job.runs;
+  for (let i = 0; i < nRuns; i++) {
+    const sr = script ? script.runs[i] : null;
+    if (script && !sr) throw new Error('script has no run ' + (i + 1));
+    const seed = sr ? sr.seed : hash32(job.seed, job.bot, i);
+    const now = sr ? sr.now : 1.7e12 + i * 600000;
+    const finishNow = sr && typeof sr.finishNow === 'number' ? sr.finishNow : now + 300000;
+    const runStake = sr ? (typeof sr.stake === 'number' ? sr.stake : 0) : stake;
+    const runFace = sr ? (sr.boss || null) : face;
     const owned = RUN.relics(meta).map(function (b) { return b.id; });
     const relicId = bot.relic(owned);
-    const run = RUN.create(meta, { seed: seed, relicId: relicId, now: now, stake: STAKE, anyStake: true, dossier: STAKE >= 4 ? brain.dossier() : null, boss: BOSS, anyBoss: true });
+    const co = { seed: seed, relicId: relicId, now: now, stake: runStake, anyStake: true, dossier: runStake >= 4 ? brain.dossier() : null };
+    if (runFace) { co.boss = runFace; co.anyBoss = true; }
+    const run = RUN.create(meta, co);
     brain.beginRun({ days: run.daysAway || 0 });
     const rng = R.RNG.create((seed ^ 0x5bd1e995) >>> 0);
+    if (sr && typeof sr.rngState === 'number') rng.setState(sr.rngState);
     bot.runStart();
+    if (recRuns) { recRun = { seed: seed, now: now, finishNow: finishNow, stake: runStake, boss: run.boss, relicId: relicId, moves: [], drafts: [] }; recRuns.push(recRun); }
     if (job.pre) {
       (job.pre.p || []).forEach(function (id) { if (!has(run.pBoons, id)) run.pBoons.push(id); });
       (job.pre.r || []).forEach(function (id) { if (!has(run.rBoons, id)) run.rBoons.push(id); });
@@ -543,7 +811,7 @@ function runChain(job) {
         RUN.endDuel(run, meta, 'p', null);            // closes the phase (the scene's transform())
         RUN.nextPhase(run);
         reached = 8;
-        winner = fight(run, rng, 8);                  // every later phase is counted in the "P2" column
+        winner = fight(run, rng, 8);                  // every later phase is counted in the "P2+" column (and in ph[phase])
       }
       RUN.endDuel(run, meta, winner, brain.dossier());
       if (run.stage !== 'bonfire') break;
@@ -564,11 +832,12 @@ function runChain(job) {
                          moves: run.stats.moves, hp: run.pHp, maxHp: run.pMaxHp });
       }
       if (!RUN.pick(run, id, meta)) throw new Error('draft refused: ' + id);
+      if (recRun) recRun.drafts.push(id);
       picks.push([bf, id]);
       if (trace) trace.push(' bonfire ' + bf + ': healed ' + off.healed + ' -> hp ' + run.pHp + ', rival takes ' + off.rivalPick + ', player takes ' + id);
     }
     run.stats.score = brain.runScore();
-    const fin = RUN.finish(run, meta, now + 300000);
+    const fin = RUN.finish(run, meta, finishNow);
     (fin.unlocks || []).forEach(function (u) { if (st.unlockRun[u.id] === undefined) st.unlockRun[u.id] = i + 1; });
 
     const won = run.stage === 'won', bk = bucketOf(i + 1), w = won ? 1 : 0;
@@ -589,8 +858,11 @@ function runChain(job) {
   }
   st.lifeScore = brain.dossier().predictability;
   st.trust = brain.trust();
-  st.ms = Date.now() - t0;
-  return { bot: job.bot, tag: job.tag || job.bot, stats: st, trace: trace };
+  if (timing) st.ms = Date.now() - t0;
+  const out = { bot: job.bot, tag: job.tag || job.bot, idx: job.idx, seed: job.seed, boss: face, stake: stake, stats: st, trace: trace };
+  if (clog) { out.commitLog = clog; out.commits = commits; }
+  if (recRuns) out.script = { runs: recRuns };
+  return out;
 }
 
 // ------------------------------------------------------------------ worker entry
@@ -598,42 +870,69 @@ if (!WT.isMainThread) {
   applySet(WT.workerData.set);
   WT.parentPort.on('message', function (job) {
     let out;
-    try { out = runChain(job); } catch (e) { out = { error: String(e && e.stack || e), tag: job.tag || job.bot }; }
+    try { out = runChain(job); } catch (e) { out = { error: String(e && e.stack || e), tag: job.tag || job.bot, idx: job.idx }; }
     WT.parentPort.postMessage(out);
   });
   return;
 }
 
 // ------------------------------------------------------------------ main: CLI
+// parseArgs(argv) -> normalised options; throws an Error with .usage = true on a bad command line. Never exits.
 function parseArgs(argv) {
   const a = { runs: 400, seeds: 6, seed: 1, bots: BOT_NAMES.slice(), quick: false, jobs: Math.max(1, Math.min(os.cpus().length - 1, 16)),
-              unlocks: 'natural', combos: true, set: [], label: null, trace: false, boons: true };
+              unlocks: 'natural', combos: true, set: [], label: null, trace: false, boons: true, json: false, timing: true, help: false };
+  let combosFlag = null;
+  function val(i, k) { if (i >= argv.length) throw usageError(k + ' needs a value'); return argv[i]; }
+  function int(i, k, min) {
+    const s = val(i, k);
+    if (!/^[-+]?\d+$/.test(s)) throw usageError(k + ' needs an integer, got ' + JSON.stringify(s));
+    const x = parseInt(s, 10);
+    if (min !== undefined && x < min) throw usageError(k + ' must be >= ' + min + ', got ' + x);
+    return x;
+  }
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
-    if (k === '--runs') a.runs = parseInt(argv[++i], 10);
-    else if (k === '--seeds') a.seeds = parseInt(argv[++i], 10);
-    else if (k === '--seed') a.seed = parseInt(argv[++i], 10);
-    else if (k === '--bot' || k === '--bots') a.bots = argv[++i] === 'all' ? BOT_NAMES.slice() : argv[i].split(',');
+    if (k === '--runs') a.runs = int(++i, k, 1);
+    else if (k === '--seeds') a.seeds = int(++i, k, 1);
+    else if (k === '--seed') a.seed = int(++i, k);
+    else if (k === '--bot' || k === '--bots') { const v = val(++i, k); a.bots = v === 'all' ? BOT_NAMES.slice() : v.split(','); }
     else if (k === '--quick') a.quick = true;
-    else if (k === '--jobs') a.jobs = parseInt(argv[++i], 10);
-    else if (k === '--unlocks') a.unlocks = argv[++i];
-    else if (k === '--no-combos') a.combos = false;
+    else if (k === '--jobs') a.jobs = int(++i, k, 1);
+    else if (k === '--unlocks') { a.unlocks = val(++i, k); if (a.unlocks !== 'natural' && a.unlocks !== 'all') throw usageError('--unlocks takes natural or all, got ' + JSON.stringify(a.unlocks)); }
+    else if (k === '--no-combos') combosFlag = false;
+    else if (k === '--combos') combosFlag = true;
     else if (k === '--no-boons') a.boons = false;
     else if (k === '--rupture-fix') { /* accepted for old command lines; the rule is fixed in combat.js now */ }
-    else if (k === '--set') a.set.push(argv[++i]);
-    else if (k === '--label') a.label = argv[++i];
+    else if (k === '--set') a.set.push(val(++i, k));
+    else if (k === '--label') a.label = val(++i, k);
     else if (k === '--trace') a.trace = true;
-    else if (k === '--help' || k === '-h') { console.log(fs.readFileSync(__filename, 'utf8').split('\n').slice(0, 20).join('\n')); process.exit(0); }
-    else throw new Error('unknown argument ' + k);
+    else if (k === '--no-timing') a.timing = false;
+    else if (k === '--json') a.json = true;
+    else if (k === '--help' || k === '-h') a.help = true;
+    else throw usageError('unknown argument ' + k);
   }
   if (a.quick) { a.runs = Math.min(a.runs, 400); a.seeds = Math.min(a.seeds, 2); a.combos = false; }
-  a.bots.forEach(function (b) { if (BOT_NAMES.indexOf(b) < 0) throw new Error('unknown bot ' + b + ' (have: ' + BOT_NAMES.join(', ') + ')'); });
+  a.bots.forEach(function (b) { if (BOT_NAMES.indexOf(b) < 0) throw usageError('unknown bot ' + b + ' (have: ' + BOT_NAMES.join(', ') + ')'); });
+  const items = parseSet(a.set);                      // strict: the whole list is checked before anything runs
+  let boss = BOSS, stake = STAKE;
+  items.forEach(function (it) { if (it.kind === 'boss') boss = it.value; if (it.kind === 'top' && it.key === 'stake') stake = it.value; });
+  a.boss = boss;
+  a.faces = boss === 'all' ? FACE_IDS.slice() : [boss];
+  a.stake = stake;
+  if (boss === 'all' && combosFlag === null) a.combos = false;                     // boss=all: combos only on request
+  if (combosFlag !== null) a.combos = combosFlag;
+  if (a.json) a.timing = false;                                                     // --json implies --no-timing
+  if (a.json && a.trace) throw usageError('--json cannot be combined with --trace');
+  if (a.json && a.label !== null) throw usageError('--json cannot be combined with --label');
+  if (a.trace && boss === 'all') throw usageError('--trace needs one face (--set boss=<id>, not all)');
+  if (a.label !== null && boss === 'all') throw usageError('--label needs one face (--set boss=<id>, not all)');
   return a;
 }
 
+// Runs every job on a pool of workers; results come back in job order (results[job.idx]), never completion order.
 function runJobs(jobs, nWorkers, set) {
   return new Promise(function (resolve, reject) {
-    const results = [];
+    const results = new Array(jobs.length);
     let next = 0, live = 0, failed = false;
     if (!jobs.length) return resolve(results);
     function spawn() {
@@ -641,11 +940,13 @@ function runJobs(jobs, nWorkers, set) {
       live++;
       function feed() {
         if (next >= jobs.length || failed) { w.terminate(); live--; if (!live && !failed) resolve(results); return; }
-        w.postMessage(jobs[next++]);
+        const job = jobs[next];
+        job.idx = next++;
+        w.postMessage(job);
       }
       w.on('message', function (m) {
         if (m.error) { failed = true; reject(new Error(m.tag + ': ' + m.error)); return; }
-        results.push(m); feed();
+        results[m.idx] = m; feed();
       });
       w.on('error', function (e) { failed = true; reject(e); });
       feed();
@@ -686,10 +987,10 @@ function uplift(tbl, s) {
   return out;
 }
 
-function headline(byBot, bots) {
+function headline(byBot, bots, timing) {
   const lines = [];
   lines.push(pad('bot', 10) + lpad('runs', 7) + lpad('win%', 7) + BUCKET_NAMES.map(function (b) { return lpad(b, 8); }).join('') + lpad('51+', 8) +
-             lpad('reach', 7) + lpad('life', 6) + lpad('trust', 7) + lpad('7+hit%', 8) + lpad('turns/d', 8) + lpad('rupt%', 7) + lpad('lock%', 7) + lpad('runs/s', 8));
+             lpad('reach', 7) + lpad('life', 6) + lpad('trust', 7) + lpad('7+hit%', 8) + lpad('turns/d', 8) + lpad('rupt%', 7) + lpad('lock%', 7) + (timing ? lpad('runs/s', 8) : ''));
   bots.forEach(function (b) {
     const s = byBot[b];
     if (!s) return;
@@ -697,35 +998,40 @@ function headline(byBot, bots) {
     lines.push(pad(b, 10) + lpad(s.runs, 7) + lpad(pct(s.wins, s.runs), 7) +
       [0, 1, 2, 3].map(function (i) { return lpad(pct(s.bWins[i], s.bRuns[i]), 8); }).join('') + lpad(pct(sd.w, sd.n), 8) +
       lpad((s.reach / s.runs).toFixed(2), 7) + lpad((s.lifeScore / s.chains).toFixed(0), 6) + lpad((s.trust / s.chains).toFixed(2), 7) +
-      lpad(pct(s.big7, s.duels, 2), 8) + lpad((s.turns / s.duels).toFixed(2), 8) + lpad(pct(s.ruptDuels, s.duels, 2), 7) + lpad(pct(s.lockDuels, s.duels, 2), 7) + lpad((1000 * s.runs / s.ms).toFixed(0), 8));
+      lpad(pct(s.big7, s.duels, 2), 8) + lpad((s.turns / s.duels).toFixed(2), 8) + lpad(pct(s.ruptDuels, s.duels, 2), 7) + lpad(pct(s.lockDuels, s.duels, 2), 7) + (timing ? lpad((1000 * s.runs / s.ms).toFixed(0), 8) : ''));
   });
   return lines;
 }
+// f(seg) returns a number, or null when its denominator is 0 (printed '-', as an empty column is)
 function segTable(s, f, d) {
   let out = '';
-  for (let k = 1; k <= 8; k++) out += lpad(s.seg[k].n ? f(s.seg[k]).toFixed(d === undefined ? 1 : d) : '-', 7);
+  for (let k = 1; k <= 8; k++) {
+    const x = s.seg[k].n ? f(s.seg[k]) : null;
+    out += lpad(x === null ? '-' : x.toFixed(d === undefined ? 1 : d), 7);
+  }
   return out;
 }
 function perDuel(byBot, bots) {
   const lines = [];
-  const head = '            ' + [1, 2, 3, 4, 5, 6, 7, 'P2'].map(function (x) { return lpad('d' + x, 7); }).join('');
+  const head = '            ' + [1, 2, 3, 4, 5, 6, 7, 'P2+'].map(function (x) { return lpad('d' + x, 7); }).join('');
   const rows = [
     ['duel win %', function (g) { return 100 * g.w / g.n; }],
     ['fights', function (g) { return g.n; }, 0],
     ['turns', function (g) { return g.turns / g.n; }, 2],
     ['HP in', function (g) { return g.hpIn / g.n; }, 2],
-    ['honest %', function (g) { return 100 * g.honest / g.tells; }],
-    ['trap %', function (g) { return 100 * g.trap / g.tells; }],
-    ['R exch win%', function (g) { return 100 * g.rWin / g.tells; }],
-    ['P exch win%', function (g) { return 100 * g.pWin / g.tells; }],
-    ['clash %', function (g) { return 100 * g.clash / g.tells; }],
-    ['P counters%', function (g) { return 100 * g.counter / g.tells; }],
+    // stance rows: share of the turns on which a stance was shown (tells); exchange rows: share of all turns
+    ['honest %', function (g) { return g.tells ? 100 * g.honest / g.tells : null; }],
+    ['trap %', function (g) { return g.tells ? 100 * g.trap / g.tells : null; }],
+    ['R exch win%', function (g) { return 100 * g.rWin / g.turns; }],
+    ['P exch win%', function (g) { return 100 * g.pWin / g.turns; }],
+    ['clash %', function (g) { return 100 * g.clash / g.turns; }],
+    ['P counters%', function (g) { return g.tells ? 100 * g.counter / g.tells : null; }],
     ['7+ hit duel%', function (g) { return 100 * g.big7 / g.n; }, 2]
   ];
   bots.forEach(function (b) {
     const s = byBot[b];
     if (!s) return;
-    lines.push('--- ' + b + '   death duel share: ' + [1, 2, 3, 4, 5, 6, 7, 8].map(function (k) { return 'd' + (k === 8 ? 'P2' : k) + ' ' + pct(s.deathAt[k], s.runs, 0); }).join('  ') + '  won ' + pct(s.deathAt[9], s.runs, 0) +
+    lines.push('--- ' + b + '   death duel share: ' + [1, 2, 3, 4, 5, 6, 7, 8].map(function (k) { return 'd' + (k === 8 ? 'P2+' : k) + ' ' + pct(s.deathAt[k], s.runs, 0); }).join('  ') + '  won ' + pct(s.deathAt[9], s.runs, 0) +
       '   | mean score by bucket: ' + [0, 1, 2, 3].map(function (i) { return s.bRuns[i] ? (s.bScore[i] / s.bRuns[i]).toFixed(0) : '-'; }).join(' / '));
     lines.push(head);
     rows.forEach(function (r) { lines.push('  ' + pad(r[0], 12) + segTable(s, r[1], r[2])); });
@@ -842,59 +1148,234 @@ function comboReport(by) {
   return L;
 }
 
+// ------------------------------------------------------------------ final duel by phase, raw W/A, --json
+function faceDef(face) { return RUN.BOSSES[FACE_IDS.indexOf(face)]; }
+function facePhases(face) { return faceDef(face).phases.length; }
+// The resolved numbers of one final-duel phase at one stake (no run needed: cfg reads only boss, stake and phase).
+function phaseCfg(face, stake, k) { return RUN.cfg({ boss: face, stake: stake, duelN: 7, phase: k }, { n: 7, phase: k }); }
+// Per-chain rates in percent over chains with at least `min` trials: { sd: sample SD or null, m: chains counted }.
+// The SD needs SAMPLE.sdChains counted chains.
+function chainSpread(pairs, min) {
+  const r = pairs.filter(function (p) { return p[1] >= min; }).map(function (p) { return 100 * p[0] / p[1]; });
+  if (r.length < SAMPLE.sdChains) return { sd: null, m: r.length };
+  let mean = 0, v = 0;
+  r.forEach(function (x) { mean += x; });
+  mean /= r.length;
+  r.forEach(function (x) { v += (x - mean) * (x - mean); });
+  return { sd: Math.sqrt(v / (r.length - 1)), m: r.length };
+}
+function chainEntry(r, face) {
+  const s = r.stats, ph = {};
+  for (let k = 1; k <= facePhases(face); k++) ph[String(k)] = { n: s.ph[k].n, w: s.ph[k].w };
+  return { seed: r.seed, runs: s.runs, wins: s.wins, final: { a: s.seg[7].n, w: s.deathAt[9] }, phase: ph };
+}
+// '  mixer     final win | arrival: W/A = p%   chains w1/a1 w2/a2 ...   chain SD x   SE y'
+// W = runs won (deathAt[9]); A = runs that reached duel 7 (seg[7].n = deathAt[7] + deathAt[8] + deathAt[9]).
+function waLine(name, s, chains) {
+  const W = s.deathAt[9], A = s.seg[7].n, p = A ? W / A : 0;
+  const pairs = chains.map(function (c) { return [c.final.w, c.final.a]; });
+  const sp = chainSpread(pairs, SAMPLE.chainArrivals);
+  return '  ' + pad(name, 9) + ' final win | arrival: ' + W + '/' + A + ' = ' + (A ? (100 * p).toFixed(1) + '%' : 'n/a') +
+    '   chains ' + pairs.map(function (x) { return x[0] + '/' + x[1]; }).join(' ') +
+    '   chain SD ' + (sp.sd === null ? 'insufficient sample (' + sp.m + ' of ' + pairs.length + ' chains with ' + SAMPLE.chainArrivals + '+ arrivals; needs ' + SAMPLE.sdChains + ')' : sp.sd.toFixed(2)) +
+    '   SE ' + (A >= SAMPLE.pooledArrivals ? (100 * Math.sqrt(p * (1 - p) / A)).toFixed(2) : 'insufficient sample (' + A + ' arrivals; needs ' + SAMPLE.pooledArrivals + ')');
+}
+function phaseTable(byBot, bots, face, stake, chainsBy) {
+  const L = [], n = facePhases(face), def = faceDef(face);
+  L.push('  turns = p10/p50/p90 (mean) per phase; <=2dec = phases settled within 2 decisive (non-clash) exchanges; <=2t = within 2 turns;');
+  L.push('  clash% = clashes / turns; 7+%, rupt%, lock% = share of phases with a 7+ hit on the player, a Rupture, ' + BORED_AFTER + '+ clashes in a row at 3 pips;');
+  L.push('  bored = escapes (turns / phases); truth% = honest share of the turns on which a stance was shown (shown turns); +-SE over chains');
+  L.push('  (chains with ' + SAMPLE.chainArrivals + '+ arrivals, needs ' + SAMPLE.sdChains + ').');
+  const alarms = [];
+  bots.forEach(function (b) {
+    const s = byBot[b];
+    if (!s) return;
+    L.push('--- ' + b);
+    L.push('  ' + pad('phase', 20) + lpad('arrive', 7) + lpad('win%', 7) + lpad('+-SE', 7) + lpad('turns', 20) + lpad('<=2dec', 8) + lpad('<=2t', 7) +
+           lpad('clash%', 8) + lpad('7+%', 7) + lpad('rupt%', 7) + lpad('lock%', 7) + lpad('bored', 8) + '   truth% (shown)');
+    for (let k = 1; k <= n; k++) {
+      const g = s.ph[k], label = k + ' ' + (def.phases[k - 1].name || '');
+      if (!g.n) { L.push('  ' + pad(label, 20) + lpad(0, 7) + lpad('-', 7)); continue; }
+      const sp = chainSpread((chainsBy[b] || []).map(function (c) { return [c.phase[String(k)].w, c.phase[String(k)].n]; }), SAMPLE.chainArrivals);
+      const turns = quantile(g.hist, 0.1) + '/' + quantile(g.hist, 0.5) + '/' + quantile(g.hist, 0.9) + ' (' + (g.turns / g.n).toFixed(2) + ')';
+      const truth = g.tells ? pct(g.honest, g.tells) + ' (' + g.tells + ')' : 'n/a (0)';
+      L.push('  ' + pad(label, 20) + lpad(g.n, 7) + lpad(pct(g.w, g.n), 7) + lpad(sp.sd === null ? 'n/a' : (sp.sd / Math.sqrt(sp.m)).toFixed(1), 7) + lpad(turns, 20) +
+             lpad(pct(g.le2dec, g.n), 8) + lpad(pct(g.le2t, g.n), 7) + lpad(pct(g.clash, g.turns), 8) + lpad(pct(g.big7, g.n), 7) + lpad(pct(g.ruptDuels, g.n), 7) + lpad(pct(g.lockDuels, g.n), 7) +
+             lpad(g.bored + '/' + g.boredPhases, 8) + '   ' + truth);
+      const ex = phaseCfg(face, stake, k).exploit, h = g.tells ? g.honest / g.tells : null;
+      if (g.tells >= 200 && ex >= 0.75 && (h > 0.95 || h < 0.05)) alarms.push('  ALARM ' + b + ' ' + face + ' phase ' + k + ': the stance told the truth on ' + pct(g.honest, g.tells) + '% of ' + g.tells + ' shown turns (exploit ' + ex + ')');
+    }
+  });
+  return L.concat(alarms);
+}
+
+function trimHist(h) { let e = h.length; while (e > 0 && !h[e - 1]) e--; return h.slice(0, e); }
+function ratio(a, b) { return b > 0 ? Math.round(1e6 * a / b) / 1e6 : null; }
+// SEG / PH in --json: raw integer counters, histograms trimmed after their last non-zero bin, q = turn quantiles
+// (quantile(): the first bin whose cumulative count reaches q * total) and rate = derived shares (null when the
+// denominator is 0: a phase that never shows a stance has tells 0 and truth/trap/counter/mirror null).
+function segJson(g) {
+  const o = {};
+  Object.keys(g).forEach(function (k) { o[k] = g[k]; });
+  o.hist = trimHist(g.hist); o.decHist = trimHist(g.decHist);
+  o.q = { p10: quantile(g.hist, 0.1), p50: quantile(g.hist, 0.5), p90: quantile(g.hist, 0.9) };
+  o.rate = {
+    win: ratio(g.w, g.n), turns: ratio(g.turns, g.n), le2dec: ratio(g.le2dec, g.n), le2t: ratio(g.le2t, g.n),
+    clash: ratio(g.clash, g.turns), rWin: ratio(g.rWin, g.turns), pWin: ratio(g.pWin, g.turns), legalMean: ratio(g.legalSum, g.turns),
+    big7: ratio(g.big7, g.n), rupt: ratio(g.ruptDuels, g.n), lock: ratio(g.lockDuels, g.n),
+    truth: ratio(g.honest, g.tells), trap: ratio(g.trap, g.tells), counter: ratio(g.counter, g.tells), mirror: ratio(g.mirror, g.tells)
+  };
+  return o;
+}
+function botJson(s, face, chains, withBoons) {
+  const o = {};
+  Object.keys(s).forEach(function (k) { if (k !== 'ms' && k !== 'seg' && k !== 'ph') o[k] = s[k]; });
+  o.lenHist = trimHist(s.lenHist); o.winTurnsHist = trimHist(s.winTurnsHist);
+  o.duel = {};
+  for (let k = 1; k <= 7; k++) o.duel[String(k)] = segJson(s.seg[k]);
+  o.duel['P2+'] = segJson(s.seg[8]);
+  o.phase = {};
+  for (let k = 1; k <= facePhases(face); k++) o.phase[String(k)] = segJson(s.ph[k]);
+  o.final = { a: s.seg[7].n, w: s.deathAt[9] };
+  o.perChain = chains;
+  o.rate = { win: ratio(s.wins, s.runs), final: ratio(s.deathAt[9], s.seg[7].n), legalMean: ratio(s.legalSum, s.turns) };
+  if (!withBoons) ['pb', 'rb', 'bonN', 'bonW', 'relic'].forEach(function (k) { delete o[k]; });
+  return o;
+}
+const RULE_FIELDS = ['hp', 'exploit', 'honesty', 'heal', 'floor', 'calls', 'stance', 'mimic', 'innate', 'fortify', 'copyBoons'];
+function constantsJson(faces) {
+  const D = RUN.DUELS, N = [1, 2, 3, 4, 5, 6, 7], fc = {};
+  faces.forEach(function (id) {
+    fc[id] = faceDef(id).phases.map(function (p) { const o = {}; RULE_FIELDS.forEach(function (f) { if (own(p, f)) o[f] = plain(p[f]); }); return o; });
+  });
+  return {
+    rivalHp: N.map(function (n) { return D[n].rivalHp; }), exploit: N.map(function (n) { return D[n].exploit; }), honesty: N.map(function (n) { return D[n].honesty; }),
+    phase2: { rivalHp: D.phase2.rivalHp, exploit: D.phase2.exploit, honesty: D.phase2.honesty },
+    playerMaxHp: RUN.PLAYER_MAX_HP, heal: RUN.HEAL, phase2Heal: RUN.PHASE2_HEAL, hitCap: C.HIT_CAP,
+    vigil: plain(RUN.VIGIL_TUNE), faces: fc
+  };
+}
+
 // ------------------------------------------------------------------ main
-(async function main() {
-  const a = parseArgs(process.argv);
-  applySet(a.set);                                    // so that the printed constants are the ones simulated
-  const t0 = Date.now();
+async function main() {
+  let a;
+  try { a = parseArgs(process.argv); } catch (e) {
+    if (e && e.usage) { console.error('sim: ' + e.message); process.exitCode = 1; return; }
+    throw e;
+  }
+  if (a.help) {
+    const head = fs.readFileSync(__filename, 'utf8').replace(/\r\n?/g, '\n').split('\n');
+    console.log(head.slice(0, head.indexOf("'use strict';")).join('\n'));
+    return;
+  }
+  const set = parseSet(a.set).filter(function (it) { return !(it.kind === 'boss' && it.value === 'all'); }).map(function (it) { return it.kv; });
+  applySet(set);                                      // so that the printed constants are the ones simulated
+  const t0 = a.timing ? Date.now() : 0;
+  const out = a.json ? function () {} : function (s) { console.log(s); };
+  const multi = a.faces.length > 1;
   const D = RUN.DUELS;
   const consts = 'rivalHp ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].rivalHp; }).join(',') + ' | p2 ' + D.phase2.rivalHp +
     ' | player max HP ' + RUN.PLAYER_MAX_HP + ' | heal ' + RUN.HEAL + ' | p2heal ' + RUN.PHASE2_HEAL + ' | exploit ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].exploit; }).join(',') + ' p2 ' + D.phase2.exploit +
     ' | honesty ' + [1, 2, 3, 4, 5, 6, 7].map(function (n) { return D[n].honesty; }).join(',') + ' p2 ' + D.phase2.honesty + ' | hit cap ' + C.HIT_CAP;
-  console.log('SHOW ME MY RIVAL balance sim   seed ' + a.seed + ', ' + a.seeds + ' chains x ' + a.runs + ' sequential runs per bot, unlocks ' + a.unlocks + ', ' + a.jobs + ' workers');
-  console.log('constants: ' + consts);
-  if (a.set.length) console.log('overrides: ' + a.set.join('  '));
+  out('SHOW ME MY RIVAL balance sim   seed ' + a.seed + ', ' + a.seeds + ' chains x ' + a.runs + ' sequential runs per bot, unlocks ' + a.unlocks + (a.timing ? ', ' + a.jobs + ' workers' : ''));
+  out('constants: ' + consts);
+  if (a.set.length) out('overrides: ' + a.set.join('  '));
+  if (multi) out('faces: ' + a.faces.join(', ') + ' (one job per face x bot x chain; run seeds are paired across faces)');
 
   if (a.trace) {
-    const out = runChain({ bot: a.bots[0], seed: a.seed, runs: Math.min(a.runs, 3), unlocks: a.unlocks, trace: true });
-    console.log(out.trace.join('\n'));
+    const tr = runChain({ bot: a.bots[0], seed: a.seed, runs: Math.min(a.runs, 3), unlocks: a.unlocks, trace: true, boss: a.faces[0], stake: a.stake, noTiming: !a.timing });
+    out(tr.trace.join('\n'));
     return;
   }
 
   const jobs = [];
-  a.bots.forEach(function (b) { for (let s = 0; s < a.seeds; s++) jobs.push({ bot: b, tag: b, seed: a.seed * 1000 + s, runs: a.runs, unlocks: a.unlocks }); });
+  a.faces.forEach(function (face) {
+    a.bots.forEach(function (b) {
+      for (let s = 0; s < a.seeds; s++) jobs.push({ bot: b, tag: b, seed: a.seed * 1000 + s, runs: a.runs, unlocks: a.unlocks, boss: face, stake: a.stake, noTiming: !a.timing });
+    });
+  });
   const cj = a.combos ? comboJobs(a, Math.min(a.runs, 300), Math.max(2, Math.min(a.seeds, 4))) : [];
-  const res = await runJobs(jobs.concat(cj), a.jobs, a.set);
-  const by = {};
-  res.forEach(function (r) { by[r.tag] = merge(by[r.tag] || newStats(), r.stats); });
+  cj.forEach(function (j) { j.boss = a.faces[0]; j.stake = a.stake; j.noTiming = !a.timing; j.combo = true; });
+  const all = jobs.concat(cj);
+  all.forEach(function (j, i) { j.idx = i; });
+  const res = await runJobs(all, a.jobs, set);
+  const by = {}, chains = {}, combo = {}, comboChains = {};
+  a.faces.forEach(function (f) { by[f] = {}; chains[f] = {}; });
+  res.forEach(function (r) {                          // job order, so every float sum and key order is reproducible
+    const j = all[r.idx];
+    if (j.combo) {
+      combo[r.tag] = merge(combo[r.tag] || newStats(), r.stats);
+      (comboChains[r.tag] = comboChains[r.tag] || []).push(chainEntry(r, j.boss));
+    } else {
+      by[j.boss][r.tag] = merge(by[j.boss][r.tag] || newStats(), r.stats);
+      (chains[j.boss][r.tag] = chains[j.boss][r.tag] || []).push(chainEntry(r, j.boss));
+    }
+  });
 
-  console.log('\n=== HEADLINE (run win rate %; buckets are the run ordinal inside a chain; 51+ = steady state) ===');
-  const hl = headline(by, a.bots);
-  console.log(hl.join('\n'));
-  console.log('  reach = mean duel reached (8 = phase 2); life = the Rival\'s lifetime predictability score 0..100; trust = its smoothed COUNTER share at the end;');
-  console.log('  rupt% = duels with at least one Rupture; lock% = duels with ' + BORED_AFTER + '+ clashes in a row at 3 pips (should be about 0).');
-  console.log('\n=== PER DUEL ===');
-  console.log(perDuel(by, a.bots).join('\n'));
-  if (a.boons) {
-    console.log('\n=== BOONS ===');
-    console.log(boonTables(by, a.bots.filter(function (b) { return b === 'mixer' || b === 'adaptive'; })).join('\n'));
-  }
+  let hl0 = null;
+  a.faces.forEach(function (face) {
+    const byF = by[face];
+    if (multi) out('\n##### FACE ' + face + ' (' + faceDef(face).name + '), stake ' + a.stake + ' #####');
+    out('\n=== HEADLINE (run win rate %; buckets are the run ordinal inside a chain; 51+ = steady state) ===');
+    const hl = headline(byF, a.bots, a.timing);
+    if (!hl0) hl0 = hl;
+    out(hl.join('\n'));
+    out('  reach = mean duel reached (8 = phase 2); life = the Rival\'s lifetime predictability score 0..100; trust = its smoothed COUNTER share at the end;');
+    out('  rupt% = duels with at least one Rupture; lock% = duels with ' + BORED_AFTER + '+ clashes in a row at 3 pips (should be about 0).');
+    out('  raw final-duel counts: W = runs won, A = runs that reached duel 7, chains in seed order:');
+    a.bots.forEach(function (b) { if (byF[b]) out(waLine(b, byF[b], chains[face][b])); });
+    out('\n=== PER DUEL ===');
+    out(perDuel(byF, a.bots).join('\n'));
+    out('\n=== FINAL DUEL BY PHASE (face ' + face + ', stake ' + a.stake + ') ===');
+    out(phaseTable(byF, a.bots, face, a.stake, chains[face]).join('\n'));
+    if (a.boons) {
+      out('\n=== BOONS ===');
+      out(boonTables(byF, a.bots.filter(function (b) { return b === 'mixer' || b === 'adaptive'; })).join('\n'));
+    }
+  });
   if (a.combos) {
-    console.log('\n=== DANGEROUS COMBOS (DESIGN §8) ===');
-    console.log(comboReport(by).join('\n'));
+    out('\n=== DANGEROUS COMBOS (DESIGN §8) ===');
+    out(comboReport(combo).join('\n'));
   }
-  const secs = (Date.now() - t0) / 1000;
-  let totalRuns = 0;
-  res.forEach(function (r) { totalRuns += r.stats.runs; });
-  console.log('\n' + totalRuns + ' runs in ' + secs.toFixed(1) + ' s (' + (totalRuns / secs).toFixed(0) + ' runs/s wall clock)');
+  if (a.timing) {
+    const secs = (Date.now() - t0) / 1000;
+    let totalRuns = 0;
+    res.forEach(function (r) { totalRuns += r.stats.runs; });
+    out('\n' + totalRuns + ' runs in ' + secs.toFixed(1) + ' s (' + (totalRuns / secs).toFixed(0) + ' runs/s wall clock)');
+  }
 
   if (a.label) {
-    const dir = path.join(__dirname, 'out');
+    const dir = path.join(__dirname, 'out'), b0 = by[a.faces[0]];
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* exists */ }
-    const entry = '\n## ' + a.label + '\n' + consts + (a.set.length ? '\noverrides: ' + a.set.join('  ') : '') + '\n' + a.seeds + ' x ' + a.runs + ' runs, unlocks ' + a.unlocks + '\n```\n' + hl.join('\n') + '\n' +
-      ['mixer', 'adaptive', 'uniform'].filter(function (b) { return by[b]; }).map(function (b) {
-        return pad(b, 9) + ' duel win% ' + segTable(by[b], function (g) { return 100 * g.w / g.n; }) + '\n' + pad('', 9) + ' honest %  ' + segTable(by[b], function (g) { return 100 * g.honest / g.tells; });
+    const entry = '\n## ' + a.label + '\n' + consts + (a.set.length ? '\noverrides: ' + a.set.join('  ') : '') + '\n' + a.seeds + ' x ' + a.runs + ' runs, unlocks ' + a.unlocks + '\n```\n' + hl0.join('\n') + '\n' +
+      ['mixer', 'adaptive', 'uniform'].filter(function (b) { return b0[b]; }).map(function (b) {
+        return pad(b, 9) + ' duel win% ' + segTable(b0[b], function (g) { return 100 * g.w / g.n; }) + '\n' + pad('', 9) + ' honest %  ' + segTable(b0[b], function (g) { return g.tells ? 100 * g.honest / g.tells : null; });
       }).join('\n') + '\n```\n';
     fs.appendFileSync(path.join(dir, 'balance_log.md'), entry);
   }
-})().catch(function (e) { console.error(e); process.exit(1); });
+
+  if (a.json) {
+    const doc = {
+      format: 'rival-sim/1',
+      args: { seed: a.seed, seeds: a.seeds, runs: a.runs, unlocks: a.unlocks, combos: a.combos, boons: a.boons, bots: a.bots.slice(), faces: a.faces.slice(), stake: a.stake, set: a.set.slice() },
+      constants: constantsJson(a.faces),
+      results: {}
+    };
+    a.faces.forEach(function (face) {
+      doc.results[face] = {};
+      a.bots.forEach(function (b) { if (by[face][b]) doc.results[face][b] = botJson(by[face][b], face, chains[face][b], a.boons); });
+    });
+    if (a.combos) {
+      doc.combos = {};
+      Object.keys(combo).forEach(function (t) { doc.combos[t] = botJson(combo[t], a.faces[0], comboChains[t], a.boons); });
+    }
+    process.stdout.write(JSON.stringify(canon(doc), null, 2) + '\n');
+  }
+}
+
+module.exports = {
+  runChain: runChain, applySet: applySet, parseSet: parseSet, parseArgs: parseArgs, makeBot: makeBot, makeScripted: makeScripted,
+  commitRecord: commitRecord, commitInput: commitInput, canon: canon, merge: merge, newStats: newStats, quantile: quantile, phaseCfg: phaseCfg,
+  BOT_NAMES: BOT_NAMES, BORED_AFTER: BORED_AFTER, MAX_PHASES: MAX_PHASES, SAMPLE: SAMPLE, PHASE_FIELDS: PHASE_FIELDS
+};
+if (require.main === module) main().catch(function (e) { console.error(e); process.exit(1); });
