@@ -10,9 +10,10 @@
 //
 // Steps: in-sync (a fresh build of src equals index.html once line endings are normalised), check (tools/check.js
 // on that build), check-docs-names (tools/check.js --docs: the name lint over every tracked .md), the suites as
-// concurrent child processes (FLOW_* and RIVAL_* variables removed from their environment), the corrupt section of test_flow in full mode at seeds 1-3, check_docs when the tree has it, the
-// sim digest (8 cells, compared exactly with tools/baseline.json), the seal trace (compared with baseline.json),
-// degeneracy bounds on the digest, then test_brain alone (it has a wall-clock assertion).
+// concurrent child processes (FLOW_* and RIVAL_* variables removed from their environment), the corrupt section
+// of test_flow in full mode at seeds 1-3, check_docs when the tree has it, the sim digest (8 cells, compared exactly
+// with tools/baseline.json), the seal trace (compared with baseline.json), degeneracy bounds on the digest, then
+// test_combat and test_brain one at a time (both have wall-clock assertions).
 //
 // KNOWN rows: a suite prints "KNOWN <id> <push>: <text>" for a known-open defect; the id must be registered in
 // tools/known.json for that suite, and a registered row its step no longer prints is a FAIL (stale). Any other
@@ -345,7 +346,6 @@ const SUITES = [
   { step: 'sealtrace', script: 'tools/test_flow.js', args: ['--quick'], env: { FLOW_SECTIONS: 'sealtrace' }, est: 15, seal: true },
   { step: 'test_rules', script: 'tools/test_rules.js', args: [], est: 10 },
   { step: 'lint_pure', script: 'tools/lint_pure.js', args: [], est: 6 },
-  { step: 'test_combat', script: 'tools/test_combat.js', args: ['--quick'], est: 6 },
   { step: 'test_scenes', script: 'tools/test_scenes.js', args: [], est: 3 },
   { step: 'check_text', script: 'tools/check_text.js', args: [], est: 1 },
   { step: 'test_audio', script: 'tools/test_audio.js', args: [], est: 1 },
@@ -355,9 +355,14 @@ const SUITES = [
 if (opt.full) SUITES.unshift({ step: 'test_flow-full', script: 'tools/test_flow.js', args: ['200'], est: 300 });
 const CELLS = [];
 for (const f of FACES) for (const s of STAKES) CELLS.push({ step: 'digest ' + cellKey(f, s), script: 'tools/sim.js', args: cellArgs(f, s), est: 3, weight: 2, digest: { face: f, stake: s } });
-const BRAIN = { step: 'test_brain', script: 'tools/test_brain.js', args: [], est: 8 };
+// Suites with wall-clock assertions (payoff() time, the brain's commit time) run after the pool, one at a time, so a
+// busy machine cannot fail them.
+const ALONE = [
+  { step: 'test_combat', script: 'tools/test_combat.js', args: ['--quick'], est: 6 },
+  { step: 'test_brain', script: 'tools/test_brain.js', args: [], est: 8 }
+];
 const SCRIPT_OF = {};
-SUITES.concat(CELLS, [BRAIN]).forEach(function (t) { SCRIPT_OF[t.step] = t.script; });
+SUITES.concat(CELLS, ALONE).forEach(function (t) { SCRIPT_OF[t.step] = t.script; });
 // Keep --only honest: a step missing from GROUPS could never be selected on its own.
 ['in-sync', 'check', 'bounds'].concat(Object.keys(SCRIPT_OF)).forEach(function (s) {
   if (!STEP_NAMES.has(s)) addRow('internal', 'FAIL', 0, 'step ' + s + ' is not listed in GROUPS in tools/test_all.js (--only could not select it)');
@@ -622,10 +627,11 @@ function scanLines(step, stdout, found, malformed) {
   tasks.sort(function (a, b) { return b.est - a.est; });
   const results = await pool(tasks, opt.parallel);
   tasks.forEach(function (t, i) { steps.push({ task: t, r: results[i] }); });
-  // 3. test_brain alone
-  if (!opt.writeBaseline && wanted('test_brain')) {
-    if (!present(BRAIN)) missingRow(BRAIN);
-    else { const r = await runChild(Object.assign({ weight: 1 }, BRAIN)); steps.push({ task: BRAIN, r: r }); }
+  // 3. the wall-clock suites, one at a time
+  for (const t of ALONE) {
+    if (opt.writeBaseline || !wanted(t.step)) continue;
+    if (!present(t)) missingRow(t);
+    else { const r = await runChild(Object.assign({ weight: 1 }, t)); steps.push({ task: t, r: r }); }
   }
 
   // ---- evaluate
