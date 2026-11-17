@@ -2,7 +2,7 @@
 
 `tools/playtest/play.js` lets a playtester play the real game one command at a time, as text. It loads the game's own modules from `src/` in place (never a copy) and replays the scenes' call order, so the Rival, the rules, the drafts and the lines are the game's. A playtester sees what the phone screen would show, plus a log that the client adds.
 
-It exists for persona playtests: twelve play styles (`personas.md`) that play fresh or existing profiles and report back in one fixed shape. The roadmap (section 9.3) plans a re-playtest after every milestone.
+It exists for persona playtests: twelve play styles (`personas.md`) that play fresh or existing profiles and report back in one fixed shape. A re-playtest is planned after every milestone.
 
 ## Running it
 
@@ -85,7 +85,7 @@ tools/playtest/profiles/<name>/
 3. For each persona, assemble the prompt: the "Shared rules" section of `personas.md`, then that persona's section, then `Your profile: <key>`.
 4. Collect the reports and the journals. Compare the ratings table with the previous playtest.
 
-The re-playtest plan, per milestone (from the roadmap, section 9.3): after M1, all twelve personas, mixing fresh and existing profiles; after M2, newcomer, commuter, lore and chaos on fresh profiles; after M3, returner, completionist and veteran, plus chaos and commuter; after M4, breaker, bossrush and veteran at Lightless; after M5 to M7, completionist and bossrush. The roadmap also lists the targets for each round and the automatic transcript checks.
+The re-playtest plan, per milestone: after M1, all twelve personas, mixing fresh and existing profiles; after M2, newcomer, commuter, lore and chaos on fresh profiles; after M3, returner, completionist and veteran, plus chaos and commuter; after M4, breaker, bossrush and veteran at Lightless; after M5 to M7, completionist and bossrush.
 
 ## The self-test
 

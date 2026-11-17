@@ -25,7 +25,8 @@
 //   F11 ruling 5 and the INTERFACES.md payoff line say that intel.honest, intel.pred and intel.coin are not priced
 //       and intel.called is; neither doc still calls the payoff complete
 //   F12 every credit in a tracked .md (any case or spacing of its first two words) reads exactly
-//       "Developed by tangoSHELL · 2026", with nothing appended after the year
+//       "Developed by tangoSHELL · 2026", then the end of the line, or closing marks (. " * ) | < ` ') and then
+//       whitespace, the end or , ; : (a comma after a closing quote); nothing is glued to the year
 // WARN tier: a WARN line, exit 0 (prose drift to fix).
 //   F5  DESIGN section citations in src/ and tools/ resolve to a DESIGN.md heading
 //   F8  BALANCE.md section 2 (final constants) and 8c (face health) match R.Run
@@ -479,8 +480,10 @@ guard('F12', function () {
     for (const m of t.matchAll(/developed(?:\s|&nbsp;| )+by(?![A-Za-z0-9])/gi)) {
       n++;
       const s = t.slice(m.index, m.index + CREDIT.length + 1);
-      // The exact credit, then only the end of the text or line or one closing mark, so nothing can be appended.
-      if (s.slice(0, CREDIT.length) !== CREDIT || !/^(?:$|[\r\n."*)|<`'])/.test(s.slice(CREDIT.length))) {
+      // The exact credit, then the end of the text or line, or closing marks followed by whitespace, the end, or
+      // prose punctuation (a comma after a closing quote). Text or a comma glued to the year fails.
+      const after = t.slice(m.index + CREDIT.length, m.index + CREDIT.length + 8);
+      if (s.slice(0, CREDIT.length) !== CREDIT || !/^(?:$|[\r\n]|[."*)|<`']+(?:\s|$|[,;:]))/.test(after)) {
         bad.push(f + ':' + (t.slice(0, m.index).split('\n').length) + ' "' + t.slice(m.index, m.index + 40).split(/\r?\n/)[0] + '"');
       }
     }

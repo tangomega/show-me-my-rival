@@ -30,7 +30,7 @@ Rulings keep their numbers and are listed in numeric order. A number that has no
 17. *Reserved, lands in P1.2.* Topic: the Mirror Rule. Not yet a ruling.
 18. *Reserved, lands in P1.2.* Topic: phase length. Not yet a ruling.
 19. **The seed fixes the table, never the dice or the mind.**
-   - (a) No code, screen or exported value may contain, or let anyone derive, `run.pending`, `G.rng`/`G.crng`/`G.coinRng` state, or any value derived from them. A content seed (`run.seed`, and the `run.rngState` stream it starts) may be public in a seeded mode, because it fixes only content (clause c).
+   - (a) No code, screen or exported value may contain, or let anyone derive, `run.pending`, `G.rng`/`G.crng` state (or any later private stream, such as a separate stream for the coin), or any value derived from them. A content seed (`run.seed`, and the `run.rngState` stream it starts) may be public in a seeded mode, because it fixes only content (clause c).
    - (b) The Rival's dice always come from private device entropy, never from a shown seed.
    - (c) A seed may fix only content shown before or between duels: face, stake, relic, the offer stream, and (in a future table mode) a versioned table pool.
    - (d) Seeded or chosen tables earn nothing: no unlocks, lights or faces, no change to `bosses.last`, no `memory.runs`. A chosen table is a run whose rules or content beyond the face were set by the player (Rehearsal, table codes). A normal run with a chosen face (P7.1) counts as a normal run except that it lights no candle and leaves `bosses.last` and `bosses.owed` untouched. The single-attempt date altar, capped to content the player has already earned, counts as a normal run (with the face-record limits set when that mode is built).

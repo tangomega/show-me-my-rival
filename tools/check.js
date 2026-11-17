@@ -294,15 +294,16 @@ function checkFile(file, shown, docs) {
   }
 
   // ---------------------------------------------------------------- credit lint
-  // (a) Every "Developed by" (any case; the two words split by any run of whitespace, a no-break space or its entity or
-  //     escape) is followed by exactly " tangoSHELL", a space, the middle dot (the character itself, a JS escape or an
-  //     HTML entity), " 2026", then a character that is not a letter or digit, or the end.
+  // (a) Every "Developed by" (found in any case, the two words split by any run of whitespace, a no-break space or its
+  //     entity or escape) must itself read exactly "Developed by" and be followed by exactly " tangoSHELL", a space, the
+  //     middle dot (the character itself, a JS escape or an HTML entity), " 2026", then a character that is not a letter
+  //     or digit, or the end.
   const devRe = /developed(?:\s|&nbsp;|&#160;|&#xa0;|\\u00a0|\\xa0|\\u0020|\\x20|\\n|\\r|\\t)+by(?![A-Za-z0-9])/gi;
   const CREDIT_TAIL = /^ tangoSHELL (?:\u00b7|\\u00[bB]7|\\x[bB]7|&middot;|&#183;|&#x[bB]7;) 2026(?![A-Za-z0-9])/;
   let dm, devN = 0;
   while ((dm = devRe.exec(html))) {
     devN++;
-    if (!CREDIT_TAIL.test(html.slice(dm.index + dm[0].length, dm.index + dm[0].length + 40))) {
+    if (dm[0] !== 'Developed by' || !CREDIT_TAIL.test(html.slice(dm.index + dm[0].length, dm.index + dm[0].length + 40))) {
       fails.push('credit must read exactly "' + CREDIT + '" at ' + where(dm.index));
     }
   }
@@ -387,11 +388,12 @@ if (docsMode) {
     if (ls && ls.status === 0) docs = ls.stdout.split('\0').filter(Boolean).map(f => path.resolve(root, f));
     else if (inRepo) { console.error('check: git ls-files failed; name the files instead'); process.exit(1); }
     else {
-      const skip = new Set(['.git', 'node_modules', '.claude', path.join('tools', 'out'), path.join('tools', 'playtest', 'profiles')]);
+      // Dot-folders (tool and editor settings), dependencies and the git-ignored output folders hold no docs.
+      const skip = new Set(['node_modules', path.join('tools', 'out'), path.join('tools', 'playtest', 'profiles')]);
       (function walk(dir) {
         for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))) {
           const full = path.join(dir, e.name), rel = path.relative(root, full);
-          if (e.isDirectory()) { if (!skip.has(rel)) walk(full); }
+          if (e.isDirectory()) { if (e.name[0] !== '.' && !skip.has(rel)) walk(full); }
           else if (e.isFile() && /\.md$/i.test(e.name)) docs.push(full);
         }
       })(root);
