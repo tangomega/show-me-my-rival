@@ -26,6 +26,30 @@ A new session can continue from this file plus `DESIGN.md` (what the game is; se
 | 5. Polish | two passes done (see below) |
 | 6. README, final build | done |
 | 7. Deploy to GitHub Pages | done — live at https://tangomega.github.io/show-me-my-rival/, served from `main` / root of https://github.com/tangomega/show-me-my-rival. Pushing to `main` redeploys. |
+| 8. Milestone 1, the truth pass | in progress: see the handoff below |
+
+## Milestone 1 handoff (2026-11-16)
+
+**Landed (live on `main`, 2026-11-16, each on its own owner yes and tagged in git):**
+- P1.0, tag `m1-p1.0`, ending at `6055d4d`: P1.0's tools in seven commits (the release gate `tools/test_all.js` with `tools/known.json` and `tools/baseline.json`, the deterministic sim, `lint_pure`, the `check.js` size, credit and name lint, the fairness tests, the rule lint, the moved scene and text checks, the persona text client), then the exact credit in `src/shell.html` with the docs name check (`check.js --docs`), then the docs pass (`DESIGN.md` section 0 and rulings 14, 19 and 20, the fairness contract, `tools/check_docs.js`, `BALANCE.md` §8d), then a gate fix that runs `test_combat`, like `test_brain`, alone after the pool because of its wall-clock assertion, then the review fixes (exact-case credit check, no pointers into the unpublished plan). `index.html` changes only by the credit line.
+- P1.1, tag `m1-p1.1`, stacked on the above: save train 0 (`ec07a73`), then this handoff. It makes the brain reload-exact and adds the stale-tab guard (a tab that finds itself stale reboots before it shows any Rival information it could not save: a stance, a resolve, a Keyhole glimpse), the high-water keys, parked runs, the unknown-face redraw, the old duel-7 rebuild and golden saves from three commits. The sim baseline is re-recorded under BASELINE CHANGED; the paired tables are in `BALANCE.md` §8e (headline run win moves by at most 2.3 points, 7+ hit duels by at most 0.24, lock stays at or under 0.02%, every final-duel figure that has a band inside it; combo 8's uplift moves from +12.3 to +16.2, see `BALANCE.md` §4).
+- **Never revert the live game past train 0** (the P1.1 commit). From there on, saves carry a generation key and `run.req`, and the brain is rounded on every write.
+
+**Left:**
+- Every later Milestone 1 push ships with the milestone, on one owner yes (O1), after `node tools/test_all.js --full`, and is tagged in git after it lands.
+- Next train: P1.2, rules that lied. Its checkpoint needs six owner decisions (O5, O6, O8 to O11): the coin contract, the single read definition with its read_25 timing, how far The Hours may move, the dominance invariant in test_combat, The Reflection's health, and the Mirror Rule.
+
+**Red:** nothing. `node tools/test_all.js` has 0 FAIL at both tags. Rows that print KNOWN, each with its fixing push in `tools/known.json` (P1.0 has a seventh, the old duel-7 save, which P1.1 fixes):
+
+| Known row | Fixed in |
+|---|---|
+| Liar's Coin stamps every final-duel phase | P1.2 |
+| Mirror phases call at seven lights | P1.2 |
+| The Unsaid calls with no card | P1.3 |
+| Fresh-profile plural and history lines | P1.3 |
+| Pause-ending tap picks a move, pointer and key (two rows) | P1.6 |
+
+The owner's Milestone 1 decisions and sign-offs are in the decisions log below.
 
 ## After ship
 
